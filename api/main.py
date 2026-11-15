@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.15.1"
+API_VERSION = "2026.11.15.2"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -30,12 +30,42 @@ autopilot = None
 # eligible symbol in each Binance market has been analyzed.
 scan_status = {
     "running": False,
-    "futures": {"last_batch": None, "batches": 0, "cycles_completed": 0},
-    "spot": {"last_batch": None, "batches": 0, "cycles_completed": 0},
+    "futures": {
+        "last_batch": None, "batches": 0, "cycles_completed": 0,
+        "phase": "waiting", "current_symbol": None,
+        "scanned_in_batch": 0, "universe_total": None,
+        "batch_started_at": None,
+    },
+    "spot": {
+        "last_batch": None, "batches": 0, "cycles_completed": 0,
+        "phase": "waiting", "current_symbol": None,
+        "scanned_in_batch": 0, "universe_total": None,
+        "batch_started_at": None,
+    },
     "last_error": None,
     "updated_at": None,
 }
 scan_status_lock = threading.RLock()
+
+
+def record_scan_progress(domain, details):
+    details = details if isinstance(details, dict) else {}
+    with scan_status_lock:
+        current = scan_status[domain]
+        for key in ("phase", "current_symbol", "scanned_in_batch", "universe_total"):
+            if key in details:
+                current[key] = details[key]
+        scan_status["updated_at"] = time.time()
+
+    completed = int(details.get("scanned_in_batch", 0) or 0)
+    total = int(details.get("universe_total", 0) or 0)
+    if details.get("phase") == "symbol_complete" and (
+        completed == 1 or completed % 5 == 0 or completed == total
+    ):
+        print(
+            "[SCAN] %s progress: %s/%s completed; current=%s"
+            % (domain.upper(), completed, total, details.get("current_symbol"))
+        )
 
 
 def continuous_scan_worker():
@@ -45,11 +75,25 @@ def continuous_scan_worker():
     print("[SCAN] Continuous Futures + Spot scanner started (analysis only)")
     while True:
         for domain in ("futures", "spot"):
+            with scan_status_lock:
+                scan_status[domain].update({
+                    "phase": "loading_universe",
+                    "current_symbol": None,
+                    "scanned_in_batch": 0,
+                    "universe_total": None,
+                    "batch_started_at": time.time(),
+                })
+                scan_status["updated_at"] = time.time()
+            print("[SCAN] %s batch starting" % domain.upper())
             try:
                 result = (
-                    coordinator.scan_futures()
+                    coordinator.scan_futures(
+                        progress_callback=lambda details: record_scan_progress(domain, details)
+                    )
                     if domain == "futures"
-                    else coordinator.scan_spot()
+                    else coordinator.scan_spot(
+                        progress_callback=lambda details: record_scan_progress(domain, details)
+                    )
                 )
                 with scan_status_lock:
                     current = scan_status[domain]
@@ -76,6 +120,10 @@ def continuous_scan_worker():
                         current["batches"] += 1
                         if (result.get("scan") or {}).get("cycle_complete"):
                             current["cycles_completed"] += 1
+                    current["phase"] = "idle" if result.get("success") else "error"
+                    current["current_symbol"] = None
+                    current["scanned_in_batch"] = int(result.get("scanned", 0) or 0)
+                    current["universe_total"] = (result.get("scan") or {}).get("universe_total")
                     scan_status["last_error"] = None if result.get("success") else {
                         "domain": domain, "reason": result.get("reason"),
                     }
@@ -93,6 +141,8 @@ def continuous_scan_worker():
                 )
             except Exception as error:
                 with scan_status_lock:
+                    scan_status[domain]["phase"] = "error"
+                    scan_status[domain]["current_symbol"] = None
                     scan_status["last_error"] = {
                         "domain": domain, "reason": str(error),
                     }
