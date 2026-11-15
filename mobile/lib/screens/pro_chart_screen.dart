@@ -735,7 +735,7 @@ class _AgentSubmissionScreenState extends State<AgentSubmissionScreen> {
   Widget build(BuildContext context) {
     final status = '${_result == null ? 'PROCESSING' : (_result!['decision_status'] ?? (_result!['opened'] == true ? 'APPROVED' : 'REJECTED'))}'.toUpperCase();
     final approved = status == 'APPROVED';
-    final waiting = status == 'WAIT' || status == 'PROCESSING';
+    final waiting = status == 'WAIT' || status == 'PROCESSING' || status == 'QUEUED';
     final decisionColor = approved ? _up : waiting ? const Color(0xFFFFC857) : _down;
     final direction = _result?['signal'] is Map
         ? ((_result!['signal'] as Map)['direction'] ?? '—')
@@ -830,7 +830,7 @@ class _AgentSubmissionScreenState extends State<AgentSubmissionScreen> {
               Container(
                 padding: const EdgeInsets.all(13),
                 decoration: BoxDecoration(color: widget.panel, borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: (_error != null ? const Color(0xFFFFC857) : _result == null ? const Color(0xFF4287F5) : (_result!['decision_status'] == 'APPROVED' ? _up : _down)).withOpacity(.45))),
+                  border: Border.all(color: (_error != null ? const Color(0xFFFFC857) : _result == null ? const Color(0xFF4287F5) : (decisionColor)).withOpacity(.45))),
                 child: Row(children: [
                   if (_result == null && _error == null && _sending)
                     const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
@@ -843,7 +843,7 @@ class _AgentSubmissionScreenState extends State<AgentSubmissionScreen> {
                     ),
                   const SizedBox(width: 10),
                   Expanded(child: Text(
-                    '${_error != null ? _error! : _result != null ? t('وصل قرار الوكيل.', 'Agent decision received.') : _requestReceived ? t('تم استلام الطلب من الخادم وإرساله للوكيل المختص. يجري التحليل الآن.', 'Server confirmed receipt and forwarded the request to the selected agent. Analysis is running.') : t('جارٍ إرسال الطلب إلى الخادم...', 'Sending request to server...')}'
+                    '${_error != null ? _error! : _result != null ? (_result!['decision_status'] == 'QUEUED' ? t('وافق الوكيل على الإعداد؛ الصفقة تنتظر افتتاح شمعة 5 دقائق التالية.', 'Agent approved the setup; entry is queued for the next 5-minute candle open.') : t('وصل قرار الوكيل.', 'Agent decision received.')) : _requestReceived ? t('تم استلام الطلب من الخادم وإرساله للوكيل المختص. يجري التحليل الآن.', 'Server confirmed receipt and forwarded the request to the selected agent. Analysis is running.') : t('جارٍ إرسال الطلب إلى الخادم...', 'Sending request to server...')}'
                     '${_requestId == null ? '' : '\\nRequest ID: $_requestId'}',
                     style: TextStyle(color: widget.text, fontSize: 12, height: 1.45))),
                 ]),
