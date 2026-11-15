@@ -475,6 +475,13 @@ class TradingCoordinator(SpotDemoMixin):
                 or "5m"
             )
             record["timeframe"] = str(timeframe).lower()
+            record["initial_stop_loss"] = record.get("stop_loss")
+            record["take_profit_mode"] = "TRAILING"
+            record["trailing_take_profit_enabled"] = True
+            record["trailing_no_fixed_target"] = True
+            record["trailing_take_profit_armed"] = False
+            record["trailing_stop_active"] = False
+            record["trailing_best_price"] = record.get("entry_price")
             context = {
                 "confidence": signal.get("confidence"),
                 "scores": signal.get("scores"),
@@ -734,14 +741,14 @@ class TradingCoordinator(SpotDemoMixin):
                 direction = str(record["direction"]).upper()
                 stop = Decimal(str(record["stop_loss"]))
                 tp1_done = bool(record.get("tp1_done"))
-                target = (
-                    None if record.get("trailing_stop_active")
-                    and record.get("trailing_no_fixed_target")
-                    else Decimal(str(
-                        record.get("take_profit_2") if tp1_done and record.get("take_profit_2")
-                        else record["take_profit"]
-                    ))
-                )
+                trailing_enabled = bool(record.get("trailing_take_profit_enabled", True))
+                trailing_armed = bool(record.get(
+                    "trailing_take_profit_armed", record.get("trailing_stop_active", False)
+                ))
+                target = None if trailing_enabled else Decimal(str(
+                    record.get("take_profit_2") if tp1_done and record.get("take_profit_2")
+                    else record["take_profit"]
+                ))
                 engine_position_id = record["engine_position_id"]
                 snapshot = dict(record)
 
@@ -755,7 +762,21 @@ class TradingCoordinator(SpotDemoMixin):
                     raise ValueError("Invalid DEMO exit quote")
 
                 trail_update = None
-                if snapshot.get("trailing_stop_active"):
+                entry_price = Decimal(str(snapshot.get("entry_price") or exit_price))
+                initial_stop = Decimal(str(
+                    snapshot.get("initial_stop_loss") or snapshot.get("stop_loss") or stop
+                ))
+                initial_risk = abs(entry_price - initial_stop)
+                if trailing_enabled and not trailing_armed and initial_risk > 0:
+                    activation = (
+                        entry_price + initial_risk if direction == "LONG"
+                        else entry_price - initial_risk
+                    )
+                    trailing_armed = (
+                        exit_price >= activation if direction == "LONG"
+                        else exit_price <= activation
+                    )
+                if trailing_enabled and trailing_armed:
                     try:
                         trail_frame = self.market_feed.fetch_candles(
                             "futures", symbol, "5m", limit=40, closed_only=True)
@@ -763,7 +784,14 @@ class TradingCoordinator(SpotDemoMixin):
                             trail_frame, direction, stop,
                             snapshot.get("trailing_best_price"), exit_price)
                         if trail_update:
-                            stop = Decimal(str(trail_update["stop"]))
+                            candidate = Decimal(str(trail_update["stop"]))
+                            # Once trailing profit is armed, never let its stop fall
+                            # back through entry (gross break-even protection).
+                            stop = (
+                                max(candidate, entry_price) if direction == "LONG"
+                                else min(candidate, entry_price)
+                            )
+                            trail_update["stop"] = float(stop)
                     except Exception as trail_error:
                         with self._demo_lock:
                             current = self.demo_positions.get(position_id)
@@ -818,6 +846,12 @@ class TradingCoordinator(SpotDemoMixin):
                             symbol, "FUTURES", exit_price, source="BINANCE"
                         )
                         current["last_checked_ms"] = int(time.time() * 1000)
+                        if trailing_enabled:
+                            current["take_profit_mode"] = "TRAILING"
+                            current["trailing_take_profit_enabled"] = True
+                            current["trailing_no_fixed_target"] = True
+                            current["trailing_take_profit_armed"] = bool(trailing_armed)
+                            current["trailing_stop_active"] = bool(trailing_armed)
                         if trail_update:
                             current["stop_loss"] = str(trail_update["stop"])
                             current["trailing_best_price"] = str(trail_update["best_price"])
