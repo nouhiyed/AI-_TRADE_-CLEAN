@@ -324,6 +324,14 @@ class APIHandler(BaseHTTPRequestHandler):
                         "success": False, "market": market, "symbol": symbol,
                         "reason": "No WebSocket candle is cached for this symbol",
                     }, 404)
+                stream_status = market_stream.status().get(market, {}) if market_stream else {}
+                event_age_ms = int(time.time() * 1000) - int(candle.get("event_time") or 0)
+                if not stream_status.get("connected") or event_age_ms < 0 or event_age_ms > 15000:
+                    return self.send_json({
+                        "success": False, "market": market, "symbol": symbol,
+                        "reason": "WebSocket candle is stale or stream is disconnected",
+                        "event_age_ms": event_age_ms,
+                    }, 503)
                 return self.send_json({"success": True, "market": market, **candle})
 
             if path == "/market/candles":
