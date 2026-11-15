@@ -717,18 +717,19 @@ class APIHandler(BaseHTTPRequestHandler):
 
             if path == "/demo/open":
                 domain = str(data.get("domain", "futures")).lower()
-                if domain == "spot":
-                    result = coordinator.request_demo_spot_trade(
-                        symbol=data["symbol"], domain=domain,
-                        risk_pct=data.get("risk_pct", 0.5))
-                else:
-                    result = coordinator.request_demo_futures_trade(
-                        symbol=data["symbol"],
-                        direction=data["direction"],
-                        risk_pct=data.get("risk_pct", 0.5),
-                        leverage=data.get("leverage", 1)
-                    )
-                return self.send_json(result, 200 if result.get("approved") else 400)
+                symbol = str(data.get("symbol", "")).upper()
+                if domain not in {"spot", "futures"} or not symbol:
+                    return self.send_json({
+                        "success": False, "queued": False,
+                        "reason": "Invalid domain or symbol",
+                    }, 400)
+                # Every new position must pass the V3 agent and wait for the
+                # next 5m candle open. No immediate market-order bypass exists.
+                signal = coordinator.last_signals.get(domain, {})
+                queued = autopilot.queue_manual_signal(domain, symbol, signal)
+                return self.send_json(
+                    queued, 202 if queued.get("success") else 400
+                )
 
             return self.send_json({"error": "Not found"}, 404)
 
@@ -787,4 +788,6 @@ if __name__ == "__main__":
     try:
         server.serve_forever()
     finally:
+        if market_stream is not None:
+            market_stream.stop()
         server.server_close()
