@@ -131,11 +131,13 @@ class Autopilot:
                         for domain, stats in self._analysis_stats.items()}
         for domain in ("futures", "spot"):
             analysis[domain]["agent_instances"] = self._analysis_agents_created[domain]
+        writer_threads = getattr(self._event_executor, "_threads", set())
         analysis["execution_writer"] = {
             "workers": 1,
             "queue_depth": self._event_executor._work_queue.qsize(),
-            "alive": any(thread.is_alive()
-                         for thread in getattr(self._event_executor, "_threads", set())),
+            "alive": not getattr(self._event_executor, "_shutdown", False)
+                     and (not writer_threads or any(thread.is_alive()
+                                                    for thread in writer_threads)),
         }
         return {"config": dict(self.config), "last_run": self.last_run,
                 "last_result": self.last_result,
