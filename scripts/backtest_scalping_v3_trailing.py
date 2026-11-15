@@ -175,7 +175,7 @@ def build_signals(raw,market):
     return one
 
 def simulate(market,symbol,raw):
-    sig=build_signals(raw,market).reset_index()
+    sig=build_signals(raw,market).rename_axis("dt").reset_index()
     # 5m candles are formed from data strictly before the current 1m candle.
     five=resample(raw,"5min")[["high","low","close"]]
     trades=[]; active=None; fee=FEE[market]; cost=2*(fee+ADVERSE)
