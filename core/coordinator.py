@@ -1044,7 +1044,9 @@ class TradingCoordinator(SpotDemoMixin):
         # overlapping autopilot scan cannot replace it between analysis/execution.
         signal = signal_override if isinstance(signal_override, dict) else self.last_signals.get("futures", {})
         if (entry_reference_price is None
-                or signal.get("entry_origin") not in {"AUTOPILOT_WS_5M", "MANUAL_AGENT_WS_5M"}):
+                or signal.get("entry_origin") not in {"AUTOPILOT_WS_5M", "MANUAL_AGENT_WS_5M"}
+                or int(signal.get("entry_open_time") or 0) <= 0
+                or int(signal.get("entry_open_time") or 0) % 300000 != 0):
             return {"approved": False, "reason": "All entries must pass the 5m WebSocket opening event"}
         if str(signal.get("symbol", "")).upper() != symbol:
             return {"approved": False, "reason": "Symbol does not match latest signal"}
