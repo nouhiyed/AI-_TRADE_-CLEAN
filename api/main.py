@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.12.1"
+API_VERSION = "2026.11.15.1"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -24,6 +24,73 @@ from core import performance
 # launcher must fail fast on Address already in use without opening SQLite.
 coordinator = None
 autopilot = None
+
+# Continuous market scanning is analysis-only. It never invokes the execution
+# engine or Autopilot and advances the persistent 20-symbol cursors until every
+# eligible symbol in each Binance market has been analyzed.
+scan_status = {
+    "running": False,
+    "futures": {"last_batch": None, "batches": 0, "cycles_completed": 0},
+    "spot": {"last_batch": None, "batches": 0, "cycles_completed": 0},
+    "last_error": None,
+    "updated_at": None,
+}
+scan_status_lock = threading.RLock()
+
+
+def continuous_scan_worker():
+    with scan_status_lock:
+        scan_status["running"] = True
+        scan_status["updated_at"] = time.time()
+    print("[SCAN] Continuous Futures + Spot scanner started (analysis only)")
+    while True:
+        for domain in ("futures", "spot"):
+            try:
+                result = (
+                    coordinator.scan_futures()
+                    if domain == "futures"
+                    else coordinator.scan_spot()
+                )
+                with scan_status_lock:
+                    current = scan_status[domain]
+                    current["last_batch"] = {
+                        "success": bool(result.get("success")),
+                        "scanned": int(result.get("scanned", 0) or 0),
+                        "actionable": int(result.get("actionable", 0) or 0),
+                        "scan": result.get("scan", {}),
+                        "errors": len(result.get("errors", {})),
+                        "reason": result.get("reason"),
+                        "completed_at": time.time(),
+                    }
+                    if result.get("success"):
+                        current["batches"] += 1
+                        if (result.get("scan") or {}).get("cycle_complete"):
+                            current["cycles_completed"] += 1
+                    scan_status["last_error"] = None if result.get("success") else {
+                        "domain": domain, "reason": result.get("reason"),
+                    }
+                    scan_status["updated_at"] = time.time()
+                print(
+                    "[SCAN] %s batch: %s/%s symbols, actionable=%s, cycle=%s, complete=%s"
+                    % (
+                        domain.upper(),
+                        (result.get("scan") or {}).get("batch_size", result.get("scanned", 0)),
+                        (result.get("scan") or {}).get("universe_total", "?"),
+                        result.get("actionable", 0),
+                        (result.get("scan") or {}).get("cycle", "?"),
+                        (result.get("scan") or {}).get("cycle_complete", False),
+                    )
+                )
+            except Exception as error:
+                with scan_status_lock:
+                    scan_status["last_error"] = {
+                        "domain": domain, "reason": str(error),
+                    }
+                    scan_status["updated_at"] = time.time()
+                print("[SCAN] %s scanner error: %s" % (domain.upper(), error))
+        # Brief pause between complete Futures+Spot batches. Each market keeps
+        # its own durable cursor, so the next pass resumes without restarting.
+        time.sleep(max(1.0, float(os.environ.get("SCAN_BATCH_PAUSE_SECONDS", "2"))))
 
 
 def initialize_runtime():
@@ -353,6 +420,10 @@ class APIHandler(BaseHTTPRequestHandler):
 
             if path == "/health":
                 return self.send_json({"ok": True, "mode": coordinator.mode, "api_version": API_VERSION})
+            if path == "/scan/status":
+                with scan_status_lock:
+                    snapshot = json.loads(json.dumps(scan_status))
+                return self.send_json(snapshot)
             if path == "/status":
                 return self.send_json({
                     "api_version": API_VERSION,
@@ -569,6 +640,11 @@ if __name__ == "__main__":
         daemon=True,
     )
     monitor_thread.start()
+    threading.Thread(
+        target=continuous_scan_worker,
+        name="continuous-market-scanner",
+        daemon=True,
+    ).start()
     threading.Thread(
         target=autopilot.run_forever,
         name="autopilot",
