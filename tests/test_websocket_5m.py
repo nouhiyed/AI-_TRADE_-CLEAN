@@ -31,7 +31,9 @@ class FakeCoordinator:
 
 
 def candle_frame(interval, rows=60, closed=True):
-    index = pd.date_range("2026-01-01", periods=rows, freq=interval, tz="UTC")
+    delta = pd.Timedelta(interval)
+    end = pd.Timestamp.now(tz="UTC").floor(interval) - delta
+    index = pd.date_range(end=end, periods=rows, freq=interval)
     frame = pd.DataFrame({
         "open_time": index,
         "open": [100.0] * rows,
@@ -87,6 +89,26 @@ class BinanceCandleCacheTests(unittest.TestCase):
         open_frame.iloc[-1, open_frame.columns.get_loc("is_closed")] = False
         self.stream._merge_frame("futures", "BTCUSDT", "5m", open_frame)
         self.assertIsNone(self.stream._snapshot("futures", "BTCUSDT"))
+
+    def test_snapshot_rejects_gaps_and_stale_candles(self):
+        for interval in ("5m", "15m", "1h"):
+            freq = {"5m": "5min", "15m": "15min", "1h": "1h"}[interval]
+            frame = candle_frame(freq)
+            frame.attrs["timeframe"] = interval
+            self.stream._merge_frame("futures", "ETHUSDT", interval, frame)
+        self.assertIsNotNone(self.stream._snapshot("futures", "ETHUSDT"))
+
+        gap = candle_frame("5min")
+        gap.attrs["timeframe"] = "5m"
+        gap.loc[gap.index[-1], "open_time"] += pd.Timedelta(minutes=5)
+        self.stream._merge_frame("futures", "ETHUSDT", "5m", gap)
+        self.assertIsNone(self.stream._snapshot("futures", "ETHUSDT"))
+
+        stale = candle_frame("5min")
+        stale.attrs["timeframe"] = "5m"
+        stale["close_time"] -= pd.Timedelta(hours=1)
+        self.stream._merge_frame("futures", "ETHUSDT", "5m", stale)
+        self.assertIsNone(self.stream._snapshot("futures", "ETHUSDT"))
 
     def test_first_update_only_counts_near_real_candle_open(self):
         opening = 1_800_000_000_000
