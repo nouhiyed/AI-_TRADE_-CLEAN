@@ -11,8 +11,13 @@ from core.orderbook import analyze_orderbook
 
 
 
-_BINANCE_REQUEST_LOCK = threading.Lock()
-_BINANCE_LAST_REQUEST_AT = 0.0
+# Spot and USD-M Futures have independent Binance API rate budgets.
+# Separate pacing prevents a busy market scanner from starving the other.
+_BINANCE_REQUEST_LOCKS = {
+    "spot": threading.Lock(),
+    "futures": threading.Lock(),
+}
+_BINANCE_LAST_REQUEST_AT = {"spot": 0.0, "futures": 0.0}
 _BINANCE_MIN_REQUEST_INTERVAL = 0.12
 
 
@@ -58,8 +63,6 @@ class BinanceMarketData:
         })
 
     def _request(self, market, endpoint, params):
-        global _BINANCE_LAST_REQUEST_AT
-
         market = market.lower()
         if market not in self.BASE_URLS:
             raise ValueError("Market must be spot or futures")
@@ -75,17 +78,17 @@ class BinanceMarketData:
                     failures.append("overall request time budget exhausted")
                     break
 
-                # One shared limiter covers all BinanceMarketData instances and both markets.
-                with _BINANCE_REQUEST_LOCK:
+                # Per-market pacing: Futures and Spot progress independently.
+                with _BINANCE_REQUEST_LOCKS[market]:
                     wait = _BINANCE_MIN_REQUEST_INTERVAL - (
-                        time.monotonic() - _BINANCE_LAST_REQUEST_AT
+                        time.monotonic() - _BINANCE_LAST_REQUEST_AT[market]
                     )
                     if wait > 0:
                         time.sleep(min(wait, remaining))
                     if time.monotonic() >= deadline:
                         failures.append("overall request time budget exhausted")
                         break
-                    _BINANCE_LAST_REQUEST_AT = time.monotonic()
+                    _BINANCE_LAST_REQUEST_AT[market] = time.monotonic()
 
                 try:
                     response = self.session.get(
