@@ -724,20 +724,13 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json(result, 200 if result.get("success") else 400)
 
             if path == "/demo/open":
-                domain = str(data.get("domain", "futures")).lower()
-                symbol = str(data.get("symbol", "")).upper()
-                if domain not in {"spot", "futures"} or not symbol:
-                    return self.send_json({
-                        "success": False, "queued": False,
-                        "reason": "Invalid domain or symbol",
-                    }, 400)
-                # Every new position must pass the V3 agent and wait for the
-                # next 5m candle open. No immediate market-order bypass exists.
-                signal = coordinator.last_signals.get(domain, {})
-                queued = autopilot.queue_manual_signal(domain, symbol, signal)
-                return self.send_json(
-                    queued, 202 if queued.get("success") else 400
-                )
+                # Retired compatibility endpoint: never open from a cached
+                # last-signal object. New entries must be analyzed through
+                # POST /agent/submit and consumed by the 5m WebSocket clock.
+                return self.send_json({
+                    "success": False, "queued": False,
+                    "reason": "Direct DEMO opening is disabled; submit the chart to its agent for a fresh 5m decision",
+                }, 410)
 
             return self.send_json({"error": "Not found"}, 404)
 
