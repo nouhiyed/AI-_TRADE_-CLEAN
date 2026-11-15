@@ -394,7 +394,7 @@ class SpotDemoMixin:
                     if reason is None:
                         if price <= stop:
                             reason = "TRAILING_STOP" if trailing_active else "STOP_LOSS"
-                        elif not trailing_active and price >= target:
+                        elif not trailing_active and target is not None and price >= target:
                             reason = "TAKE_PROFIT"
                     # No elapsed-time liquidation: price-based SL/TP or manual close only.
                     with self._demo_lock:
