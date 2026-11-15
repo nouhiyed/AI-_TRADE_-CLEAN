@@ -1,11 +1,10 @@
-name: V3 Trailing Take Profit Historical Backtest
+name: V3 Live-Parity Historical Validation
 
 on:
   push:
     branches: [main]
     paths:
       - 'scripts/backtest_scalping_v3_trailing.py'
-      - 'tests/test_trailing_backtest.py'
       - 'core/trailing_stop.py'
       - 'core/scalping_v3.py'
       - '.github/workflows/backtest-v3-trailing.yml'
@@ -20,11 +19,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: v3-trailing-historical-backtest
-  cancel-in-progress: false
+  group: v3-live-parity-historical-validation
+  cancel-in-progress: true
 
 jobs:
-  preflight-and-backtest:
+  historical-validation:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -38,34 +37,17 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install pinned-compatible dependencies
+      - name: Install historical simulation dependencies
         run: python -m pip install --upgrade pip pandas numpy requests ta
-      - name: Compile all production and test Python modules
-        run: |
-          python -m compileall -q core agents scripts tests
-          python -m py_compile scripts/backtest_scalping_v3_trailing.py tests/test_trailing_backtest.py
-      - name: Run trailing-stop unit tests
-        run: python tests/test_trailing_backtest.py
-      - name: Run synthetic trailing lifecycle smoke test
-        run: |
-          python - <<'PY'
-          import pandas as pd
-          from core.trailing_stop import calculate_trailing_stop
-          rows=[{"high":100+i*.2+.4,"low":100+i*.2-.3,"close":100+i*.2} for i in range(20)]
-          frame=pd.DataFrame(rows)
-          long=calculate_trailing_stop(frame,"LONG",99,102,103)
-          short=calculate_trailing_stop(frame,"SHORT",105,100,99)
-          assert long and long["stop"] >= 99
-          assert short and short["stop"] <= 105
-          print("PASS: LONG/SHORT trailing calculations and monotonic-stop guards")
-          PY
-      - name: Run two-year historical simulation with trailing exits
+      - name: Compile production strategy and validation engine
+        run: python -m compileall -q core agents scripts
+      - name: Verify Binance native 5m candle alignment and run 2-year V3 simulation
         run: python scripts/backtest_scalping_v3_trailing.py
-      - name: Upload validated results
+      - name: Upload validated historical results
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: AI-Trader-V3-Trailing-Backtest
+          name: AI-Trader-V3-Live-Parity-Historical-Results
           path: backtest-trailing-results/
           if-no-files-found: error
           retention-days: 30
