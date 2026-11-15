@@ -205,6 +205,9 @@ class ApiService {
         closedOnly ? '/journal?closed=1' : '/journal?limit=$limit',
       );
 
+  static Future<Map<String, dynamic>> status() =>
+      _request('GET', '/status');
+
   static Future<Map<String, dynamic>> autopilot() =>
       _request('GET', '/autopilot');
 
