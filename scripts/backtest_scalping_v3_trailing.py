@@ -11,7 +11,7 @@ import pandas as pd
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
-from core.trailing_stop import calculate_trailing_stop
+from core.trailing_stop import calculate_trailing_stop, apply_cost_aware_trailing_floor
 
 SYMBOLS=[x.strip().upper() for x in os.getenv("SYMBOLS","BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT").split(",") if x.strip()]
 DAYS=int(os.getenv("DAYS","730"))
@@ -200,8 +200,9 @@ def simulate(market,symbol,raw):
                             active["best_price"],price)
                         if update:
                             candidate=float(update["stop"])
-                            active["stop"]=max(candidate,entry) if side=="LONG" else min(candidate,entry)
                             active["best_price"]=float(update["best_price"])
+                            active["stop"]=apply_cost_aware_trailing_floor(
+                                candidate, entry, side, active["best_price"], FEE[market], ADVERSE)
                             active["trail_updates"]+=1
                 # A newly calculated stop becomes active from the next 1m candle.
                 # This avoids look-ahead fills from lows/highs that may have occurred
