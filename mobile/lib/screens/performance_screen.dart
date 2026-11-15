@@ -37,6 +37,8 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
   bool _autoSaving = false;
   String? _error;
   Timer? _timer;
+  Timer? _scanTimer;
+  Map<String, dynamic> _scan = {};
 
   String t(String ar, String en) => widget.english ? en : ar;
 
@@ -46,16 +48,30 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
     // Autopilot state is safety-critical: only render the server-confirmed value.
     _load();
     _timer = Timer.periodic(const Duration(seconds: 10), (_) => _load());
+    _loadScan();
+    _scanTimer = Timer.periodic(const Duration(seconds: 3), (_) => _loadScan());
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _scanTimer?.cancel();
     super.dispose();
   }
 
   Map<String, dynamic> _map(dynamic v) =>
       v is Map ? Map<String, dynamic>.from(v) : <String, dynamic>{};
+
+  Future<void> _loadScan() async {
+    try {
+      final status = await ApiService.status();
+      if (!mounted) return;
+      final scan = _map(status['scan']);
+      setState(() => _scan = scan);
+    } catch (_) {
+      // Keep the last scan snapshot; the main API status owns connectivity UI.
+    }
+  }
 
   Future<void> _load() async {
     if (_busy) return;
@@ -169,6 +185,50 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
   String _n(dynamic v, [int digits = 2]) {
     final d = double.tryParse('$v');
     return d == null ? '—' : d.toStringAsFixed(digits);
+  }
+
+  Widget _liveScanPanel() {
+    final futures = _map(_scan['futures']);
+    final spot = _map(_scan['spot']);
+    Widget marketRow(String name, Map<String, dynamic> data) {
+      final done = int.tryParse('${data['scanned_in_batch'] ?? 0}') ?? 0;
+      final total = int.tryParse('${data['universe_total'] ?? 0}') ?? 0;
+      final workers = int.tryParse('${data['active_workers'] ?? 0}') ?? 0;
+      final phase = '${data['phase'] ?? 'waiting'}';
+      final symbol = '${data['current_symbol'] ?? '—'}';
+      final batch = _map(data['last_batch']);
+      final actionable = batch['actionable'];
+      final progress = total > 0 ? (done / total).clamp(0.0, 1.0) : 0.0;
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: Text(name, style: TextStyle(color: widget.text, fontWeight: FontWeight.bold, fontSize: 11))),
+            Text(total > 0 ? '$done/$total' : phase, style: TextStyle(color: widget.muted, fontSize: 10)),
+            if (workers > 0) Text(' · $workers workers', style: TextStyle(color: widget.muted, fontSize: 10)),
+          ]),
+          const SizedBox(height: 4),
+          LinearProgressIndicator(value: total > 0 ? progress : null, minHeight: 5),
+          const SizedBox(height: 3),
+          Text(
+            '${t('الحالة', 'Phase')}: $phase · ${t('العملة', 'Symbol')}: $symbol'
+            '${actionable == null ? '' : ' · ${t('فرص', 'Opportunities')}: $actionable'}',
+            style: TextStyle(color: widget.muted, fontSize: 10),
+            maxLines: 2, overflow: TextOverflow.ellipsis,
+          ),
+        ]),
+      );
+    }
+    if (futures.isEmpty && spot.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 10, bottom: 4),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(t('نشاط الفحص المباشر', 'LIVE SCAN ACTIVITY'),
+            style: TextStyle(color: widget.text, fontWeight: FontWeight.w900, fontSize: 11)),
+        marketRow('FUTURES', futures),
+        marketRow('SPOT', spot),
+      ]),
+    );
   }
 
   Widget _autopilotCard() {
@@ -288,6 +348,7 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
             ),
           ],
         ),
+        _liveScanPanel(),
         if (last.isNotEmpty) ...[
           const SizedBox(height: 9),
           Text(
