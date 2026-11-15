@@ -1513,6 +1513,13 @@ class TradingCoordinator(SpotDemoMixin):
                 rejection_samples.append({"symbol": symbol, "reason": key})
 
         processed = 0
+        if callable(progress_callback):
+            progress_callback({
+                "phase": "analyzing",
+                "current_symbol": "parallel workers starting",
+                "scanned_in_batch": 0,
+                "universe_total": len(universe),
+            })
         # Binance request pacing is isolated per market; concurrent
         # symbol analysis overlaps network latency without burst flooding.
         def analyze_scan_symbol(scan_item):
@@ -1703,6 +1710,13 @@ class TradingCoordinator(SpotDemoMixin):
                 })
 
         processed = 0
+        if callable(progress_callback):
+            progress_callback({
+                "phase": "analyzing",
+                "current_symbol": "parallel workers starting",
+                "scanned_in_batch": 0,
+                "universe_total": len(universe),
+            })
         # Keep bounded concurrency with independent Spot API pacing.
         def analyze_scan_symbol(scan_item):
             return self.analyze_live(scan_item["symbol"], domains=["spot"])
