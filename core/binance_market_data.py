@@ -1,5 +1,6 @@
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 
@@ -340,25 +341,39 @@ class BinanceMarketData:
         candles = {}
         errors = {}
 
-        for interval in timeframes:
-            try:
-                candles[interval] = self.fetch_candles(
-                    market, symbol, interval, candle_limit
-                )
-            except Exception as error:
-                errors[interval] = str(error)
-
-        try:
-            orderbook = self.fetch_orderbook(
-                market, symbol, orderbook_limit
-            )
-        except Exception as error:
-            orderbook = {
-                "available": False,
-                "error": str(error),
-                "market": market,
-                "symbol": symbol.upper(),
+        # Fetch all required intervals and the order book concurrently.
+        # The global Binance limiter still spaces request starts, but network
+        # latency is overlapped instead of serializing every response.
+        tasks = list(timeframes)
+        with ThreadPoolExecutor(max_workers=max(1, min(6, len(tasks) + 1))) as pool:
+            futures = {
+                pool.submit(
+                    self.fetch_candles, market, symbol, interval, candle_limit
+                ): ("candle", interval)
+                for interval in tasks
             }
+            futures[pool.submit(
+                self.fetch_orderbook, market, symbol, orderbook_limit
+            )] = ("orderbook", None)
+
+            for future in as_completed(futures):
+                kind, interval = futures[future]
+                try:
+                    value = future.result()
+                    if kind == "candle":
+                        candles[interval] = value
+                    else:
+                        orderbook = value
+                except Exception as error:
+                    if kind == "candle":
+                        errors[interval] = str(error)
+                    else:
+                        orderbook = {
+                            "available": False,
+                            "error": str(error),
+                            "market": market,
+                            "symbol": symbol.upper(),
+                        }
 
         return {
             "market": market,
