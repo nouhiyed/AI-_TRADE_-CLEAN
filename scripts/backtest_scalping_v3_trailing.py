@@ -115,14 +115,31 @@ def indicators(x):
     return x
 
 def resample(raw,rule):
-    x=raw.set_index("dt").resample(rule,label="right",closed="right").agg(
+    # Binance timestamps 1m candles by OPEN time. Aggregate [open, close)
+    # windows, then shift the index to the actual higher-timeframe CLOSE time.
+    x=raw.set_index("dt").resample(rule,label="left",closed="left",origin="start_day").agg(
         {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
-    return indicators(x)
+    x=indicators(x)
+    x.index=x.index+pd.Timedelta(rule)
+    return x
 
 def align(one,frame,prefix):
-    cols=["close","EMA_21","EMA_50","EMA_200","ATR","ADX"]; right=frame[[c for c in cols if c in frame]].copy()
+    # A 1m row becomes available at its CLOSE (open_time + 1m).
+    # Higher-timeframe rows are indexed by their CLOSE time. This prevents
+    # using an unfinished 5m/15m/1h/4h candle and removes the one-minute shift.
+    cols=["close","EMA_21","EMA_50","EMA_200","ATR","ADX"]
+    right=frame[[c for c in cols if c in frame]].copy()
     right.columns=[prefix+c for c in right.columns]
-    return pd.merge_asof(one.sort_index(),right.sort_index(),left_index=True,right_index=True,direction="backward")
+    left=one.copy()
+    left["__signal_dt"]=left.index
+    left["__available_at"]=left.index+pd.Timedelta(minutes=1)
+    right["__htf_close_at"]=right.index
+    merged=pd.merge_asof(
+        left.reset_index(drop=True).sort_values("__available_at"),
+        right.reset_index(drop=True).sort_values("__htf_close_at"),
+        left_on="__available_at",right_on="__htf_close_at",direction="backward")
+    merged.index=pd.DatetimeIndex(merged.pop("__signal_dt"))
+    return merged.drop(columns=["__available_at","__htf_close_at"])
 
 def build_signals(raw,market):
     one=indicators(raw.set_index("dt")); five=resample(raw,"5min"); fifteen=resample(raw,"15min")
@@ -132,7 +149,7 @@ def build_signals(raw,market):
     one["body"]=(one.close-one.open).abs()/one.ATR
     one["vr"]=one.volume/one.volume.shift(1).rolling(30).mean()
     one["prior_high"]=one.high.shift(1).rolling(10).max(); one["prior_low"]=one.low.shift(1).rolling(10).min()
-    bull=(one["5_close"]>one["5_EMA_50"])&((one["5_close"]>=one["5_EMA_21"])|(one["15_EMA_21"]>one["15_EMA_50"]))
+    bull=(one["15_close"]>one["15_EMA_50"])&((one["5_close"]>=one["5_EMA_21"])|(one["15_EMA_21"]>one["15_EMA_50"]))
     bear=(one["15_close"]<one["15_EMA_50"])&((one["5_close"]<=one["5_EMA_21"])|(one["15_EMA_21"]<one["15_EMA_50"]))
     pl=bull&(one.low<=one.EMA_20+.18*one.ATR)&(one.close>one.EMA_9)&(one.close>one.open)&one.RSI.between(42,69)&(one.MACD_hist>=one.MACD_hist.shift(1))&(one.candle_loc>=.55)&(one.body>=.08)&(one.vr>=.72)
     ps=bear&(one.high>=one.EMA_20-.18*one.ATR)&(one.close<one.EMA_9)&(one.close<one.open)&one.RSI.between(31,58)&(one.MACD_hist<=one.MACD_hist.shift(1))&(one.candle_loc<=.45)&(one.body>=.08)&(one.vr>=.72)
@@ -160,8 +177,7 @@ def build_signals(raw,market):
 def simulate(market,symbol,raw):
     sig=build_signals(raw,market).reset_index()
     # 5m candles are formed from data strictly before the current 1m candle.
-    five=raw.set_index("dt").resample("5min",label="right",closed="right").agg(
-        {"open":"first","high":"max","low":"min","close":"last"}).dropna()
+    five=resample(raw,"5min")[["high","low","close"]]
     trades=[]; active=None; fee=FEE[market]; cost=2*(fee+ADVERSE)
     for i in range(250,len(sig)-1):
         row=sig.iloc[i]; nxt=sig.iloc[i+1]
@@ -178,7 +194,7 @@ def simulate(market,symbol,raw):
                     active["armed"]=True; active["armed_at"]=str(row["dt"])
                 # Only candles fully closed before this 1m candle may update the trail.
                 if active["armed"]:
-                    closed=five.loc[five.index < pd.Timestamp(row["dt"])]
+                    closed=five.loc[five.index <= pd.Timestamp(row["dt"])+pd.Timedelta(minutes=1)]
                     if len(closed)>=16:
                         update=calculate_trailing_stop(closed.tail(40),side,active["stop"],
                             active["best_price"],price)
@@ -221,11 +237,52 @@ def simulate(market,symbol,raw):
         trades.append(active)
     return trades,len(sig)
 
+def verify_binance_5m_alignment():
+    """Compare locally aggregated 1m bars with Binance-native 5m candles."""
+    checks=[]
+    endpoints={
+        "spot":"https://api.binance.com/api/v3/klines",
+        "futures":"https://fapi.binance.com/fapi/v1/klines",
+    }
+    now_ms=int(time.time()*1000)
+    for market,url in endpoints.items():
+        one=SESSION.get(url,params={"symbol":"BTCUSDT","interval":"1m","limit":120},timeout=(15,30))
+        one.raise_for_status()
+        five=SESSION.get(url,params={"symbol":"BTCUSDT","interval":"5m","limit":30},timeout=(15,30))
+        five.raise_for_status()
+        def frame(payload):
+            d=pd.DataFrame(payload,columns=["open_time","open","high","low","close","volume",
+                "close_time","quote_volume","trades","taker_base","taker_quote","ignore"])
+            for c in ("open","high","low","close","volume"): d[c]=pd.to_numeric(d[c],errors="raise")
+            d["dt"]=pd.to_datetime(pd.to_numeric(d.open_time),unit="ms",utc=True)
+            return d
+        m1=frame(one.json()); m5=frame(five.json())
+        m1=m1[pd.to_numeric(m1.close_time)<=now_ms]
+        m5=m5[pd.to_numeric(m5.close_time)<=now_ms]
+        agg=m1.set_index("dt").resample("5min",label="left",closed="left",origin="start_day").agg(
+            {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
+        agg=agg[agg.index+pd.Timedelta(minutes=5)<=pd.Timestamp(now_ms,unit="ms",tz="UTC")]
+        native=m5.set_index("dt")[["open","high","low","close","volume"]]
+        common=agg.index.intersection(native.index)
+        if len(common)<10:
+            raise RuntimeError(f"{market} native 5m alignment audit has only {len(common)} comparable candles")
+        a=agg.loc[common].tail(20); b=native.loc[common].tail(20)
+        for col in ("open","high","low","close","volume"):
+            if not np.allclose(a[col].to_numpy(float),b[col].to_numpy(float),rtol=1e-8,atol=1e-10):
+                delta=float(np.max(np.abs(a[col].to_numpy(float)-b[col].to_numpy(float))))
+                raise RuntimeError(f"{market} 1m->5m {col} mismatch vs Binance native candles; max_delta={delta}")
+        checks.append({"market":market,"symbol":"BTCUSDT","matched_5m_candles":len(common),
+            "ohlcv":"MATCH","aggregation":"left-closed/open-time bins; index shifted to close time"})
+        print(f"[ALIGNMENT PASS] {market.upper()} BTCUSDT: {len(common)} native 5m candles match 1m aggregation",flush=True)
+    return checks
+
 def main():
     all_trades=[]; summaries=[]; audit=[]; errors=[]
     expected_pairs=len(MARKETS)*len(SYMBOLS)
-    print(f"[START] V3 TRAILING historical simulation: {DAYS} days; {MARKETS}; {SYMBOLS}",flush=True)
+    alignment_checks=verify_binance_5m_alignment()
+    print(f"[START] V3 LIVE-PARITY trailing historical simulation: {DAYS} days; {MARKETS}; {SYMBOLS}",flush=True)
     print("[EXIT] Initial SL; arm at +1R; production ATR 1.5x + 5-candle structure; breakeven clamp; NO TIME EXIT",flush=True)
+    print("[SIGNALS] Exact V3 LONG/SHORT bias filters; Spot 1h fallback and 4h deep-bear guard mirror live code",flush=True)
     for market in MARKETS:
         for symbol in SYMBOLS:
             print(f"[RUN] {market.upper()} {symbol}",flush=True)
@@ -267,6 +324,11 @@ def main():
         "days":DAYS,"start_utc":datetime.fromtimestamp(START/1000,timezone.utc).isoformat(),
         "end_utc":datetime.fromtimestamp(END/1000,timezone.utc).isoformat(),
         "markets":MARKETS,"symbols":SYMBOLS,"data_source":"Binance Vision public archives",
+        "live_strategy_source":"core/scalping_v3.py",
+        "bull_bias":"15m close > 15m EMA50 AND (5m close >= 5m EMA21 OR 15m EMA21 > 15m EMA50)",
+        "bear_bias":"15m close < 15m EMA50 AND (5m close <= 5m EMA21 OR 15m EMA21 < 15m EMA50)",
+        "higher_timeframe_alignment":"1m open-time rows matched only to fully closed HTF candles by close timestamp",
+        "native_binance_alignment_checks":alignment_checks,
         "archive_sha256_verified":True,"minimum_coverage_pct":MIN_COVERAGE*100,
         "fees_round_trip":{"spot":2*FEE["spot"],"futures":2*FEE["futures"]},
         "adverse_cost_round_trip":2*ADVERSE,"entry":"next 1m open",
