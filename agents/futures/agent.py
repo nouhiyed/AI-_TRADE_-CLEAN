@@ -23,7 +23,8 @@ class FuturesAgent(BaseAgent):
             "trade_plan": plan,
             "scores": {"LONG": 1 if direction == "LONG" else 0,
                        "SHORT": 1 if direction == "SHORT" else 0},
-            "timeframes": {"1m": {"strategy": "v3"}, "5m": {"strategy": "v3"},
-                           "15m": {"strategy": "v3"}},
+            "signal_timeframe": "5m",
+            "timeframes": {"5m": {"role": "entry_trigger"}, "15m": {"role": "trend_context"},
+                           "1h": {"role": "trend_context"}},
         }
         return self.record_signal(signal)
