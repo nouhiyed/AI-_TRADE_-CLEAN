@@ -32,6 +32,7 @@ class BinanceKlineStream:
         self._apps = {}
         self._threads = {}
         self._last_open = {}
+        self._latest_candles = {}
         self._status = {
             market: {
                 "connected": False, "symbols": 0, "last_event": None,
@@ -43,7 +44,18 @@ class BinanceKlineStream:
 
     def status(self):
         with self._lock:
-            return json.loads(json.dumps(self._status))
+            snapshot = json.loads(json.dumps(self._status))
+            snapshot["latest_candle_symbols"] = {
+                market: sum(1 for key in self._latest_candles if key[0] == market)
+                for market in ("spot", "futures")
+            }
+            return snapshot
+
+    def latest_candle(self, market, symbol):
+        key = (str(market).strip().lower(), str(symbol).strip().upper())
+        with self._lock:
+            value = self._latest_candles.get(key)
+            return dict(value) if value else None
 
     def start(self):
         if any(thread.is_alive() for thread in self._threads.values()):
@@ -151,6 +163,19 @@ class BinanceKlineStream:
                             first_update = previous != open_time
                             if first_update:
                                 self._last_open[key] = open_time
+                            self._latest_candles[key] = {
+                                "symbol": symbol, "interval": "5m",
+                                "time": open_time // 1000,
+                                "open_time": open_time,
+                                "open": float(kline.get("o", 0)),
+                                "high": float(kline.get("h", 0)),
+                                "low": float(kline.get("l", 0)),
+                                "close": float(kline.get("c", 0)),
+                                "volume": float(kline.get("v", 0)),
+                                "is_closed": bool(kline.get("x")),
+                                "event_time": int(data.get("E", 0)),
+                                "source": "binance_websocket",
+                            }
                             self._status[market]["last_event"] = datetime.now(
                                 timezone.utc).isoformat()
                             if bool(kline.get("x")):
