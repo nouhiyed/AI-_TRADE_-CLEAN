@@ -200,7 +200,10 @@ class Autopilot:
                 self._analysis_pending.pop(key, None)
                 with self._analysis_stats_lock:
                     stats = self._analysis_stats[domain]
-                    stats["queue_depth"] = len(self._analysis_pending)
+                    stats["queue_depth"] = sum(
+                        1 for pending_domain, _ in self._analysis_pending
+                        if pending_domain == domain
+                    )
             return False
         return True
 
@@ -219,7 +222,10 @@ class Autopilot:
                         )
                     return
                 with self._analysis_stats_lock:
-                    self._analysis_stats[domain]["queue_depth"] = len(self._analysis_pending)
+                    self._analysis_stats[domain]["queue_depth"] = sum(
+                        1 for pending_domain, _ in self._analysis_pending
+                        if pending_domain == domain
+                    )
             received_at_ms = int(candle.get("received_at_ms") or 0)
             if received_at_ms <= 0 or int(time.time() * 1000) - received_at_ms > 30000:
                 with self._analysis_stats_lock:
