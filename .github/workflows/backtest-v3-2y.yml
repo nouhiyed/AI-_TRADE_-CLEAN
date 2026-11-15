@@ -41,6 +41,8 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install --upgrade pip pandas numpy requests ta matplotlib
+      - name: Validate historical backtest script
+        run: python -m py_compile scripts/backtest_scalping_v3_2y.py
       - name: Run two-year historical simulation
         run: python scripts/backtest_scalping_v3_2y.py
       - name: Upload results and chart screenshots
