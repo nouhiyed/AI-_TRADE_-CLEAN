@@ -23,7 +23,7 @@ from core.learning import LearningEngine, setup_key as make_setup_key
 from core.notifier import Notifier
 from core.chart_image import render_trade_chart
 from core.spot_demo import SpotDemoMixin
-from core.trailing_stop import calculate_trailing_stop
+from core.trailing_stop import calculate_trailing_stop, apply_cost_aware_trailing_floor
 
 
 class TradingCoordinator(SpotDemoMixin):
@@ -787,10 +787,12 @@ class TradingCoordinator(SpotDemoMixin):
                             candidate = Decimal(str(trail_update["stop"]))
                             # Once trailing profit is armed, never let its stop fall
                             # back through entry (gross break-even protection).
-                            stop = (
-                                max(candidate, entry_price) if direction == "LONG"
-                                else min(candidate, entry_price)
-                            )
+                            stop = Decimal(str(apply_cost_aware_trailing_floor(
+                                candidate, entry_price, direction,
+                                trail_update["best_price"],
+                                self.demo_execution.futures_fee_rate,
+                                self.demo_execution.futures_slippage_rate,
+                            )))
                             trail_update["stop"] = float(stop)
                     except Exception as trail_error:
                         with self._demo_lock:
