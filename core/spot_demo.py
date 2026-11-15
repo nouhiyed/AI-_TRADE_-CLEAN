@@ -7,7 +7,7 @@ import time
 from decimal import Decimal, ROUND_DOWN
 
 from core.learning import setup_key as make_setup_key
-from core.trailing_stop import calculate_trailing_stop
+from core.trailing_stop import calculate_trailing_stop, apply_cost_aware_trailing_floor
 
 SPOT_LIKE = ("spot",)
 MAX_ENTRY_DEVIATION = Decimal("0.01")
@@ -372,7 +372,12 @@ class SpotDemoMixin:
                                 snapshot.get("trailing_best_price"), price)
                             if trail_update:
                                 candidate = Decimal(str(trail_update["stop"]))
-                                stop = max(candidate, entry_price)
+                                stop = Decimal(str(apply_cost_aware_trailing_floor(
+                                    candidate, entry_price, "LONG",
+                                    trail_update["best_price"],
+                                    self.demo_execution.fee_rate,
+                                    self.demo_execution.slippage_rate,
+                                )))
                                 trail_update["stop"] = float(stop)
                         except Exception as trail_error:
                             with self._demo_lock:
