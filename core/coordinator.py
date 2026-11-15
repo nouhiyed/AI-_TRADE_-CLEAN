@@ -1333,7 +1333,7 @@ class TradingCoordinator(SpotDemoMixin):
         if not symbol or domain not in self.agents or not isinstance(frames, dict):
             return {"symbol": symbol, "signals": {},
                     "data_errors": {"input": "Invalid symbol, domain or candle cache"}}
-        required = self.market_engine.timeframes[domain]
+        required = ["5m", "15m", "1h"]
         prepared = {}
         errors = {}
         for timeframe in required:
@@ -1353,6 +1353,18 @@ class TradingCoordinator(SpotDemoMixin):
         if errors or any(tf not in prepared for tf in required):
             return {"symbol": symbol, "source": "binance_websocket_cache",
                     "signals": {}, "data_errors": errors}
+        # The 4h EMA200 is an optional Spot macro veto: it must never block
+        # otherwise-valid 5m/15m/1h decisions for recently listed tokens.
+        if domain == "spot":
+            four_hour = frames.get("4h")
+            if (four_hour is not None and len(four_hour) >= 210
+                    and "is_closed" in four_hour.columns
+                    and bool(four_hour["is_closed"].iloc[-1])):
+                try:
+                    prepared["4h"] = self.market_engine._prepare_frame(
+                        four_hour, symbol, domain, "4h")
+                except Exception:
+                    pass
         live_data = {
             "symbol": symbol,
             "source": "binance_websocket_cache",
