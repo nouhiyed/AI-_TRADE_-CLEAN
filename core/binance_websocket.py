@@ -8,23 +8,22 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote
 
 from websocket import WebSocketApp
 
 
 class BinanceKlineStream:
     BASE_URLS = {
-        "spot": "wss://stream.binance.com:9443/stream?streams=",
-        "futures": "wss://fstream.binance.com/stream?streams=",
+        "spot": "wss://stream.binance.com:9443/ws",
+        "futures": "wss://fstream.binance.com/ws",
     }
 
     def __init__(self, market_feed, on_kline, max_symbols=None,
                  refresh_seconds=1800, reconnect_seconds=3):
         self.feed = market_feed
         self.on_kline = on_kline
-        self.max_symbols = int(max_symbols or os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "100"))
-        self.max_symbols = min(200, max(10, self.max_symbols))
+        self.max_symbols = int(max_symbols or os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "1024"))
+        self.max_symbols = min(1024, max(10, self.max_symbols))
         self.refresh_seconds = max(300, int(refresh_seconds))
         self.reconnect_seconds = max(1, int(reconnect_seconds))
         self._stop = threading.Event()
@@ -127,21 +126,22 @@ class BinanceKlineStream:
         while not self._stop.is_set():
             try:
                 symbols = self._load_symbols(market)
-                streams = "/".join(
-                    quote(symbol.lower(), safe="") + "@kline_5m" for symbol in symbols
-                )
-                url = self.BASE_URLS[market] + streams
+                streams = [symbol.lower() + "@kline_5m" for symbol in symbols]
+                url = self.BASE_URLS[market]
                 with self._lock:
                     self._status[market]["state"] = "connecting"
                     self._status[market]["symbols"] = len(symbols)
                     self._status[market]["last_error"] = None
 
                 def on_open(_app):
+                    _app.send(json.dumps({
+                        "method": "SUBSCRIBE", "params": streams, "id": 1
+                    }))
                     with self._lock:
                         self._status[market]["connected"] = True
                         self._status[market]["state"] = "live"
                         self._status[market]["last_error"] = None
-                    print("[WS] %s connected: %s symbols, 5m klines" %
+                    print("[WS] %s subscribed: %s symbols, 5m klines" %
                           (market.upper(), len(symbols)))
 
                 def on_message(_app, message):
@@ -224,7 +224,7 @@ class BinanceKlineStream:
                 )
                 with self._lock:
                     self._apps[market] = app
-                app.run_forever(ping_interval=20, ping_timeout=10)
+                app.run_forever(ping_interval=20, ping_timeout=10, reconnect=0)
             except Exception as error:
                 with self._lock:
                     self._status[market]["last_error"] = str(error)
