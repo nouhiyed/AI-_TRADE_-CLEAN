@@ -377,11 +377,7 @@ class SpotDemoMixin:
                             reason = "TRAILING_STOP" if trailing_active else "STOP_LOSS"
                         elif not trailing_active and price >= target:
                             reason = "TAKE_PROFIT"
-                    max_hold = int(snapshot.get("max_hold_minutes") or 0)
-                    opened_ms = int(snapshot.get("opened_at_ms") or 0)
-                    if reason is None and max_hold > 0 and opened_ms > 0:
-                        if int(time.time() * 1000) - opened_ms >= max_hold * 60_000:
-                            reason = "TIME_EXIT"
+                    # No elapsed-time liquidation: price-based SL/TP or manual close only.
                     with self._demo_lock:
                         current = self.demo_positions.get(position_id)
                         if not current or current.get("status") not in (
