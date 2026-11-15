@@ -83,7 +83,7 @@ class _V3Base:
             "estimated_net_reward_rate": net_reward,
             "strategy": market + "_scalper_v3", "strategy_version": "v3",
             "stop_atr_multiple": cls.STOP_ATR, "timeframe": "1m",
-            "max_hold_minutes": int(getattr(cls, "MAX_HOLD_MINUTES", 0)),
+            "max_hold_minutes": 0,  # Positions exit only by verified SL/TP or manual close.
         }
 
     @classmethod
@@ -93,7 +93,6 @@ class _V3Base:
 
 
 class FuturesScalpingStrategyV3(_V3Base):
-    MAX_HOLD_MINUTES = 12
 
     def analyze(self, data, costs=None):
         one, five, fifteen = (data.get(x) for x in ("1m", "5m", "15m"))
@@ -135,7 +134,6 @@ class FuturesScalpingStrategyV3(_V3Base):
 
 
 class SpotScalpingStrategyV3(_V3Base):
-    MAX_HOLD_MINUTES = 15
 
     def analyze(self, data, costs=None):
         one, five, fifteen, hourly, four = (data.get(x) for x in ("1m", "5m", "15m", "1h", "4h"))
