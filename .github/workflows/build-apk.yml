@@ -15,6 +15,7 @@ on:
       - 'agents/**'
       - 'core/**'
       - 'api/**'
+      - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/build-apk.yml'
   push:
@@ -23,6 +24,7 @@ on:
       - 'agents/**'
       - 'core/**'
       - 'api/**'
+      - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/build-apk.yml'
 
