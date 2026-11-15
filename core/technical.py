@@ -10,8 +10,38 @@ from ta.volatility import (
 )
 from ta.volume import OnBalanceVolumeIndicator
 
-def analyze(df):
+INDICATOR_PROFILES = {
+    "5m": {
+        "ema_periods": (9, 20, 21, 50, 200),
+        "rsi_period": 14,
+        "macd_fast": 8,
+        "macd_slow": 21,
+        "macd_signal": 5,
+        "adx_period": 14,
+        "atr_period": 14,
+        "bollinger_period": 20,
+        "structure_lookback": 20,
+        "volume_baseline": 24,
+    },
+    "default": {
+        "ema_periods": (9, 20, 21, 50, 200),
+        "rsi_period": 14,
+        "macd_fast": 12,
+        "macd_slow": 26,
+        "macd_signal": 9,
+        "adx_period": 14,
+        "atr_period": 14,
+        "bollinger_period": 20,
+        "structure_lookback": 20,
+        "volume_baseline": 30,
+    },
+}
+
+
+def analyze(df, timeframe=None):
     df = df.copy()
+    timeframe = str(timeframe or df.attrs.get("timeframe") or "default").lower()
+    profile = INDICATOR_PROFILES.get(timeframe, INDICATOR_PROFILES["default"])
 
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -22,14 +52,14 @@ def analyze(df):
     volume = df["volume"]
 
     # Trend
-    for period in [9, 20, 21, 50, 200]:
+    for period in profile["ema_periods"]:
         df[f"EMA_{period}"] = EMAIndicator(close, period).ema_indicator()
         df[f"SMA_{period}"] = SMAIndicator(close, period).sma_indicator()
 
     # Momentum
-    df["RSI"] = RSIIndicator(close, 14).rsi()
+    df["RSI"] = RSIIndicator(close, profile["rsi_period"]).rsi()
 
-    macd = MACD(close)
+    macd = MACD(close, window_fast=profile["macd_fast"],\n                 window_slow=profile["macd_slow"],\n                 window_sign=profile["macd_signal"])
     df["MACD"] = macd.macd()
     df["MACD_signal"] = macd.macd_signal()
     df["MACD_hist"] = macd.macd_diff()
@@ -39,12 +69,12 @@ def analyze(df):
     df["Stoch_D"] = stoch.stoch_signal()
 
     df["CCI"] = CCIIndicator(high, low, close).cci()
-    df["ADX"] = ADXIndicator(high, low, close).adx()
+    df["ADX"] = ADXIndicator(high, low, close, window=profile["adx_period"]).adx()
 
     # Volatility
-    df["ATR"] = AverageTrueRange(high, low, close).average_true_range()
+    df["ATR"] = AverageTrueRange(high, low, close, window=profile["atr_period"]).average_true_range()
 
-    bb = BollingerBands(close)
+    bb = BollingerBands(close, window=profile["bollinger_period"])
     df["BB_upper"] = bb.bollinger_hband()
     df["BB_lower"] = bb.bollinger_lband()
     df["BB_width"] = bb.bollinger_wband()
@@ -68,8 +98,8 @@ def analyze(df):
     )
 
     # Support and resistance
-    df["Support"] = low.rolling(20).min()
-    df["Resistance"] = high.rolling(20).max()
+    df["Support"] = low.rolling(profile["structure_lookback"]).min()
+    df["Resistance"] = high.rolling(profile["structure_lookback"]).max()
 
     # Price structure
     df["Higher_High"] = high > high.shift(1)
@@ -92,6 +122,8 @@ def analyze(df):
         (df["close"] <= df["open"].shift(1))
     )
 
+    df.attrs["timeframe"] = timeframe
+    df.attrs["indicator_profile"] = dict(profile)
     return df
 
 
