@@ -238,7 +238,11 @@ class Autopilot:
             if not candle.get("is_closed"):
                 return
             close_time = int(candle.get("close_time") or 0)
-            if close_time <= 0 or int(time.time() * 1000) - close_time > 10000:
+            close_event_time = int(candle.get("event_time") or 0)
+            local_now_ms = int(time.time() * 1000)
+            if (close_time <= 0 or close_event_time < close_time
+                    or close_event_time - close_time > 10000
+                    or abs(local_now_ms - close_event_time) > 30000):
                 return
             frames = candle.get("market_data")
             if not isinstance(frames, dict):
@@ -327,12 +331,13 @@ class Autopilot:
             event_time = int(opening_candle.get("event_time") or 0)
             open_time = int(opening_candle.get("open_time") or 0)
             entry_price = float(opening_candle.get("open") or 0)
+            local_now_ms = int(time.time() * 1000)
             if (int(pending.get("next_open_time") or 0) != open_time
                     or opening_candle.get("first_update") is not True
                     or opening_candle.get("source") != "binance_websocket"
                     or entry_price <= 0 or event_time < open_time
                     or event_time - open_time > 10000
-                    or int(time.time() * 1000) - open_time > 10000):
+                    or abs(local_now_ms - event_time) > 30000):
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
                 return
