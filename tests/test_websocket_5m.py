@@ -106,6 +106,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
 
         stale = candle_frame("5min")
         stale.attrs["timeframe"] = "5m"
+        stale["open_time"] -= pd.Timedelta(hours=1)
         stale["close_time"] -= pd.Timedelta(hours=1)
         self.stream._merge_frame("futures", "ETHUSDT", "5m", stale)
         self.assertIsNone(self.stream._snapshot("futures", "ETHUSDT"))
