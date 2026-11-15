@@ -249,6 +249,12 @@ class Autopilot:
             analysis = self.c.analyze_live_from_frames(symbol, domain, frames)
             signal = (analysis.get("signals") or {}).get(domain)
             if not isinstance(signal, dict):
+                self.last_result = {
+                    "status": "SKIPPED", "phase": "websocket_analysis",
+                    "domain": domain, "symbol": symbol,
+                    "reason": str((analysis.get("data_errors") or {}).get(domain)
+                                  or "Agent returned no signal from the closed 5m cache"),
+                }
                 return
             signal = dict(signal)
             signal["symbol"] = symbol
@@ -281,7 +287,7 @@ class Autopilot:
                 }
                 self._pending_entries[key] = pending
                 already_open = self._latest_open.get(key)
-            # If the next-candle event arrived while REST analysis was running,
+            # If the next-candle event arrived during local cached analysis,
             # consume it now rather than losing the entry window.
             if already_open and int(already_open.get("open_time", 0)) == expected_open:
                 with self._event_lock:
