@@ -1,4 +1,4 @@
-"""The sole live strategy: V3 1m trigger with closed higher-timeframe context.\nThis module is the only strategy path used by Futures and Spot agents.
+"""The sole live strategy: V3 5m trigger with closed higher-timeframe context.\nThis module is the only strategy path used by Futures and Spot agents.
 
 No legacy strategy fallback is permitted. Every accepted plan must clear 1.5
 net reward/risk after the configured round-trip fee and adverse-cost estimate.
@@ -82,7 +82,7 @@ class _V3Base:
             "market_regime": regime, "estimated_round_trip_cost_rate": round_trip,
             "estimated_net_reward_rate": net_reward,
             "strategy": market + "_scalper_v3", "strategy_version": "v3",
-            "stop_atr_multiple": cls.STOP_ATR, "timeframe": "1m",
+            "stop_atr_multiple": cls.STOP_ATR, "timeframe": "5m",
             "max_hold_minutes": 0,  # Positions exit only by verified SL/TP or manual close.
         }
 
@@ -95,19 +95,19 @@ class _V3Base:
 class FuturesScalpingStrategyV3(_V3Base):
 
     def analyze(self, data, costs=None):
-        one, five, fifteen = (data.get(x) for x in ("1m", "5m", "15m"))
-        if any(x is None or len(x) < 30 for x in (one, five, fifteen)):
-            return {"success": False, "reason": "V3 requires closed 1m, 5m and 15m candles"}
+        trigger, fifteen, hourly = (data.get(x) for x in ("5m", "15m", "1h"))
+        if any(x is None or len(x) < 30 for x in (trigger, fifteen, hourly)):
+            return {"success": False, "reason": "V3 Futures requires closed 5m, 15m and 1h candles"}
         v = self.value
-        c, o, h, low, ema9, ema20, atr, rsi = (v(one, x) for x in
+        c, o, h, low, ema9, ema20, atr, rsi = (v(trigger, x) for x in
             ("close", "open", "high", "low", "EMA_9", "EMA_20", "ATR", "RSI"))
-        hist, prev, adx5 = v(one, "MACD_hist"), v(one, "MACD_hist", -2), v(five, "ADX")
+        hist, prev, adx5 = v(trigger, "MACD_hist"), v(trigger, "MACD_hist", -2), v(trigger, "ADX")
         if None in (c, o, h, low, ema9, ema20, atr, rsi, hist, prev, adx5) or atr <= 0:
             return {"success": False, "reason": "V3 Futures indicators are incomplete"}
-        loc, body, vr = self.location(one), abs(c-o)/atr, self.volume_ratio(one)
-        prior_high = float(one["high"].iloc[-11:-1].max())
-        prior_low = float(one["low"].iloc[-11:-1].min())
-        bull, bear = self.bias(five, fifteen, "LONG"), self.bias(five, fifteen, "SHORT")
+        loc, body, vr = self.location(trigger), abs(c-o)/atr, self.volume_ratio(trigger)
+        prior_high = float(trigger["high"].iloc[-11:-1].max())
+        prior_low = float(trigger["low"].iloc[-11:-1].min())
+        bull, bear = self.bias(fifteen, hourly, "LONG"), self.bias(fifteen, hourly, "SHORT")
         setups = [
             (bull and low <= ema20 + .18*atr and c > ema9 and c > o and 42 <= rsi <= 69
              and hist >= prev and loc >= .55 and body >= .08 and vr >= .72,
@@ -124,25 +124,25 @@ class FuturesScalpingStrategyV3(_V3Base):
         ]
         for valid, direction, setup, regime, target_r in setups:
             if valid:
-                return self.plan("futures", direction, five, setup, regime, target_r, c)
-        bb_low, bb_high = v(one, "BB_lower"), v(one, "BB_upper")
+                return self.plan("futures", direction, trigger, setup, regime, target_r, c)
+        bb_low, bb_high = v(trigger, "BB_lower"), v(trigger, "BB_upper")
         if adx5 <= 20 and loc >= .62 and c > o and rsi <= 29 and bb_low and c <= bb_low*1.003:
-            return self.plan("futures", "LONG", five, "RANGE_REJECTION", "RANGE", 1.25, c)
+            return self.plan("futures", "LONG", trigger, "RANGE_REJECTION", "RANGE", 1.25, c)
         if adx5 <= 20 and loc <= .38 and c < o and rsi >= 71 and bb_high and c >= bb_high*.997:
-            return self.plan("futures", "SHORT", five, "RANGE_REJECTION", "RANGE", 1.25, c)
+            return self.plan("futures", "SHORT", trigger, "RANGE_REJECTION", "RANGE", 1.25, c)
         return {"success": False, "reason": "No qualifying V3 Futures setup"}
 
 
 class SpotScalpingStrategyV3(_V3Base):
 
     def analyze(self, data, costs=None):
-        one, five, fifteen, hourly, four = (data.get(x) for x in ("1m", "5m", "15m", "1h", "4h"))
-        if any(x is None or len(x) < 30 for x in (one, five, fifteen, hourly)):
-            return {"success": False, "reason": "V3 Spot requires closed 1m, 5m, 15m and 1h candles"}
+        trigger, fifteen, hourly, four = (data.get(x) for x in ("5m", "15m", "1h", "4h"))
+        if any(x is None or len(x) < 30 for x in (trigger, fifteen, hourly)):
+            return {"success": False, "reason": "V3 Spot requires closed 5m, 15m and 1h candles"}
         v = self.value
-        c, o, h, low, ema9, ema20, atr, rsi = (v(one, x) for x in
+        c, o, h, low, ema9, ema20, atr, rsi = (v(trigger, x) for x in
             ("close", "open", "high", "low", "EMA_9", "EMA_20", "ATR", "RSI"))
-        hist, prev = v(one, "MACD_hist"), v(one, "MACD_hist", -2)
+        hist, prev = v(trigger, "MACD_hist"), v(trigger, "MACD_hist", -2)
         c1, e200 = v(hourly, "close"), v(hourly, "EMA_200")
         if None in (c, o, h, low, ema9, ema20, atr, rsi, hist, prev, c1, e200) or atr <= 0:
             return {"success": False, "reason": "V3 Spot indicators are incomplete"}
@@ -150,10 +150,10 @@ class SpotScalpingStrategyV3(_V3Base):
             c4, e2004 = v(four, "close"), v(four, "EMA_200")
             if c4 is not None and e2004 and c4 < e2004*.975 and c1 < e200:
                 return {"success": False, "reason": "Deep 4h and 1h bearish context"}
-        loc, body, vr = self.location(one), abs(c-o)/atr, self.volume_ratio(one)
-        prior_high = float(one["high"].iloc[-11:-1].max())
-        c5, e21_5 = v(five, "close"), v(five, "EMA_21")
-        bullish = self.bias(five, fifteen, "LONG") or (
+        loc, body, vr = self.location(trigger), abs(c-o)/atr, self.volume_ratio(trigger)
+        prior_high = float(trigger["high"].iloc[-11:-1].max())
+        c5, e21_5 = v(fifteen, "close"), v(fifteen, "EMA_21")
+        bullish = self.bias(fifteen, hourly, "LONG") or (
             c1 > e200 and c5 is not None and e21_5 is not None and c5 >= e21_5
         )
         pull = (bullish and low <= ema20+.20*atr and c > ema9 and c > o and
@@ -161,10 +161,10 @@ class SpotScalpingStrategyV3(_V3Base):
         breakout = (bullish and c > prior_high+.01*atr and c > o and 48 <= rsi <= 76 and
                     loc >= .60 and body >= .11 and vr >= .82)
         if pull:
-            return self.plan("spot", "LONG", five, "MICRO_PULLBACK", "BULL_TREND", 1.45, c)
+            return self.plan("spot", "LONG", trigger, "MICRO_PULLBACK", "BULL_TREND", 1.45, c)
         if breakout:
-            return self.plan("spot", "LONG", five, "MICRO_BREAKOUT", "BULL_TREND", 1.55, c)
-        adx5, bb = v(five, "ADX"), v(one, "BB_lower")
+            return self.plan("spot", "LONG", trigger, "MICRO_BREAKOUT", "BULL_TREND", 1.55, c)
+        adx5, bb = v(fifteen, "ADX"), v(trigger, "BB_lower")
         if adx5 is not None and adx5 <= 19 and bb is not None and rsi <= 27 and c <= bb*1.004 and c > o and loc >= .60 and vr >= .65:
-            return self.plan("spot", "LONG", five, "RANGE_BOUNCE", "RANGE", 1.35, c)
+            return self.plan("spot", "LONG", trigger, "RANGE_BOUNCE", "RANGE", 1.35, c)
         return {"success": False, "reason": "No qualifying V3 Spot setup"}
