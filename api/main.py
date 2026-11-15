@@ -435,11 +435,14 @@ class APIHandler(BaseHTTPRequestHandler):
                     snapshot = json.loads(json.dumps(scan_status))
                 return self.send_json(snapshot)
             if path == "/status":
+                with scan_status_lock:
+                    scan_snapshot = json.loads(json.dumps(scan_status))
                 return self.send_json({
                     "api_version": API_VERSION,
                     "system": coordinator.get_system_status(),
                     "controls": coordinator.get_agent_controls(),
-                    "demo": coordinator.get_demo_positions()
+                    "demo": coordinator.get_demo_positions(),
+                    "scan": scan_snapshot,
                 })
             return self.send_json({"error": "Not found"}, 404)
         except Exception as e:
