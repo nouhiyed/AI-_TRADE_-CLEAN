@@ -357,6 +357,7 @@ class Autopilot:
         direction = str(signal.get("direction", "WAIT")).upper()
         if (signal.get("strategy_version") != "v3"
                 or plan.get("strategy_version") != "v3"
+                or str(plan.get("timeframe", "")).lower() != "5m"
                 or plan.get("success") is not True
                 or direction not in (("BUY",) if domain == "spot" else ("LONG", "SHORT"))):
             return {"success": False, "reason": "The agent signal is not an approved V3 setup"}
@@ -477,9 +478,10 @@ class Autopilot:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Signal direction is not actionable"})
                 return
-            if signal.get("strategy_version") != "v3":
+            if (signal.get("strategy_version") != "v3"
+                    or str((signal.get("trade_plan") or {}).get("timeframe", "")).lower() != "5m"):
                 result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": "Only V3 signals may execute"})
+                result["skipped"].append({"reason": "Only V3 5m signals may execute"})
                 return
             plan = signal.get("trade_plan") or {}
             if plan.get("success") is not True or plan.get("strategy_version") != "v3":
