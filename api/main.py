@@ -313,6 +313,19 @@ class APIHandler(BaseHTTPRequestHandler):
                     "received_at": time.time(),
                 })
 
+            if path == "/market/stream/candle":
+                market = params.get("market", ["spot"])[0].lower()
+                symbol = params.get("symbol", ["BTCUSDT"])[0].upper()
+                if market not in {"spot", "futures"}:
+                    return self.send_json({"success": False, "reason": "Unsupported market"}, 400)
+                candle = market_stream.latest_candle(market, symbol) if market_stream else None
+                if candle is None:
+                    return self.send_json({
+                        "success": False, "market": market, "symbol": symbol,
+                        "reason": "No WebSocket candle is cached for this symbol",
+                    }, 404)
+                return self.send_json({"success": True, "market": market, **candle})
+
             if path == "/market/candles":
                 market = params.get("market", ["spot"])[0].lower()
                 symbol = params.get("symbol", ["BTCUSDT"])[0].upper()
