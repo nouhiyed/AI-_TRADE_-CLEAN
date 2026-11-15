@@ -74,7 +74,7 @@ def month_iter(a,b):
              else datetime(cur.year,cur.month+1,1,tzinfo=timezone.utc))
 
 def load_data(market,symbol):
-    path=CACHE/f"{market}_{symbol}_{DAYS}d.csv"
+    path=CACHE/f"{market}_{symbol}_{DAYS}d_5m.csv"
     if path.exists():
         df=pd.read_csv(path); df["open_time"]=pd.to_numeric(df.open_time,errors="coerce")
         if df.open_time.dropna().median()>100000000000000: df["open_time"]//=1000
@@ -101,7 +101,10 @@ def load_data(market,symbol):
 
 def validate(df,market,symbol):
     expected=DAYS*288; minimum=math.ceil(expected*MIN_COVERAGE)
-    if df.empty or len(df)<minimum or int(df.open_time.iloc[0])>START+300000 or int(df.open_time.iloc[-1])<END-300000:
+    if (df.empty or len(df)<minimum or len(df)>math.ceil(expected*1.01)
+            or int(df.open_time.iloc[0])>START+300000
+            or int(df.open_time.iloc[-1])<END-300000
+            or (len(df)>1 and not (df.open_time.diff().dropna()==300000).all())):
         raise RuntimeError(f"INCOMPLETE {market} {symbol}: {len(df):,}/{expected:,} candles; minimum {minimum:,}")
     return expected
 
@@ -159,11 +162,11 @@ def build_signals(raw,market):
     five["prior_low"]=five.low.shift(1).rolling(12).min()
 
     bull=(five["15_close"]>five["15_EMA_50"])&(
-        (five["15_close"]>=five["15_EMA_21"])|
-        (five["1h_EMA_21"]>five["1h_EMA_50"]))
+        (five.close>=five.EMA_21)|
+        (five["15_EMA_21"]>five["15_EMA_50"]))
     bear=(five["15_close"]<five["15_EMA_50"])&(
-        (five["15_close"]<=five["15_EMA_21"])|
-        (five["1h_EMA_21"]<five["1h_EMA_50"]))
+        (five.close<=five.EMA_21)|
+        (five["15_EMA_21"]<five["15_EMA_50"]))
 
     pl=(bull&(five.low<=five.EMA_20+.12*five.ATR)&
         (five.close>five.EMA_9)&(five.close>five.open)&
