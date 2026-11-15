@@ -336,28 +336,33 @@ class BinanceMarketData:
 
     def fetch_snapshot(
         self, market, symbol, timeframes=None,
-        candle_limit=500, orderbook_limit=100
+        candle_limit=500, orderbook_limit=100, include_orderbook=True
     ):
         if timeframes is None:
             timeframes = ["1m", "5m", "15m", "1h"]
 
         candles = {}
         errors = {}
+        orderbook = {
+            "available": False,
+            "reason": "not_requested",
+            "market": market,
+            "symbol": symbol.upper(),
+        }
 
-        # Fetch all required intervals and the order book concurrently.
-        # The global Binance limiter still spaces request starts, but network
-        # latency is overlapped instead of serializing every response.
-        tasks = list(timeframes)
-        with ThreadPoolExecutor(max_workers=max(1, min(6, len(tasks) + 1))) as pool:
+        # Candles are fetched concurrently. Scanner-only V3 analysis does not
+        # consume order-book fields, so it can skip that extra REST request.
+        with ThreadPoolExecutor(max_workers=max(1, min(6, len(timeframes) + int(include_orderbook)))) as pool:
             futures = {
                 pool.submit(
                     self.fetch_candles, market, symbol, interval, candle_limit
                 ): ("candle", interval)
-                for interval in tasks
+                for interval in timeframes
             }
-            futures[pool.submit(
-                self.fetch_orderbook, market, symbol, orderbook_limit
-            )] = ("orderbook", None)
+            if include_orderbook:
+                futures[pool.submit(
+                    self.fetch_orderbook, market, symbol, orderbook_limit
+                )] = ("orderbook", None)
 
             for future in as_completed(futures):
                 kind, interval = futures[future]
