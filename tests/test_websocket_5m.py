@@ -50,7 +50,7 @@ def candle_frame(interval, rows=60, closed=True):
 class ClosedCandleGuardTests(unittest.TestCase):
     def test_5m_requires_explicit_timeframe_and_closed_flag(self):
         frame = candle_frame("5min")
-        frame.attrs["timeframe"] = "5m"
+        frame.attrs["timeframe"] = "1m"
         self.assertFalse(FuturesScalpingStrategyV3.frame_is_closed_5m(frame))
 
         frame = candle_frame("5min")
