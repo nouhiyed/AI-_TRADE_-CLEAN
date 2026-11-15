@@ -1453,7 +1453,7 @@ class TradingCoordinator(SpotDemoMixin):
             "proposed_levels": {k: str(v) for k, v in proposed.items()},
         }
 
-    def scan_futures(self, limit=None, min_quote_volume=None):
+    def scan_futures(self, limit=None, min_quote_volume=None, progress_callback=None):
         """Analyze every eligible USDT perpetual by default; rank valid signals only."""
         if not self._agent_enabled("futures"):
             return {
@@ -1497,8 +1497,16 @@ class TradingCoordinator(SpotDemoMixin):
             if len(rejection_samples) < 12:
                 rejection_samples.append({"symbol": symbol, "reason": key})
 
+        processed = 0
         for item in universe:
             symbol = item["symbol"]
+            if callable(progress_callback):
+                progress_callback({
+                    "phase": "analyzing",
+                    "current_symbol": symbol,
+                    "scanned_in_batch": processed,
+                    "universe_total": len(universe),
+                })
             try:
                 analysis = self.analyze_live(symbol, domains=["futures"])
                 signal = analysis.get("signals", {}).get("futures", {})
@@ -1530,6 +1538,15 @@ class TradingCoordinator(SpotDemoMixin):
                 })
             except Exception as error:
                 errors[symbol] = str(error)
+            finally:
+                processed += 1
+                if callable(progress_callback):
+                    progress_callback({
+                        "phase": "symbol_complete",
+                        "current_symbol": symbol,
+                        "scanned_in_batch": processed,
+                        "universe_total": len(universe),
+                    })
 
         opportunities.sort(
             key=lambda item: (
@@ -1557,7 +1574,7 @@ class TradingCoordinator(SpotDemoMixin):
             "scan": scan_meta,
         }
 
-    def scan_spot(self, limit=None, min_quote_volume=None):
+    def scan_spot(self, limit=None, min_quote_volume=None, progress_callback=None):
         """Analyze every eligible Binance USDT spot pair in persistent batches.
 
         All active spot-enabled USDT pairs are included by default. Quote volume
@@ -1649,8 +1666,16 @@ class TradingCoordinator(SpotDemoMixin):
                     "symbol": symbol, "reason": key
                 })
 
+        processed = 0
         for item in universe:
             symbol = item["symbol"]
+            if callable(progress_callback):
+                progress_callback({
+                    "phase": "analyzing",
+                    "current_symbol": symbol,
+                    "scanned_in_batch": processed,
+                    "universe_total": len(universe),
+                })
             try:
                 analysis = self.analyze_live(symbol, domains=["spot"])
                 signal = analysis.get("signals", {}).get("spot", {})
@@ -1694,6 +1719,15 @@ class TradingCoordinator(SpotDemoMixin):
                 })
             except Exception as error:
                 errors[symbol] = str(error)
+            finally:
+                processed += 1
+                if callable(progress_callback):
+                    progress_callback({
+                        "phase": "symbol_complete",
+                        "current_symbol": symbol,
+                        "scanned_in_batch": processed,
+                        "universe_total": len(universe),
+                    })
 
         opportunities.sort(
             key=lambda item: (
