@@ -4,6 +4,7 @@ Safety: off by default; every trade still goes through the signal match, trade
 plan checks, risk reservation and the learning engine's setup filter.
 """
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -48,7 +49,31 @@ class Autopilot:
         self._pending_entries = {}
         self._latest_open = {}
         self._event_executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="v3-5m-event")
+            max_workers=4, thread_name_prefix="v3-5m-execution")
+        # Independent parallel analysis pools: Futures work never queues behind
+        # Spot work, and neither pool runs on the WebSocket callback thread.
+        workers = min(4, max(1, int(os.environ.get(
+            "AI_TRADER_ANALYSIS_WORKERS_PER_MARKET", "2"))))
+        queue_limit = min(2048, max(64, int(os.environ.get(
+            "AI_TRADER_ANALYSIS_QUEUE_LIMIT", "512"))))
+        self._analysis_pools = {
+            domain: ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="v3-analysis-" + domain,
+            )
+            for domain in ("futures", "spot")
+        }
+        self._analysis_slots = {
+            domain: threading.BoundedSemaphore(queue_limit)
+            for domain in ("futures", "spot")
+        }
+        self._analysis_stats_lock = threading.Lock()
+        self._analysis_stats = {
+            domain: {"workers": workers, "queue_limit": queue_limit,
+                     "submitted": 0, "completed": 0, "failed": 0,
+                     "rejected": 0, "inflight": 0}
+            for domain in ("futures", "spot")
+        }
         self._load()
 
     # ---- config ------------------------------------------------------------
@@ -88,10 +113,47 @@ class Autopilot:
         return self.status()
 
     def status(self):
+        with self._analysis_stats_lock:
+            analysis = {domain: dict(stats)
+                        for domain, stats in self._analysis_stats.items()}
         return {"config": dict(self.config), "last_run": self.last_run,
                 "last_result": self.last_result,
+                "analysis_pools": analysis,
                 "cooldowns": {k: int(v - self.clock())
                               for k, v in self._cooldown.items() if v > self.clock()}}
+
+    def submit_analysis(self, domain, fn, *args):
+        """Dispatch analysis to a bounded, market-isolated worker pool."""
+        domain = str(domain).strip().lower()
+        if domain not in self._analysis_pools:
+            return False
+        if not self._analysis_slots[domain].acquire(blocking=False):
+            with self._analysis_stats_lock:
+                self._analysis_stats[domain]["rejected"] += 1
+            return False
+        with self._analysis_stats_lock:
+            self._analysis_stats[domain]["submitted"] += 1
+            self._analysis_stats[domain]["inflight"] += 1
+        try:
+            future = self._analysis_pools[domain].submit(fn, *args)
+        except Exception:
+            self._analysis_slots[domain].release()
+            with self._analysis_stats_lock:
+                self._analysis_stats[domain]["inflight"] -= 1
+                self._analysis_stats[domain]["failed"] += 1
+            return False
+
+        def finished(done):
+            failed = done.cancelled() or done.exception() is not None
+            with self._analysis_stats_lock:
+                self._analysis_stats[domain]["inflight"] -= 1
+                self._analysis_stats[domain]["completed"] += 1
+                if failed:
+                    self._analysis_stats[domain]["failed"] += 1
+            self._analysis_slots[domain].release()
+
+        future.add_done_callback(finished)
+        return True
 
     # ---- one scan cycle --------------------------------------------------------
 
@@ -174,8 +236,15 @@ class Autopilot:
                 if len(self._event_seen) > 20000:
                     # Bounded memory: retain only recent candle identities.
                     self._event_seen = set(list(self._event_seen)[-10000:])
-            self._event_executor.submit(self._analyze_ws_close, domain, symbol,
-                                        dict(event))
+            if not self.submit_analysis(domain, self._analyze_ws_close,
+                                        domain, symbol, dict(event)):
+                # The event remains deduplicated: overload is visible in pool
+                # metrics and must never cause concurrent duplicate decisions.
+                self.last_result = {
+                    "status": "ANALYSIS_QUEUE_FULL", "phase": "websocket_analysis",
+                    "domain": domain, "symbol": symbol,
+                    "reason": "Market analysis queue is full; this candle was not reprocessed",
+                }
 
 
     def queue_manual_signal(self, domain, symbol, signal):
