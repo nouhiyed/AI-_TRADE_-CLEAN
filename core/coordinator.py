@@ -1475,6 +1475,14 @@ class TradingCoordinator(SpotDemoMixin):
                 "opportunities": [],
             }
 
+        if callable(progress_callback):
+            progress_callback({
+                "phase": "universe_loaded",
+                "current_symbol": None,
+                "scanned_in_batch": 0,
+                "universe_total": len(universe),
+            })
+
         scan_meta = {
             "universe_total": len(universe),
             "batch_size": len(universe),
@@ -1484,6 +1492,14 @@ class TradingCoordinator(SpotDemoMixin):
         # Continuous scanner analyzes the complete eligible universe in one pass.
         # No rotating cursor or fixed-size batch is used.
         scan_meta["last_symbol"] = universe[-1]["symbol"] if universe else None
+
+        if callable(progress_callback):
+            progress_callback({
+                "phase": "universe_loaded",
+                "current_symbol": None,
+                "scanned_in_batch": 0,
+                "universe_total": len(universe),
+            })
 
         opportunities = []
         errors = {}
