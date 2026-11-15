@@ -22,7 +22,7 @@ permissions:
 
 concurrency:
   group: scalping-v3-two-year-backtest
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   backtest:
