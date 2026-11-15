@@ -254,7 +254,7 @@ def simulate(market, symbol, raw):
                 else: exit_price=float(row.close); reason="TIME"
                 gross=(exit_price-active["entry"])/active["entry"] if active["side"]=="LONG" else (active["entry"]-exit_price)/active["entry"]
                 net=gross-2*(fee+adverse)
-                active.update(exit_time=str(row.dt),exit_price=exit_price,reason=reason,gross_pct=gross*100,net_pct=net*100,
+                active.update(exit_time=str(row["dt"]),exit_price=exit_price,reason=reason,gross_pct=gross*100,net_pct=net*100,
                               net_usdt=active["notional"]*net,hold_minutes=held)
                 trades.append(active); active=None
         if active is None and row.direction in ("LONG", "SHORT"):
@@ -271,13 +271,13 @@ def simulate(market, symbol, raw):
             sl=entry-distance if side=="LONG" else entry+distance
             tp=entry+target_r*distance if side=="LONG" else entry-target_r*distance
             active={"market":market,"symbol":symbol,"side":side,"setup":str(row.setup),
-                    "signal_time":str(row.dt),"entry_time":str(nxt.dt),"entry":entry,"sl":sl,"tp":tp,
+                    "signal_time":str(row["dt"]),"entry_time":str(nxt["dt"]),"entry":entry,"sl":sl,"tp":tp,
                     "target_r":target_r,"net_rr":net_rr,"atr":atr,"entry_i":i+1,"notional":100.0}
     if active:
         row=arr.iloc[-1]; exit_price=float(row.close)
         gross=(exit_price-active["entry"])/active["entry"] if active["side"]=="LONG" else (active["entry"]-exit_price)/active["entry"]
         net=gross-2*(fee+adverse)
-        active.update(exit_time=str(row.dt),exit_price=exit_price,reason="END",gross_pct=gross*100,net_pct=net*100,
+        active.update(exit_time=str(row["dt"]),exit_price=exit_price,reason="END",gross_pct=gross*100,net_pct=net*100,
                       net_usdt=active["notional"]*net,hold_minutes=len(arr)-1-active["entry_i"])
         trades.append(active)
     return trades, arr
