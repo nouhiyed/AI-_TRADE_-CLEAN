@@ -224,6 +224,7 @@ def _process_agent_submission(request_id, payload):
             entry_price=payload.get("entry_price"),
             take_profit=payload.get("take_profit"),
             stop_loss=payload.get("stop_loss"),
+            agent=autopilot.worker_agent(str(payload.get("domain", "")).lower()),
         )
     except Exception as error:
         failed = True
