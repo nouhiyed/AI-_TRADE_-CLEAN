@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.15.7"
+API_VERSION = "2026.11.15.8"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -19,11 +19,13 @@ from core.coordinator import TradingCoordinator
 from core.autopilot import Autopilot
 from core.market_context import MarketContext
 from core import performance
+from core.binance_websocket import BinanceKlineStream
 
 # Runtime objects are created only after the HTTP socket is bound. A second
 # launcher must fail fast on Address already in use without opening SQLite.
 coordinator = None
 autopilot = None
+market_stream = None
 
 # Continuous market scanning is analysis-only. It never invokes the execution
 # engine or Autopilot. Every pass analyzes the complete eligible Binance universe.
@@ -163,7 +165,7 @@ def continuous_scan_worker():
 
 
 def initialize_runtime():
-    global coordinator, autopilot
+    global coordinator, autopilot, market_stream
     initial_balance = float(os.environ.get("DEMO_INITIAL_BALANCE", "1000"))
     if not math.isfinite(initial_balance) or initial_balance <= 0:
         raise ValueError("DEMO_INITIAL_BALANCE must be a finite positive number")
@@ -172,6 +174,9 @@ def initialize_runtime():
                                    news_max_age_h=12)
     coordinator.market_context = market_context
     autopilot = Autopilot(coordinator, context=market_context)
+    market_stream = BinanceKlineStream(
+        coordinator.market_feed, autopilot.on_market_kline
+    )
 
 
 submission_store_path = PROJECT_ROOT / "data" / "agent_submissions.json"
@@ -488,10 +493,25 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json(coordinator.notifier.status())
 
             if path == "/health":
-                return self.send_json({"ok": True, "mode": coordinator.mode, "api_version": API_VERSION})
+                stream = market_stream.status() if market_stream else {}
+                return self.send_json({
+                    "ok": True, "mode": coordinator.mode,
+                    "api_version": API_VERSION,
+                    "websocket": stream,
+                })
+            if path == "/market/stream/status":
+                return self.send_json({
+                    "success": True,
+                    "strategy_timeframe": "5m",
+                    "entry_timing": "next_5m_candle_open",
+                    "websocket": market_stream.status() if market_stream else {},
+                })
             if path == "/scan/status":
                 with scan_status_lock:
                     snapshot = json.loads(json.dumps(scan_status))
+                snapshot["websocket"] = market_stream.status() if market_stream else {}
+                snapshot["strategy_timeframe"] = "5m"
+                snapshot["entry_timing"] = "next_5m_candle_open"
                 return self.send_json(snapshot)
             if path == "/status":
                 with scan_status_lock:
@@ -502,6 +522,13 @@ class APIHandler(BaseHTTPRequestHandler):
                     "controls": coordinator.get_agent_controls(),
                     "demo": coordinator.get_demo_positions(),
                     "scan": scan_snapshot,
+                    "websocket": market_stream.status() if market_stream else {},
+                    "strategy": {
+                        "version": "v3",
+                        "signal_timeframe": "5m",
+                        "entry_timing": "next_5m_candle_open",
+                        "live_mode_locked": True,
+                    },
                 })
             return self.send_json({"error": "Not found"}, 404)
         except Exception as e:
@@ -637,8 +664,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json({
                     "success": True,
                     "executed": False,
-                    "message": "Continuous market scan is running; no trade was executed.",
+                    "message": "5m WebSocket strategy clock is active; this action does not execute a trade.",
                     "scan": snapshot,
+                    "websocket": market_stream.status() if market_stream else {},
                 })
 
             if path == "/learning/enable":
@@ -721,16 +749,13 @@ if __name__ == "__main__":
         daemon=True,
     )
     monitor_thread.start()
-    threading.Thread(
-        target=continuous_scan_worker,
-        name="continuous-market-scanner",
-        daemon=True,
-    ).start()
-    threading.Thread(
-        target=autopilot.run_forever,
-        name="autopilot",
-        daemon=True,
-    ).start()
+    market_stream.start()
+    with scan_status_lock:
+        scan_status["running"] = True
+        scan_status["futures"]["phase"] = "websocket_5m"
+        scan_status["spot"]["phase"] = "websocket_5m"
+        scan_status["updated_at"] = time.time()
+    print("[SYSTEM] V3 entry signals are driven by closed 5m WebSocket candles")
 
     try:
         server.serve_forever()
