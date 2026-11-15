@@ -197,12 +197,17 @@ class SpotDemoMixin:
         # Keep manual chart analysis bound to its own signal even if autopilot
         # refreshes the shared latest-signal cache concurrently.
         signal = signal_override if isinstance(signal_override, dict) else self.last_signals.get(domain, {})
+        if (entry_reference_price is None
+                or signal.get("entry_origin") not in {"AUTOPILOT_WS_5M", "MANUAL_AGENT_WS_5M"}):
+            return {"approved": False, "reason": "All entries must pass the 5m WebSocket opening event"}
         if str(signal.get("symbol", "")).upper() != symbol:
             return {"approved": False, "reason": "Symbol does not match latest signal"}
         if str(signal.get("direction", "")).upper() != "BUY":
             return {"approved": False, "reason": "Latest signal is not BUY"}
         plan = signal.get("trade_plan")
-        if signal.get("strategy_version") != "v3" or not isinstance(plan, dict) or plan.get("success") is not True or plan.get("strategy_version") != "v3":
+        if (signal.get("strategy_version") != "v3" or not isinstance(plan, dict)
+                or plan.get("success") is not True or plan.get("strategy_version") != "v3"
+                or str(plan.get("timeframe", "")).lower() != "5m"):
             return {"approved": False, "reason": "Only an approved V3 Spot trade plan is permitted"}
 
         trade_id = None
