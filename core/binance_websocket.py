@@ -219,21 +219,44 @@ class BinanceKlineStream:
         for interval, limit in self.CACHE_LIMITS[market].items():
             if self._stop.is_set():
                 return False
-            try:
-                frame = self.feed.fetch_candles(
-                    market, symbol, interval, limit=limit, closed_only=True)
-                self._merge_frame(market, symbol, interval, frame)
-            except Exception as error:
+            with self._cache_lock:
+                existing = self._cache.get((market, symbol, interval))
+                already_ready = (
+                    existing is not None
+                    and len(existing) >= self.REQUIRED_ROWS[market][interval]
+                    and "is_closed" in existing.columns
+                    and bool(existing["is_closed"].iloc[-1])
+                )
+            if already_ready:
+                continue
+            last_error = None
+            for attempt in range(2):
+                if self._stop.is_set():
+                    return False
+                try:
+                    frame = self.feed.fetch_candles(
+                        market, symbol, interval, limit=limit, closed_only=True)
+                    self._merge_frame(market, symbol, interval, frame)
+                    last_error = None
+                    break
+                except Exception as error:
+                    last_error = str(error)
+                    if attempt == 0 and not self._stop.wait(1):
+                        continue
+            if last_error:
                 with self._lock:
-                    self._warm_errors[(market, symbol, interval)] = str(error)
+                    self._warm_errors[(market, symbol, interval)] = last_error
+            else:
+                with self._lock:
+                    self._warm_errors.pop((market, symbol, interval), None)
         ready = self._snapshot(market, symbol) is not None
         with self._lock:
             if ready:
                 self._cache_ready.add((market, symbol))
             state = self._status[market]
-            state["cache_warmup_completed"] += 1
-            state["cache_ready_symbols"] = sum(
-                1 for key in self._cache_ready if key[0] == market)
+            state["cache_warmup_completed"] = len(
+                [key for key in self._cache_ready if key[0] == market])
+            state["cache_ready_symbols"] = state["cache_warmup_completed"]
             state["cache_warmup_errors"] = sum(
                 1 for key in self._warm_errors if key[0] == market)
         return ready
@@ -244,16 +267,24 @@ class BinanceKlineStream:
             self._status[market]["cache_warmup_completed"] = 0
             self._status[market]["cache_ready_symbols"] = 0
             self._status[market]["cache_warmup_errors"] = 0
-        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="candle-warm-" + market) as pool:
-            futures = [pool.submit(self._warm_symbol, market, symbol) for symbol in symbols]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as error:
-                    with self._lock:
-                        self._status[market]["last_error"] = "cache warmup: " + str(error)
-                if self._stop.is_set():
-                    break
+        while not self._stop.is_set():
+            with self._cache_lock:
+                ready = {symbol for m, symbol in self._cache_ready if m == market}
+            pending = [symbol for symbol in symbols if symbol not in ready]
+            if not pending:
+                return
+            with ThreadPoolExecutor(max_workers=8, thread_name_prefix="candle-warm-" + market) as pool:
+                futures = [pool.submit(self._warm_symbol, market, symbol) for symbol in pending]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as error:
+                        with self._lock:
+                            self._status[market]["last_error"] = "cache warmup: " + str(error)
+                    if self._stop.is_set():
+                        return
+            if self._stop.wait(30):
+                return
 
     def _recompute_connection_status(self, market):
         live = sum(1 for key, value in self._connection_live.items()
