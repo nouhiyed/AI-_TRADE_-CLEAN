@@ -1244,7 +1244,7 @@ class TradingCoordinator(SpotDemoMixin):
     def get_agent_controls(self):
         return {d: {"enabled": self._agent_enabled(d)} for d in self.agents}
 
-    def analyze_live(self, symbol, preferred_timeframe=None, domains=None, include_orderbook=True):
+    def analyze_live(self, symbol, preferred_timeframe=None, domains=None, include_orderbook=True, agent_overrides=None):
         symbol = str(symbol).strip().upper()
 
         if not symbol:
@@ -1269,9 +1269,11 @@ class TradingCoordinator(SpotDemoMixin):
             return {"symbol": symbol, "source": "binance_rest", "signals": {},
                     "data_errors": {"domain": "Unknown domain(s): " + ", ".join(sorted(unknown_domains))}}
 
-        for domain, agent in self.agents.items():
+        overrides = agent_overrides if isinstance(agent_overrides, dict) else {}
+        for domain, default_agent in self.agents.items():
             if domain not in selected_domains:
                 continue
+            agent = overrides.get(domain, default_agent)
             if not self._agent_enabled(domain):
                 results[domain] = {
                     "status": "STOPPED",
@@ -1326,7 +1328,7 @@ class TradingCoordinator(SpotDemoMixin):
         }
 
 
-    def analyze_live_from_frames(self, symbol, domain, frames):
+    def analyze_live_from_frames(self, symbol, domain, frames, agent=None):
         """Run V3 against the closed multi-timeframe WebSocket cache (no REST I/O)."""
         symbol = str(symbol).strip().upper()
         domain = str(domain).strip().lower()
@@ -1374,7 +1376,8 @@ class TradingCoordinator(SpotDemoMixin):
         }
         try:
             agent_data = self.market_engine.for_live_agent(live_data, domain)
-            signal = self.agents[domain].analyze(agent_data)
+            active_agent = agent if agent is not None else self.agents[domain]
+            signal = active_agent.analyze(agent_data)
             if not isinstance(signal, dict) or signal.get("strategy_version") != "v3":
                 raise RuntimeError("V3-only strategy path is unavailable")
             plan = signal.get("trade_plan")
@@ -1405,7 +1408,7 @@ class TradingCoordinator(SpotDemoMixin):
 
     def submit_chart_signal(
         self, domain, symbol, timeframe,
-        entry_price=None, take_profit=None, stop_loss=None
+        entry_price=None, take_profit=None, stop_loss=None, agent=None
     ):
         """Review user-proposed chart levels; only an agent-approved plan can reach DEMO execution."""
         domain = str(domain).strip().lower()
@@ -1437,7 +1440,8 @@ class TradingCoordinator(SpotDemoMixin):
         # A chart submission belongs to one selected market/agent. Do not
         # fetch the other market or run its agent on this request.
         analysis = self.analyze_live(
-            symbol, preferred_timeframe=timeframe, domains=[domain]
+            symbol, preferred_timeframe=timeframe, domains=[domain],
+            agent_overrides={domain: agent} if agent is not None else None,
         )
         signal = analysis.get("signals", {}).get(domain, {})
         if not isinstance(signal, dict) or signal.get("error"):
