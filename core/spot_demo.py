@@ -340,13 +340,23 @@ class SpotDemoMixin:
                     domain = snapshot["domain"]
                     symbol = str(snapshot["symbol"]).upper()
                     stop = Decimal(str(snapshot["stop_loss"]))
-                    target = Decimal(str(snapshot["take_profit"]))
-                    trailing_active = bool(snapshot.get("trailing_stop_active"))
+                    trailing_enabled = bool(snapshot.get("trailing_take_profit_enabled", True))
+                    trailing_active = bool(snapshot.get(
+                        "trailing_take_profit_armed", snapshot.get("trailing_stop_active", False)
+                    ))
+                    target = None if trailing_enabled else Decimal(str(snapshot["take_profit"]))
 
                     # Quote and candle catch-up run without the global coordinator lock.
                     price = self._spot_like_price(domain, symbol, "SELL")
+                    entry_price = Decimal(str(snapshot.get("entry_price") or price))
+                    initial_stop = Decimal(str(
+                        snapshot.get("initial_stop_loss") or snapshot.get("stop_loss") or stop
+                    ))
+                    initial_risk = abs(entry_price - initial_stop)
+                    if trailing_enabled and not trailing_active and initial_risk > 0:
+                        trailing_active = price >= entry_price + initial_risk
                     trail_update = None
-                    if trailing_active:
+                    if trailing_enabled and trailing_active:
                         try:
                             trail_frame = self.market_feed.fetch_candles(
                                 "spot", symbol, "5m", limit=40, closed_only=True)
@@ -354,7 +364,9 @@ class SpotDemoMixin:
                                 trail_frame, "LONG", stop,
                                 snapshot.get("trailing_best_price"), price)
                             if trail_update:
-                                stop = Decimal(str(trail_update["stop"]))
+                                candidate = Decimal(str(trail_update["stop"]))
+                                stop = max(candidate, entry_price)
+                                trail_update["stop"] = float(stop)
                         except Exception as trail_error:
                             with self._demo_lock:
                                 current = self.demo_positions.get(position_id)
@@ -385,6 +397,11 @@ class SpotDemoMixin:
                         ):
                             continue
                         current["last_checked_ms"] = int(time.time() * 1000)
+                        if trailing_enabled:
+                            current["take_profit_mode"] = "TRAILING"
+                            current["trailing_take_profit_enabled"] = True
+                            current["trailing_no_fixed_target"] = True
+                            current["trailing_take_profit_armed"] = bool(trailing_active)
                         if trailing_active:
                             current["trailing_stop_active"] = True
                             current["trailing_best_price"] = str(
