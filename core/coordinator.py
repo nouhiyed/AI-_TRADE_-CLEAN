@@ -1196,14 +1196,14 @@ class TradingCoordinator(SpotDemoMixin):
     def get_agent_controls(self):
         return {d: {"enabled": self._agent_enabled(d)} for d in self.agents}
 
-    def analyze_live(self, symbol, preferred_timeframe=None, domains=None):
+    def analyze_live(self, symbol, preferred_timeframe=None, domains=None, include_orderbook=True):
         symbol = str(symbol).strip().upper()
 
         if not symbol:
             return {"error": "Symbol cannot be empty"}
 
         try:
-            live_data = self.market_engine.build_live(symbol, domains=domains)
+            live_data = self.market_engine.build_live(\n                symbol, domains=domains, include_orderbook=include_orderbook\n            )
         except Exception as error:
             return {
                 "symbol": symbol,
@@ -1541,7 +1541,7 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["futures"])
+                return self.analyze_live(scan_item["symbol"], domains=["futures"], include_orderbook=False)
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
@@ -1767,7 +1767,7 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["spot"])
+                return self.analyze_live(scan_item["symbol"], domains=["spot"], include_orderbook=False)
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
