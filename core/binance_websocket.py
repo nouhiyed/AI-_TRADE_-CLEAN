@@ -36,8 +36,9 @@ class BinanceKlineStream:
                  refresh_seconds=1800, reconnect_seconds=3):
         self.feed = market_feed
         self.on_kline = on_kline
-        self.max_symbols = int(max_symbols or os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "1024"))
-        self.max_symbols = min(1024, max(10, self.max_symbols))
+        # Initial mobile rollout deliberately watches only the most liquid 5-8 symbols.
+        self.max_symbols = int(max_symbols or os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "8"))
+        self.max_symbols = min(8, max(5, self.max_symbols))
         self.refresh_seconds = max(300, int(refresh_seconds))
         self.reconnect_seconds = max(1, int(reconnect_seconds))
         self._stop = threading.Event()
@@ -59,7 +60,7 @@ class BinanceKlineStream:
                 "connected": False, "fully_connected": False, "state": "stopped",
                 "symbols": 0, "total_chunks": 0, "connected_chunks": 0,
                 "last_event": None, "last_closed_candle": None,
-                "reconnects": 0, "last_error": None,
+                "reconnects": 0, "watchdog_restarts": 0, "last_error": None,
                 "cache_ready_symbols": 0, "cache_warmup_total": 0,
                 "cache_warmup_completed": 0, "cache_warmup_errors": 0,
             }
@@ -73,6 +74,18 @@ class BinanceKlineStream:
                 market: sum(1 for key in self._latest_candles if key[0] == market)
                 for market in ("spot", "futures")
             }
+            for market in ("spot", "futures"):
+                last_event = snapshot[market].get("last_event")
+                try:
+                    stamp = datetime.fromisoformat(last_event)
+                    age = max(0.0, (datetime.now(timezone.utc) - stamp).total_seconds())
+                except (TypeError, ValueError):
+                    age = None
+                snapshot[market]["last_event_age_seconds"] = age
+                snapshot[market]["watchdog_healthy"] = bool(
+                    snapshot[market].get("fully_connected")
+                    and age is not None and age <= 360
+                )
             return snapshot
 
     def latest_candle(self, market, symbol):
@@ -104,6 +117,11 @@ class BinanceKlineStream:
         )
         self._threads["refresh"] = refresh
         refresh.start()
+        watchdog = threading.Thread(
+            target=self._watchdog_loop, name="binance-ws-watchdog", daemon=True
+        )
+        self._threads["watchdog"] = watchdog
+        watchdog.start()
         return self.status()
 
     def stop(self):
@@ -120,6 +138,42 @@ class BinanceKlineStream:
                 value["connected"] = False
                 value["fully_connected"] = False
                 value["state"] = "stopping"
+
+    def _watchdog_loop(self):
+        """Reconnect a silently stalled market stream and revive dead supervisors."""
+        while not self._stop.wait(30):
+            now = datetime.now(timezone.utc)
+            for market in ("spot", "futures"):
+                with self._lock:
+                    supervisor = self._threads.get(market)
+                    if supervisor is None or not supervisor.is_alive():
+                        self._threads[market] = threading.Thread(
+                            target=self._run_market, args=(market,),
+                            name="binance-ws-" + market, daemon=True,
+                        )
+                        self._threads[market].start()
+                        self._status[market]["watchdog_restarts"] += 1
+                        self._status[market]["state"] = "watchdog_restarted"
+                        continue
+                    last_event = self._status[market].get("last_event")
+                    apps = [app for (app_market, _), app in self._apps.items()
+                            if app_market == market]
+                try:
+                    stamp = datetime.fromisoformat(last_event) if last_event else None
+                    stale = stamp is None or (now - stamp).total_seconds() > 360
+                except (TypeError, ValueError):
+                    stale = True
+                if stale and apps:
+                    with self._lock:
+                        self._status[market]["watchdog_restarts"] += 1
+                        self._status[market]["state"] = "watchdog_stale_stream"
+                        self._status[market]["connected"] = False
+                        self._status[market]["fully_connected"] = False
+                    for app in apps:
+                        try:
+                            app.close()
+                        except Exception:
+                            pass
 
     def _refresh_loop(self):
         while not self._stop.wait(self.refresh_seconds):
