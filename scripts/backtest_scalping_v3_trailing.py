@@ -175,10 +175,10 @@ def simulate(market,symbol,raw):
             else:
                 favorable=(hi-entry if side=="LONG" else entry-lo)
                 if not active["armed"] and favorable>=initial_risk:
-                    active["armed"]=True; active["armed_at"]=str(row.dt)
+                    active["armed"]=True; active["armed_at"]=str(row["dt"])
                 # Only candles fully closed before this 1m candle may update the trail.
                 if active["armed"]:
-                    closed=five.loc[five.index < pd.Timestamp(row.dt)]
+                    closed=five.loc[five.index < pd.Timestamp(row["dt"])]
                     if len(closed)>=16:
                         update=calculate_trailing_stop(closed.tail(40),side,active["stop"],
                             active["best_price"],price)
@@ -194,7 +194,7 @@ def simulate(market,symbol,raw):
             if reason:
                 gross=((exit_price-entry)/entry if side=="LONG" else (entry-exit_price)/entry)
                 net=gross-cost
-                active.update(exit_time=str(row.dt),exit_price=exit_price,reason=reason,
+                active.update(exit_time=str(row["dt"]),exit_price=exit_price,reason=reason,
                     gross_pct=gross*100,net_pct=net*100,net_usdt=active["notional"]*net,
                     hold_minutes=i-active["entry_i"],stop_final=active["stop"])
                 trades.append(active); active=None
@@ -208,14 +208,14 @@ def simulate(market,symbol,raw):
             if net_reward<.00035 or net_rr<1.5: continue
             side=str(row.direction); stop=entry-distance if side=="LONG" else entry+distance
             active={"market":market,"symbol":symbol,"side":side,"setup":str(row.setup),
-                "signal_time":str(row.dt),"entry_time":str(nxt.dt),"entry":entry,
+                "signal_time":str(row["dt"]),"entry_time":str(nxt["dt"]),"entry":entry,
                 "initial_stop":stop,"stop":stop,"initial_risk":distance,"best_price":entry,
                 "armed":False,"armed_at":None,"trail_updates":0,"entry_i":i+1,
                 "notional":100.0,"target_r_reference":target_r,"net_rr_at_entry":net_rr}
     if active:
         row=sig.iloc[-1]; exit_price=float(row.close); entry=active["entry"]; side=active["side"]
         gross=((exit_price-entry)/entry if side=="LONG" else (entry-exit_price)/entry); net=gross-cost
-        active.update(exit_time=str(row.dt),exit_price=exit_price,reason="END_OF_DATA",
+        active.update(exit_time=str(row["dt"]),exit_price=exit_price,reason="END_OF_DATA",
             gross_pct=gross*100,net_pct=net*100,net_usdt=active["notional"]*net,
             hold_minutes=len(sig)-1-active["entry_i"],stop_final=active["stop"])
         trades.append(active)
