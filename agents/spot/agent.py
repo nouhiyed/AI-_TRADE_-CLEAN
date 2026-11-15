@@ -22,8 +22,8 @@ class SpotAgent(BaseAgent):
             "strategy_version": "v3",
             "trade_plan": plan if approved else plan,
             "scores": {"BUY": 1 if approved else 0, "SELL": 0},
-            "timeframes": {"1m": {"strategy": "v3"}, "5m": {"strategy": "v3"},
-                           "15m": {"strategy": "v3"}, "1h": {"strategy": "v3"},
-                           "4h": {"strategy": "v3"}},
+            "signal_timeframe": "5m",
+            "timeframes": {"5m": {"role": "entry_trigger"}, "15m": {"role": "trend_context"},
+                           "1h": {"role": "trend_context"}, "4h": {"role": "macro_filter"}},
         }
         return self.record_signal(signal)
