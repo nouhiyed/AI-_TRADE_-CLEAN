@@ -42,7 +42,7 @@ def download(url,label):
             if attempt<5: time.sleep(min(30,2**(attempt+1)))
     raise RuntimeError(f"Download failed for {label}: {error}")
 
-def archive_url(market,period,symbol,date,interval="1m"):
+def archive_url(market,period,symbol,date,interval="5m"):
     m="spot" if market=="spot" else "futures/um"
     return f"{BASE}/{m}/{period}/klines/{symbol}/{interval}/{symbol}-{interval}-{date}.zip"
 
@@ -100,15 +100,15 @@ def load_data(market,symbol):
     return df
 
 def validate(df,market,symbol):
-    expected=DAYS*1440; minimum=math.ceil(expected*MIN_COVERAGE)
-    if df.empty or len(df)<minimum or int(df.open_time.iloc[0])>START+60000 or int(df.open_time.iloc[-1])<END-60000:
+    expected=DAYS*288; minimum=math.ceil(expected*MIN_COVERAGE)
+    if df.empty or len(df)<minimum or int(df.open_time.iloc[0])>START+300000 or int(df.open_time.iloc[-1])<END-300000:
         raise RuntimeError(f"INCOMPLETE {market} {symbol}: {len(df):,}/{expected:,} candles; minimum {minimum:,}")
     return expected
 
 def indicators(x):
     x=x.copy()
     for p in (9,20,21,50,200): x[f"EMA_{p}"]=EMAIndicator(x.close,p).ema_indicator()
-    x["RSI"]=RSIIndicator(x.close,14).rsi(); x["MACD_hist"]=MACD(x.close).macd_diff()
+    x["RSI"]=RSIIndicator(x.close,14).rsi(); x["MACD_hist"]=MACD(x.close,window_fast=8,window_slow=21,window_sign=5).macd_diff()
     x["ATR"]=AverageTrueRange(x.high,x.low,x.close).average_true_range()
     x["ADX"]=ADXIndicator(x.high,x.low,x.close).adx()
     bb=BollingerBands(x.close); x["BB_lower"]=bb.bollinger_lband(); x["BB_upper"]=bb.bollinger_hband()
@@ -123,16 +123,15 @@ def resample(raw,rule):
     x.index=x.index+pd.Timedelta(rule)
     return x
 
-def align(one,frame,prefix):
-    # A 1m row becomes available at its CLOSE (open_time + 1m).
-    # Higher-timeframe rows are indexed by their CLOSE time. This prevents
-    # using an unfinished 5m/15m/1h/4h candle and removes the one-minute shift.
+def align(base,frame,prefix,base_minutes=5):
+    # Base 5m rows become available only at their close. Higher timeframes
+    # are indexed by close time; merge_asof prevents unfinished-candle leakage.
     cols=["close","EMA_21","EMA_50","EMA_200","ATR","ADX"]
     right=frame[[c for c in cols if c in frame]].copy()
     right.columns=[prefix+c for c in right.columns]
-    left=one.copy()
+    left=base.copy()
     left["__signal_dt"]=left.index
-    left["__available_at"]=left.index+pd.Timedelta(minutes=1)
+    left["__available_at"]=left.index+pd.Timedelta(minutes=base_minutes)
     right["__htf_close_at"]=right.index
     merged=pd.merge_asof(
         left.reset_index(drop=True).sort_values("__available_at"),
@@ -141,100 +140,168 @@ def align(one,frame,prefix):
     merged.index=pd.DatetimeIndex(merged.pop("__signal_dt"))
     return merged.drop(columns=["__available_at","__htf_close_at"])
 
+
 def build_signals(raw,market):
-    one=indicators(raw.set_index("dt")); five=resample(raw,"5min"); fifteen=resample(raw,"15min")
-    one=align(align(one,five,"5_"),fifteen,"15_")
-    if market=="spot": one=align(align(one,resample(raw,"1h"),"1h_"),resample(raw,"4h"),"4h_")
-    one["candle_loc"]=(one.close-one.low)/(one.high-one.low).replace(0,np.nan)
-    one["body"]=(one.close-one.open).abs()/one.ATR
-    one["vr"]=one.volume/one.volume.shift(1).rolling(30).mean()
-    one["prior_high"]=one.high.shift(1).rolling(10).max(); one["prior_low"]=one.low.shift(1).rolling(10).min()
-    bull=(one["15_close"]>one["15_EMA_50"])&((one["5_close"]>=one["5_EMA_21"])|(one["15_EMA_21"]>one["15_EMA_50"]))
-    bear=(one["15_close"]<one["15_EMA_50"])&((one["5_close"]<=one["5_EMA_21"])|(one["15_EMA_21"]<one["15_EMA_50"]))
-    pl=bull&(one.low<=one.EMA_20+.18*one.ATR)&(one.close>one.EMA_9)&(one.close>one.open)&one.RSI.between(42,69)&(one.MACD_hist>=one.MACD_hist.shift(1))&(one.candle_loc>=.55)&(one.body>=.08)&(one.vr>=.72)
-    ps=bear&(one.high>=one.EMA_20-.18*one.ATR)&(one.close<one.EMA_9)&(one.close<one.open)&one.RSI.between(31,58)&(one.MACD_hist<=one.MACD_hist.shift(1))&(one.candle_loc<=.45)&(one.body>=.08)&(one.vr>=.72)
-    bl=bull&(one.close>one.prior_high+.015*one.ATR)&(one.close>one.open)&one.RSI.between(48,76)&(one.candle_loc>=.62)&(one.body>=.12)&(one.vr>=.85)
-    bs=bear&(one.close<one.prior_low-.015*one.ATR)&(one.close<one.open)&one.RSI.between(24,52)&(one.candle_loc<=.38)&(one.body>=.12)&(one.vr>=.85)
+    five=indicators(raw.set_index("dt"))
+    fifteen=resample(raw,"15min")
+    hourly=resample(raw,"1h")
+    five=align(align(five,fifteen,"15_",5),hourly,"1h_",5)
+    if market=="spot":
+        five=align(five,resample(raw,"4h"),"4h_",5)
+
+    span=(five.high-five.low).replace(0,np.nan)
+    five["candle_loc"]=(five.close-five.low)/span
+    five["body"]=(five.close-five.open).abs()/five.ATR
+    five["upper_wick"]=(five.high-five[["open","close"]].max(axis=1))/span
+    five["lower_wick"]=(five[["open","close"]].min(axis=1)-five.low)/span
+    five["vr"]=five.volume/five.volume.shift(1).rolling(24).mean()
+    five["prior_high"]=five.high.shift(1).rolling(12).max()
+    five["prior_low"]=five.low.shift(1).rolling(12).min()
+
+    bull=(five["15_close"]>five["15_EMA_50"])&(
+        (five["15_close"]>=five["15_EMA_21"])|
+        (five["1h_EMA_21"]>five["1h_EMA_50"]))
+    bear=(five["15_close"]<five["15_EMA_50"])&(
+        (five["15_close"]<=five["15_EMA_21"])|
+        (five["1h_EMA_21"]<five["1h_EMA_50"]))
+
+    pl=(bull&(five.low<=five.EMA_20+.12*five.ATR)&
+        (five.close>five.EMA_9)&(five.close>five.open)&
+        five.RSI.between(45,67)&
+        (five.MACD_hist>=five.MACD_hist.shift(1))&
+        (five.candle_loc>=.62)&(five.body>=.10)&(five.vr>=.85)&
+        (five.lower_wick>=.16))
+    ps=(bear&(five.high>=five.EMA_20-.12*five.ATR)&
+        (five.close<five.EMA_9)&(five.close<five.open)&
+        five.RSI.between(33,55)&
+        (five.MACD_hist<=five.MACD_hist.shift(1))&
+        (five.candle_loc<=.38)&(five.body>=.10)&(five.vr>=.85)&
+        (five.upper_wick>=.16))
+    bl=(bull&(five.close>five.prior_high+.05*five.ATR)&
+        (five.close>five.open)&five.RSI.between(52,74)&
+        (five.candle_loc>=.75)&(five.body>=.18)&(five.vr>=1.05)&
+        (five.upper_wick<=.18))
+    bs=(bear&(five.close<five.prior_low-.05*five.ATR)&
+        (five.close<five.open)&five.RSI.between(26,48)&
+        (five.candle_loc<=.25)&(five.body>=.18)&(five.vr>=1.05)&
+        (five.lower_wick<=.18))
+
     if market=="futures":
-        rl=(one["5_ADX"]<=20)&(one.candle_loc>=.62)&(one.close>one.open)&(one.RSI<=29)&(one.close<=one.BB_lower*1.003)
-        rs=(one["5_ADX"]<=20)&(one.candle_loc<=.38)&(one.close<one.open)&(one.RSI>=71)&(one.close>=one.BB_upper*.997)
-        masks=[pl,ps,bl,bs,rl,rs]; dirs=["LONG","SHORT","LONG","SHORT","LONG","SHORT"]
-        setups=["MICRO_PULLBACK","MICRO_PULLBACK","MICRO_BREAKOUT","MICRO_BREAKOUT","RANGE_REJECTION","RANGE_REJECTION"]
-        base=[1.35,1.35,1.45,1.45,1.25,1.25]
+        rl=((five["15_ADX"]<=18)&(five.candle_loc>=.72)&
+            (five.close>five.open)&(five.RSI<=30)&(five.vr>=.80)&
+            (five.lower_wick>=.35)&(five.close<=five.BB_lower*1.002))
+        rs=((five["15_ADX"]<=18)&(five.candle_loc<=.28)&
+            (five.close<five.open)&(five.RSI>=70)&(five.vr>=.80)&
+            (five.upper_wick>=.35)&(five.close>=five.BB_upper*.998))
+        masks=[pl,ps,bl,bs,rl,rs]
+        dirs=["LONG","SHORT","LONG","SHORT","LONG","SHORT"]
+        setups=["PULLBACK_5M","PULLBACK_5M","BREAKOUT_5M","BREAKOUT_5M",
+                "RANGE_REJECTION_5M","RANGE_REJECTION_5M"]
+        base=[1.60,1.60,1.80,1.80,1.55,1.55]
     else:
-        bullish=bull|((one["1h_close"]>one["1h_EMA_200"])&(one["5_close"]>=one["5_EMA_21"]))
-        deep=(one["4h_close"]<one["4h_EMA_200"]*.975)&(one["1h_close"]<one["1h_EMA_200"])
-        pull=bullish&~deep&(one.low<=one.EMA_20+.20*one.ATR)&(one.close>one.EMA_9)&(one.close>one.open)&one.RSI.between(40,70)&(one.MACD_hist>=one.MACD_hist.shift(1))&(one.candle_loc>=.54)&(one.body>=.07)&(one.vr>=.68)
-        breakout=bullish&~deep&(one.close>one.prior_high+.01*one.ATR)&(one.close>one.open)&one.RSI.between(48,76)&(one.candle_loc>=.60)&(one.body>=.11)&(one.vr>=.82)
-        bounce=(one["5_ADX"]<=19)&(one.close<=one.BB_lower*1.004)&(one.RSI<=27)&(one.close>one.open)&(one.candle_loc>=.60)&(one.vr>=.65)
-        masks=[pull,breakout,bounce]; dirs=["LONG"]*3; setups=["MICRO_PULLBACK","MICRO_BREAKOUT","RANGE_BOUNCE"]; base=[1.45,1.55,1.35]
-    one["direction"]=""; one["setup"]=""; one["base_r"]=0.0
+        bullish=bull|((five["1h_close"]>five["1h_EMA_200"])&
+                      (five["15_close"]>=five["15_EMA_21"]))
+        deep=((five["4h_close"]<five["4h_EMA_200"]*.985)&
+              (five["1h_close"]<five["1h_EMA_200"]))
+        pull=(bullish&~deep&(five.low<=five.EMA_20+.14*five.ATR)&
+              (five.close>five.EMA_9)&(five.close>five.open)&
+              five.RSI.between(44,68)&
+              (five.MACD_hist>=five.MACD_hist.shift(1))&
+              (five.candle_loc>=.62)&(five.body>=.10)&(five.vr>=.82)&
+              (five.lower_wick>=.16))
+        breakout=(bullish&~deep&(five.close>five.prior_high+.05*five.ATR)&
+                  (five.close>five.open)&five.RSI.between(52,74)&
+                  (five.candle_loc>=.75)&(five.body>=.18)&
+                  (five.vr>=1.05)&(five.upper_wick<=.18))
+        bounce=((five["15_ADX"]<=18)&(five.close<=five.BB_lower*1.002)&
+                (five.RSI<=30)&(five.close>five.open)&
+                (five.candle_loc>=.72)&(five.vr>=.80)&
+                (five.lower_wick>=.35))
+        masks=[pull,breakout,bounce]
+        dirs=["LONG"]*3
+        setups=["PULLBACK_5M","BREAKOUT_5M","RANGE_BOUNCE_5M"]
+        base=[1.65,1.85,1.55]
+
+    five["direction"]=""; five["setup"]=""; five["base_r"]=0.0
     for mask,direction,setup,r in zip(masks,dirs,setups,base):
-        choose=mask&(one.direction=="")
-        one.loc[choose,"direction"]=direction; one.loc[choose,"setup"]=setup; one.loc[choose,"base_r"]=r
-    return one
+        choose=mask&(five.direction=="")
+        five.loc[choose,"direction"]=direction
+        five.loc[choose,"setup"]=setup
+        five.loc[choose,"base_r"]=r
+    return five
+
 
 def simulate(market,symbol,raw):
     sig=build_signals(raw,market).rename_axis("dt").reset_index()
-    # 5m candles are formed from data strictly before the current 1m candle.
-    five=resample(raw,"5min")[["high","low","close"]]
+    five=raw.set_index("dt")[["high","low","close"]]
     trades=[]; active=None; fee=FEE[market]; cost=2*(fee+ADVERSE)
     for i in range(250,len(sig)-1):
         row=sig.iloc[i]; nxt=sig.iloc[i+1]
         price=float(row.close); hi=float(row.high); lo=float(row.low)
         if active:
-            side=active["side"]; entry=active["entry"]; initial_risk=active["initial_risk"]
-            # Conservative OHLC ordering: existing stop is checked before any new arm.
+            side=active["side"]; entry=active["entry"]
             stop_hit=(lo<=active["stop"]) if side=="LONG" else (hi>=active["stop"])
             if stop_hit:
-                exit_price=active["stop"]; reason="TRAILING_STOP" if active["armed"] else "STOP_LOSS"
+                exit_price=active["stop"]
+                reason="TRAILING_STOP" if active["armed"] else "STOP_LOSS"
             else:
                 favorable=(hi-entry if side=="LONG" else entry-lo)
-                if not active["armed"] and favorable>=initial_risk:
-                    active["armed"]=True; active["armed_at"]=str(row["dt"])
-                # Only candles fully closed before this 1m candle may update the trail.
+                if not active["armed"] and favorable>=active["initial_risk"]:
+                    active["armed"]=True
+                    active["armed_at"]=str(row["dt"])
                 if active["armed"]:
-                    closed=five.loc[five.index <= pd.Timestamp(row["dt"])+pd.Timedelta(minutes=1)]
+                    # This 5m candle is now fully closed. Its trailing update
+                    # becomes active only from the following 5m candle.
+                    closed=five.loc[five.index <= pd.Timestamp(row["dt"])+pd.Timedelta(minutes=5)]
                     if len(closed)>=16:
-                        update=calculate_trailing_stop(closed.tail(40),side,active["stop"],
+                        update=calculate_trailing_stop(
+                            closed.tail(40),side,active["stop"],
                             active["best_price"],price)
                         if update:
                             candidate=float(update["stop"])
                             active["best_price"]=float(update["best_price"])
                             active["stop"]=apply_cost_aware_trailing_floor(
-                                candidate, entry, side, active["best_price"], FEE[market], ADVERSE)
+                                candidate,entry,side,active["best_price"],FEE[market],ADVERSE)
                             active["trail_updates"]+=1
-                # A newly calculated stop becomes active from the next 1m candle.
-                # This avoids look-ahead fills from lows/highs that may have occurred
-                # before the current candle close used to calculate the new stop.
                 exit_price=None; reason=None
             if reason:
                 gross=((exit_price-entry)/entry if side=="LONG" else (entry-exit_price)/entry)
                 net=gross-cost
-                active.update(exit_time=str(row["dt"]),exit_price=exit_price,reason=reason,
-                    gross_pct=gross*100,net_pct=net*100,net_usdt=active["notional"]*net,
-                    hold_minutes=i-active["entry_i"],stop_final=active["stop"])
+                active.update(exit_time=str(row["dt"]+pd.Timedelta(minutes=5)),
+                    exit_price=exit_price,reason=reason,gross_pct=gross*100,
+                    net_pct=net*100,net_usdt=active["notional"]*net,
+                    hold_minutes=(i-active["entry_i"])*5,stop_final=active["stop"])
                 trades.append(active); active=None
+
         if active is None and str(row.direction) in ("LONG","SHORT"):
-            entry=float(nxt.open); atr=float(row["5_ATR"])
-            if not np.isfinite(entry) or not np.isfinite(atr) or entry<=0 or atr<=0: continue
-            distance=max(.90*atr,entry*.0008); risk_rate=distance/entry
+            entry=float(nxt.open); atr=float(row.ATR)
+            if not np.isfinite(entry) or not np.isfinite(atr) or entry<=0 or atr<=0:
+                continue
+            distance=max(1.15*atr,entry*.0010)
+            risk_rate=distance/entry
             required=1.5+2.5*cost/risk_rate
             target_r=max(float(row.base_r),required)
-            net_reward=target_r*risk_rate-cost; net_rr=net_reward/(risk_rate+cost)
-            if net_reward<.00035 or net_rr<1.5: continue
-            side=str(row.direction); stop=entry-distance if side=="LONG" else entry+distance
+            net_reward=target_r*risk_rate-cost
+            net_rr=net_reward/(risk_rate+cost)
+            if net_reward<.00045 or net_rr<1.5:
+                continue
+            side=str(row.direction)
+            stop=entry-distance if side=="LONG" else entry+distance
             active={"market":market,"symbol":symbol,"side":side,"setup":str(row.setup),
-                "signal_time":str(row["dt"]),"entry_time":str(nxt["dt"]),"entry":entry,
-                "initial_stop":stop,"stop":stop,"initial_risk":distance,"best_price":entry,
-                "armed":False,"armed_at":None,"trail_updates":0,"entry_i":i+1,
-                "notional":100.0,"target_r_reference":target_r,"net_rr_at_entry":net_rr}
+                "signal_time":str(row["dt"]+pd.Timedelta(minutes=5)),
+                "entry_time":str(nxt["dt"]),"entry":entry,
+                "initial_stop":stop,"stop":stop,"initial_risk":distance,
+                "best_price":entry,"armed":False,"armed_at":None,"trail_updates":0,
+                "entry_i":i+1,"notional":100.0,"target_r_reference":target_r,
+                "net_rr_at_entry":net_rr}
     if active:
         row=sig.iloc[-1]; exit_price=float(row.close); entry=active["entry"]; side=active["side"]
-        gross=((exit_price-entry)/entry if side=="LONG" else (entry-exit_price)/entry); net=gross-cost
-        active.update(exit_time=str(row["dt"]),exit_price=exit_price,reason="END_OF_DATA",
-            gross_pct=gross*100,net_pct=net*100,net_usdt=active["notional"]*net,
-            hold_minutes=len(sig)-1-active["entry_i"],stop_final=active["stop"])
+        gross=((exit_price-entry)/entry if side=="LONG" else (entry-exit_price)/entry)
+        net=gross-cost
+        active.update(exit_time=str(row["dt"]+pd.Timedelta(minutes=5)),
+            exit_price=exit_price,reason="END_OF_DATA",gross_pct=gross*100,
+            net_pct=net*100,net_usdt=active["notional"]*net,
+            hold_minutes=(len(sig)-1-active["entry_i"])*5,stop_final=active["stop"])
         trades.append(active)
     return trades,len(sig)
 
@@ -319,14 +386,14 @@ def main():
         "live_strategy_source":"core/scalping_v3.py",
         "bull_bias":"15m close > 15m EMA50 AND (5m close >= 5m EMA21 OR 15m EMA21 > 15m EMA50)",
         "bear_bias":"15m close < 15m EMA50 AND (5m close <= 5m EMA21 OR 15m EMA21 < 15m EMA50)",
-        "higher_timeframe_alignment":"1m open-time rows matched only to fully closed HTF candles by close timestamp",
+        "higher_timeframe_alignment":"5m open-time rows matched only to fully closed HTF candles by close timestamp",
         "native_binance_alignment_checks":alignment_checks,
         "archive_sha256_verified":True,"minimum_coverage_pct":MIN_COVERAGE*100,
         "fees_round_trip":{"spot":2*FEE["spot"],"futures":2*FEE["futures"]},
-        "adverse_cost_round_trip":2*ADVERSE,"entry":"next 1m open",
+        "adverse_cost_round_trip":2*ADVERSE,"entry":"next 5m open",
         "trailing_activation":"favorable excursion reaches initial 1R",
         "trailing_calculation":"core.trailing_stop.calculate_trailing_stop; ATR 1.5x plus 5-candle structure",
-        "trailing_update_data":"only fully closed 5m candles before current 1m candle",
+        "trailing_update_data":"only fully closed 5m candles; updates become active on the next 5m candle",
         "breakeven_clamp":"stop cannot move behind entry after activation",
         "intrabar_policy":"existing stop checked first; no fixed take-profit; no time exit",
         "end_of_data":"mark remaining position at final close; reported separately",
