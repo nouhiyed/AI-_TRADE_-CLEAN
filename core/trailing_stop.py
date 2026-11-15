@@ -59,3 +59,32 @@ def calculate_trailing_stop(frame, direction, previous_stop, best_price,
         }
     except (TypeError, ValueError, ArithmeticError, IndexError, KeyError):
         return None
+
+
+def net_break_even_price(entry_price, direction, fee_rate, slippage_rate):
+    """Estimated exit price that offsets entry/exit fees and slippage."""
+    entry = float(entry_price)
+    side_cost = float(fee_rate) + float(slippage_rate)
+    if not isfinite(entry) or entry <= 0 or not isfinite(side_cost) or not 0 <= side_cost < 1:
+        raise ValueError("Invalid entry price or execution cost")
+    direction = str(direction).upper()
+    if direction == "LONG":
+        return entry * (1.0 + side_cost) / (1.0 - side_cost)
+    if direction == "SHORT":
+        return entry * (1.0 - side_cost) / (1.0 + side_cost)
+    raise ValueError("Direction must be LONG or SHORT")
+
+
+def apply_cost_aware_trailing_floor(candidate_stop, entry_price, direction, best_price, fee_rate, slippage_rate):
+    """Apply gross break-even until best price covers costs, then net break-even.
+    Never put the stop beyond the best favorable price.
+    """
+    candidate = float(candidate_stop)
+    entry = float(entry_price)
+    best = float(best_price)
+    net_be = net_break_even_price(entry, direction, fee_rate, slippage_rate)
+    if str(direction).upper() == "LONG":
+        floor = net_be if best >= net_be else entry
+        return min(best, max(candidate, floor))
+    ceiling = net_be if best <= net_be else entry
+    return max(best, min(candidate, ceiling))
