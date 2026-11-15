@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      DAYS: \${{ github.event.inputs.days || '730' }}
+      DAYS: '730'
       MARKETS: spot,futures
       SYMBOLS: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT
       PYTHONUNBUFFERED: '1'
@@ -45,7 +45,7 @@ jobs:
           python -m compileall -q core agents scripts tests
           python -m py_compile scripts/backtest_scalping_v3_trailing.py tests/test_trailing_backtest.py
       - name: Run trailing-stop unit tests
-        run: python -m unittest -v tests.test_trailing_backtest
+        run: python tests/test_trailing_backtest.py
       - name: Run synthetic trailing lifecycle smoke test
         run: |
           python - <<'PY'
