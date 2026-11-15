@@ -1480,11 +1480,9 @@ class TradingCoordinator(SpotDemoMixin):
             "cycle": 0,
             "cycle_complete": True,
         }
-        if limit is None:
-            from core.scan_rotation import next_scan_batch
-            universe, scan_meta = next_scan_batch(
-                "futures", universe, batch_size=len(universe)
-            )
+        # Continuous scanner analyzes the complete eligible universe in one pass.
+        # No rotating cursor or fixed-size batch is used.
+        scan_meta["last_symbol"] = universe[-1]["symbol"] if universe else None
 
         opportunities = []
         errors = {}
@@ -1648,10 +1646,15 @@ class TradingCoordinator(SpotDemoMixin):
                 "last_symbol": universe[-1]["symbol"] if universe else None,
             }
         else:
-            from core.scan_rotation import next_scan_batch
-            universe, scan_meta = next_scan_batch(
-                "spot", universe, batch_size=len(universe)
-            )
+            # Continuous scanner analyzes the complete eligible universe in one pass.
+            # No rotating cursor or fixed-size batch is used.
+            scan_meta = {
+                "universe_total": len(universe),
+                "batch_size": len(universe),
+                "cycle": 0,
+                "cycle_complete": True,
+                "last_symbol": universe[-1]["symbol"] if universe else None,
+            }
 
         opportunities = []
         errors = {}
