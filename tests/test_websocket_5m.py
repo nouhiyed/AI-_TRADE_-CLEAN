@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 
 import pandas as pd
@@ -181,6 +182,36 @@ class ManualEntryQueueTests(unittest.TestCase):
             self.assertFalse(result["success"])
             self.assertIn("stale", result["reason"].lower())
             autopilot._event_executor.shutdown(wait=True)
+
+
+class ParallelAnalysisPoolTests(unittest.TestCase):
+    def test_futures_and_spot_analysis_run_in_parallel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json"
+            )
+            barrier = threading.Barrier(2)
+            completed = threading.Event()
+            results = []
+            result_lock = threading.Lock()
+
+            def analyze(domain):
+                barrier.wait(timeout=3)
+                with result_lock:
+                    results.append(domain)
+                    if len(results) == 2:
+                        completed.set()
+
+            self.assertTrue(autopilot.submit_analysis("futures", analyze, "futures"))
+            self.assertTrue(autopilot.submit_analysis("spot", analyze, "spot"))
+            self.assertTrue(completed.wait(timeout=4))
+            self.assertCountEqual(results, ["futures", "spot"])
+            status = autopilot.status()["analysis_pools"]
+            self.assertEqual(status["futures"]["completed"], 1)
+            self.assertEqual(status["spot"]["completed"], 1)
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
 
 
 if __name__ == "__main__":
