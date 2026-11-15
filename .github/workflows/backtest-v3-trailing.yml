@@ -1,13 +1,6 @@
 name: V3 Live-Parity Historical Validation
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'scripts/backtest_scalping_v3_trailing.py'
-      - 'core/trailing_stop.py'
-      - 'core/scalping_v3.py'
-      - '.github/workflows/backtest-v3-trailing.yml'
   workflow_dispatch:
     inputs:
       days:
