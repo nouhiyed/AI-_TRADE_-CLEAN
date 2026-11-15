@@ -28,7 +28,7 @@ class BinanceKlineStream:
         "futures": {"5m": 60, "15m": 60, "1h": 60},
         "spot": {"5m": 60, "15m": 60, "1h": 210, "4h": 210},
     }
-    MAX_STREAMS_PER_CONNECTION = 1024
+    MAX_STREAMS_PER_CONNECTION = 1020
 
     def __init__(self, market_feed, on_kline, max_symbols=None,
                  refresh_seconds=1800, reconnect_seconds=3):
