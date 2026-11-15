@@ -81,10 +81,10 @@ def continuous_scan_worker():
                     "current_symbol": None,
                     "scanned_in_batch": 0,
                     "universe_total": None,
-                    "batch_started_at": time.time(),
+                    "scan_started_at": time.time(),
                 })
                 scan_status["updated_at"] = time.time()
-            print("[SCAN] %s batch starting" % domain.upper())
+            print("[SCAN] %s full-universe scan starting" % domain.upper())
             try:
                 result = (
                     coordinator.scan_futures(
@@ -129,14 +129,12 @@ def continuous_scan_worker():
                     }
                     scan_status["updated_at"] = time.time()
                 print(
-                    "[SCAN] %s batch: %s/%s symbols, actionable=%s, cycle=%s, complete=%s"
+                    "[SCAN] %s full pass: %s/%s symbols, actionable=%s"
                     % (
                         domain.upper(),
                         (result.get("scan") or {}).get("batch_size", result.get("scanned", 0)),
                         (result.get("scan") or {}).get("universe_total", "?"),
                         result.get("actionable", 0),
-                        (result.get("scan") or {}).get("cycle", "?"),
-                        (result.get("scan") or {}).get("cycle_complete", False),
                     )
                 )
             except Exception as error:
@@ -148,8 +146,8 @@ def continuous_scan_worker():
                     }
                     scan_status["updated_at"] = time.time()
                 print("[SCAN] %s scanner error: %s" % (domain.upper(), error))
-        # Brief pause between complete Futures+Spot batches. Each market keeps
-        # its own durable cursor, so the next pass resumes without restarting.
+        # Brief pause between complete Futures+Spot passes; the next pass starts
+        # again from the complete current Binance-eligible universe.
         time.sleep(max(1.0, float(os.environ.get("SCAN_BATCH_PAUSE_SECONDS", "2"))))
 
 
