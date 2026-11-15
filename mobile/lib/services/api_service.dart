@@ -96,6 +96,17 @@ class ApiService {
         '${endTime == null ? '' : '&endTime=$endTime'}',
       );
 
+  static Future<Map<String, dynamic>> liveStreamCandle({
+    required String market,
+    required String symbol,
+  }) =>
+      _request(
+        'GET',
+        '/market/stream/candle?market=${Uri.encodeQueryComponent(market)}'
+        '&symbol=${Uri.encodeQueryComponent(symbol)}',
+        requestTimeout: const Duration(seconds: 3),
+      );
+
   static Future<bool> health() async {
     final result = await _request(
       'GET', '/health', requestTimeout: const Duration(seconds: 5));
