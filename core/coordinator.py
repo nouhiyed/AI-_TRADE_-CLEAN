@@ -42,8 +42,8 @@ class TradingCoordinator(SpotDemoMixin):
         }
 
         self.required_timeframes = {
-            "futures": ["1m", "5m", "15m", "1h"],
-            "spot": ["1m", "5m", "15m", "1h", "4h"]
+            "futures": ["5m", "15m", "1h"],
+            "spot": ["5m", "15m", "1h", "4h"]
         }
 
         self.last_signals = {}
