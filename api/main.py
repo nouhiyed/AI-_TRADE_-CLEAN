@@ -245,6 +245,20 @@ def _process_agent_submission(request_id, payload):
             "decision_reason": "Agent returned an invalid response",
             "reason": "Agent returned an invalid response",
         }
+    if result.get("decision_status") == "QUEUED":
+        queued = autopilot.queue_manual_signal(
+            payload.get("domain", ""), payload.get("symbol", ""),
+            result.get("signal") or {},
+        ) if autopilot is not None else {
+            "success": False, "reason": "Autopilot runtime is unavailable"
+        }
+        if queued.get("success"):
+            result.update(queued)
+        else:
+            result["decision_status"] = "REJECTED"
+            result["decision_reason"] = queued.get("reason", "Could not queue next 5m entry")
+            result["reason"] = result["decision_reason"]
+            result["opened"] = False
     # A completed analysis, including a rejection, is a completed decision.
     result.setdefault("decision_status", "REJECTED")
     result.setdefault(
