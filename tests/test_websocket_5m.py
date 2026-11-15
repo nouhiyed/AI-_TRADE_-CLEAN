@@ -78,6 +78,10 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.events = []
         self.stream = BinanceKlineStream(FakeFeed(), lambda market, event: self.events.append((market, event)))
 
+    def test_mobile_stream_symbol_count_is_bounded(self):
+        stream = BinanceKlineStream(FakeFeed(), lambda _market, _event: None, max_symbols=1024)
+        self.assertEqual(stream.max_symbols, 8)
+
     def test_snapshot_requires_all_closed_context_frames(self):
         for interval in ("5m", "15m", "1h"):
             frame = candle_frame("5min" if interval == "5m" else "15min" if interval == "15m" else "1h")
