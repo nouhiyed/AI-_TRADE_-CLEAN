@@ -88,7 +88,6 @@ jobs:
           if not source.is_file():
               raise SystemExit(f"ERROR: required app logo is missing: {source}")
           image = Image.open(source).convert("RGBA")
-          # Adaptive-icon foreground stays inside Android's safe central area.
           foreground = Image.new("RGBA", (432, 432), (0, 0, 0, 0))
           logo = image.copy()
           logo.thumbnail((340, 340), Image.Resampling.LANCZOS)
@@ -114,7 +113,7 @@ jobs:
           if count != 1:
               raise SystemExit("ERROR: Android app label was not found")
           if 'android:icon="@mipmap/ic_launcher"' not in s:
-              s = re.sub(r'<application\b', '<application android:icon="@mipmap/ic_launcher"', s, count=1)
+              s = re.sub(r'<application\\b', '<application android:icon="@mipmap/ic_launcher"', s, count=1)
           p.write_text(s)
           print("Soulaymen AI Trading app label and adaptive icon configured")
           PYTHON
@@ -125,10 +124,9 @@ jobs:
           python3 - <<'PYTHON'
           from pathlib import Path
           import re
-
           p = Path("android/gradle/wrapper/gradle-wrapper.properties")
           s = p.read_text()
-          url = r"distributionUrl=https\://mirror.nju.edu.cn/gradle/gradle-9.5.0-bin.zip"
+          url = r"distributionUrl=https\\://mirror.nju.edu.cn/gradle/gradle-9.5.0-bin.zip"
           s, count = re.subn(r"(?m)^distributionUrl=.*$", url, s)
           if count != 1:
               raise SystemExit("ERROR: Expected one Gradle distributionUrl")
@@ -136,7 +134,7 @@ jobs:
           if re.search(r"(?m)^distributionSha256Sum=", s):
               s = re.sub(r"(?m)^distributionSha256Sum=.*$", checksum, s)
           else:
-              s = s.rstrip() + "\n" + checksum + "\n"
+              s = s.rstrip() + "\\n" + checksum + "\\n"
           p.write_text(s)
           print("Gradle 9.5.0 BIN download configured")
           PYTHON
@@ -147,10 +145,8 @@ jobs:
           python3 - <<'PYTHON'
           from pathlib import Path
           import re
-
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
-
           permissions = [
               '<uses-permission android:name="android.permission.INTERNET" />',
               '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
@@ -161,23 +157,19 @@ jobs:
           ]
           for permission in permissions:
               if permission not in s:
-                  s = s.replace("<application", permission + "\n    <application", 1)
-
+                  s = s.replace("<application", permission + "\\n    <application", 1)
           if 'android:name="com.termux"' not in s:
               s = s.replace(
                   "<application",
-                  '    <queries>\n        <package android:name="com.termux" />\n    </queries>\n    <application',
+                  '    <queries>\\n        <package android:name="com.termux" />\\n    </queries>\\n    <application',
                   1,
               )
-
-          match = re.search(r'<application\b[^>]*', s)
+          match = re.search(r'<application\\b[^>]*', s)
           if not match:
               raise SystemExit("ERROR: application tag not found")
-
           tag = match.group(0)
           if "android:usesCleartextTraffic=" not in tag:
               s = s[:match.end()] + ' android:usesCleartextTraffic="true"' + s[match.end():]
-
           service = """        <service
               android:name=".TradingKeepAliveService"
               android:enabled="true"
@@ -190,7 +182,6 @@ jobs:
           """
           if 'android:name=".TradingKeepAliveService"' not in s:
               s = s.replace("</application>", service + "    </application>", 1)
-
           p.write_text(s)
           print("Android network permissions configured")
           PYTHON
@@ -202,7 +193,7 @@ jobs:
       - name: Enforce the single backend port
         run: |
           OLD_PORT="$(printf '%s' '80')$(printf '%s' '00')"
-          if grep -RInE "127\.0\.0\.1:\${OLD_PORT}|localhost:\${OLD_PORT}|AI_TRADER_PORT[^#]*\${OLD_PORT}" api mobile README.md; then
+          if grep -RInE "127\\.0\\.0\\.1:\\${OLD_PORT}|localhost:\\${OLD_PORT}|AI_TRADER_PORT[^#]*\\${OLD_PORT}" api mobile README.md; then
             echo "ERROR: obsolete backend port reference found"
             exit 1
           fi
@@ -216,13 +207,11 @@ jobs:
             if flutter build apk --release; then
               exit 0
             fi
-
             if [ "$attempt" -lt 3 ]; then
               echo "Build failed; waiting 20 seconds before retry..."
               sleep 20
             fi
           done
-
           echo "ERROR: APK build failed after 3 attempts"
           exit 1
 
@@ -264,3 +253,5 @@ jobs:
               description: description.slice(0, 140),
               target_url: `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`
             });
+
+# Trigger a fresh release APK build for the latest Android UI changes.
