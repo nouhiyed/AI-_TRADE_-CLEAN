@@ -1,0 +1,213 @@
+"""Trade journal: every DEMO trade with the signal context it was opened under.
+
+This is the data the Learning Engine and the performance screen are built on.
+SQLite, one short-lived connection per call (safe across threads, no leaks).
+"""
+import json
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS trades (
+    trade_id    TEXT PRIMARY KEY,
+    domain      TEXT NOT NULL,
+    symbol      TEXT NOT NULL,
+    direction   TEXT NOT NULL,
+    setup_key   TEXT NOT NULL,
+    confidence  REAL,
+    opened_at   INTEGER NOT NULL,
+    closed_at   INTEGER,
+    entry       REAL,
+    stop_loss   REAL,
+    take_profit REAL,
+    risk_amount REAL,
+    exit_price  REAL,
+    close_reason TEXT,
+    net_pnl     REAL,
+    r_multiple  REAL,
+    context     TEXT,
+    status      TEXT NOT NULL DEFAULT 'OPEN'
+);
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+CREATE INDEX IF NOT EXISTS idx_trades_setup ON trades(setup_key);
+CREATE TABLE IF NOT EXISTS setup_state (
+    setup_key TEXT PRIMARY KEY,
+    disabled  INTEGER NOT NULL DEFAULT 0,
+    reason    TEXT,
+    updated_at INTEGER NOT NULL
+);
+"""
+
+
+class TradeJournal:
+
+    def __init__(self, path="data/journal.db"):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        with self._connect() as db:
+            db.executescript(SCHEMA)
+
+    @contextmanager
+    def _connect(self):
+        db = sqlite3.connect(str(self.path), timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    # ---- writes ----------------------------------------------------------
+
+    def record_open(self, trade_id, domain, symbol, direction, setup_key,
+                    confidence, entry, stop_loss, take_profit,
+                    risk_amount=None, context=None):
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT OR REPLACE INTO trades
+                   (trade_id, domain, symbol, direction, setup_key, confidence,
+                    opened_at, entry, stop_loss, take_profit, risk_amount,
+                    context, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')""",
+                (str(trade_id), domain, symbol, direction, setup_key,
+                 _num(confidence), int(time.time() * 1000), _num(entry),
+                 _num(stop_loss), _num(take_profit), _num(risk_amount),
+                 json.dumps(context or {}, default=str)),
+            )
+
+    def record_close(self, trade_id, net_pnl, exit_price=None, reason=None):
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT risk_amount FROM trades WHERE trade_id=?",
+                (str(trade_id),)).fetchone()
+            if row is None:
+                return False
+            risk = row["risk_amount"]
+            r_mult = (net_pnl / risk) if risk else None
+            db.execute(
+                """UPDATE trades SET closed_at=?, exit_price=?, close_reason=?,
+                   net_pnl=?, r_multiple=?, status='CLOSED' WHERE trade_id=?""",
+                (int(time.time() * 1000), _num(exit_price), reason,
+                 float(net_pnl), r_mult, str(trade_id)),
+            )
+            return True
+
+    def record_closed_snapshot(self, record, net_pnl, reason=None):
+        """Persist a closed trade even if its opening journal write was missed."""
+        record = dict(record or {})
+        trade_id = str(record.get("trade_id") or record.get("position_id") or "").strip()
+        if not trade_id:
+            raise ValueError("Closed trade snapshot requires a trade_id")
+        context = record.get("context") or record.get("journal_context") or {}
+        if not isinstance(context, dict):
+            try:
+                context = json.loads(context or "{}")
+            except (TypeError, ValueError):
+                context = {}
+        opened_at = record.get("opened_at") or record.get("opened_at_ms") or int(time.time() * 1000)
+        closed_at = record.get("closed_at") or record.get("closed_at_ms") or int(time.time() * 1000)
+        entry = record.get("entry") or record.get("entry_price")
+        exit_price = record.get("exit_price") or record.get("close_price")
+        risk = record.get("risk_amount")
+        pnl = float(net_pnl)
+        r_mult = pnl / float(risk) if _num(risk) not in (None, 0) else None
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO trades
+                   (trade_id, domain, symbol, direction, setup_key, confidence,
+                    opened_at, closed_at, entry, stop_loss, take_profit,
+                    risk_amount, exit_price, close_reason, net_pnl, r_multiple,
+                    context, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'CLOSED')
+                   ON CONFLICT(trade_id) DO UPDATE SET
+                    domain=CASE WHEN trades.domain IS NULL OR trades.domain='' THEN excluded.domain ELSE trades.domain END,
+                    symbol=CASE WHEN trades.symbol IS NULL OR trades.symbol='' THEN excluded.symbol ELSE trades.symbol END,
+                    direction=CASE WHEN trades.direction IS NULL OR trades.direction='' THEN excluded.direction ELSE trades.direction END,
+                    setup_key=CASE WHEN trades.setup_key IS NULL OR trades.setup_key='' THEN excluded.setup_key ELSE trades.setup_key END,
+                    confidence=COALESCE(trades.confidence, excluded.confidence),
+                    opened_at=CASE WHEN trades.opened_at IS NULL OR trades.opened_at=0 THEN excluded.opened_at ELSE trades.opened_at END,
+                    closed_at=COALESCE(excluded.closed_at, trades.closed_at),
+                    entry=COALESCE(NULLIF(trades.entry, 0), excluded.entry),
+                    stop_loss=COALESCE(NULLIF(trades.stop_loss, 0), excluded.stop_loss),
+                    take_profit=COALESCE(NULLIF(trades.take_profit, 0), excluded.take_profit),
+                    risk_amount=COALESCE(NULLIF(trades.risk_amount, 0), excluded.risk_amount),
+                    exit_price=COALESCE(excluded.exit_price, trades.exit_price),
+                    close_reason=COALESCE(excluded.close_reason, trades.close_reason),
+                    net_pnl=excluded.net_pnl,
+                    r_multiple=excluded.r_multiple,
+                    status='CLOSED',
+                    context=CASE WHEN trades.context IS NULL OR trades.context='' OR trades.context='{}'
+                                 THEN excluded.context ELSE trades.context END""",
+                (
+                    trade_id, str(record.get("domain") or "futures"),
+                    str(record.get("symbol") or ""),
+                    str(record.get("direction") or "LONG"),
+                    str(record.get("setup_key") or "MANUAL"),
+                    _num(record.get("confidence")),
+                    int(opened_at), int(closed_at), _num(entry),
+                    _num(record.get("stop_loss")), _num(record.get("take_profit")),
+                    _num(risk), _num(exit_price),
+                    str(reason or record.get("close_reason") or "CLOSED"),
+                    pnl, r_mult, json.dumps(context, default=str),
+                ),
+            )
+        return True
+
+    def set_setup_disabled(self, setup_key, disabled, reason=""):
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO setup_state (setup_key, disabled, reason, updated_at)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(setup_key) DO UPDATE SET disabled=excluded.disabled,
+                   reason=excluded.reason, updated_at=excluded.updated_at""",
+                (setup_key, 1 if disabled else 0, reason,
+                 int(time.time() * 1000)),
+            )
+
+    # ---- reads -----------------------------------------------------------
+
+    def closed_trades(self, limit=None):
+        sql = "SELECT * FROM trades WHERE status='CLOSED' ORDER BY closed_at"
+        with self._connect() as db:
+            rows = [dict(r) for r in db.execute(sql).fetchall()]
+        for item in rows:
+            try:
+                item["context"] = json.loads(item.get("context") or "{}")
+            except (TypeError, ValueError):
+                item["context"] = {}
+        return rows[-limit:] if limit else rows
+
+    def recent(self, limit=50):
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM trades ORDER BY opened_at DESC LIMIT ?",
+                (int(limit),)).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["context"] = json.loads(item.get("context") or "{}")
+            except ValueError:
+                item["context"] = {}
+            out.append(item)
+        return out
+
+    def disabled_setups(self):
+        with self._connect() as db:
+            return {r["setup_key"]: r["reason"] for r in db.execute(
+                "SELECT setup_key, reason FROM setup_state WHERE disabled=1")}
+
+
+def _num(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
