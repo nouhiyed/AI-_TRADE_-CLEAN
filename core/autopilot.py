@@ -325,6 +325,8 @@ class Autopilot:
                 candidate = self._pending_entries.get(key)
                 if candidate and int(candidate.get("next_open_time", 0)) == open_time:
                     pending = self._pending_entries.pop(key, None)
+                elif candidate and open_time > int(candidate.get("next_open_time", 0)):
+                    self._pending_entries.pop(key, None)
             if pending:
                 self._event_executor.submit(self._execute_ws_entry, domain, symbol,
                                             pending, dict(event))
@@ -339,6 +341,51 @@ class Autopilot:
                     self._event_seen = set(list(self._event_seen)[-10000:])
             self._event_executor.submit(self._analyze_ws_close, domain, symbol,
                                         dict(event))
+
+
+    def queue_manual_signal(self, domain, symbol, signal):
+        """Queue an agent-approved chart submission for the next 5m open."""
+        domain = str(domain).strip().lower()
+        symbol = str(symbol).strip().upper()
+        if domain not in ("spot", "futures") or not symbol:
+            return {"success": False, "reason": "Invalid market or symbol"}
+        if self.c.mode != "DEMO" or not self.c._agent_enabled(domain):
+            return {"success": False, "reason": "DEMO mode or agent control blocks this entry"}
+        if not isinstance(signal, dict):
+            return {"success": False, "reason": "Missing approved agent signal"}
+        plan = signal.get("trade_plan") or {}
+        direction = str(signal.get("direction", "WAIT")).upper()
+        if (signal.get("strategy_version") != "v3"
+                or plan.get("strategy_version") != "v3"
+                or plan.get("success") is not True
+                or direction not in (("BUY",) if domain == "spot" else ("LONG", "SHORT"))):
+            return {"success": False, "reason": "The agent signal is not an approved V3 setup"}
+        now_ms = int(self.clock() * 1000)
+        next_open = ((now_ms // 300000) + 1) * 300000
+        key = (domain, symbol)
+        with self._event_lock:
+            latest = self._latest_open.get(key)
+            if latest and int(latest.get("open_time", 0)) >= next_open:
+                next_open = int(latest["open_time"]) + 300000
+            pending = {
+                "signal": dict(signal), "next_open_time": next_open,
+                "signal_open_time": int(signal.get("signal_candle_open_time") or 0),
+                "created_at": self.clock(), "manual": True,
+            }
+            self._pending_entries[key] = pending
+            current = self._latest_open.get(key)
+            ready = bool(current and int(current.get("open_time", 0)) == next_open)
+            if ready:
+                self._pending_entries.pop(key, None)
+        if ready:
+            self._event_executor.submit(self._execute_ws_entry, domain, symbol,
+                                        pending, current)
+        return {
+            "success": True, "queued": True, "opened": False,
+            "decision_status": "QUEUED",
+            "decision_reason": "Agent approved; waiting for the next 5m candle open",
+            "next_entry_candle_open_ms": next_open,
+        }
 
     def _analyze_ws_close(self, domain, symbol, candle):
         """Analyze exactly once after Binance confirms the 5m candle is closed."""
@@ -401,7 +448,8 @@ class Autopilot:
         }
         try:
             cfg = dict(self.config)
-            if not cfg.get("enabled") or not cfg.get("trade_" + domain):
+            manual = bool(pending.get("manual"))
+            if not manual and (not cfg.get("enabled") or not cfg.get("trade_" + domain)):
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Autopilot or market is disabled"})
                 return
@@ -417,7 +465,8 @@ class Autopilot:
             open_time = int(opening_candle.get("open_time") or 0)
             entry_price = float(opening_candle.get("open") or 0)
             if (entry_price <= 0 or event_time < open_time
-                    or event_time - open_time > 10000):
+                    or event_time - open_time > 10000
+                    or int(time.time() * 1000) - open_time > 10000):
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
                 return
@@ -467,7 +516,7 @@ class Autopilot:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Context veto: " + str(assessment["veto"])})
                 return
-            signal["entry_origin"] = "AUTOPILOT_WS_5M"
+            signal["entry_origin"] = "MANUAL_AGENT_WS_5M" if manual else "AUTOPILOT_WS_5M"
             signal["entry_open_time"] = open_time
             signal["entry_reference_price"] = entry_price
             signal["setup_key"] = key
