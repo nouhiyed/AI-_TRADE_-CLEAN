@@ -1,14 +1,17 @@
-"""Low-latency Binance 5m kline streams for Spot and USD-M Futures.
+"""Binance multi-timeframe candle cache and event clock for V3.
 
-The stream is the clock for strategy evaluation. REST remains the authoritative
-backfill/context source; WebSocket events are deduplicated before reaching agents.
+5m closes trigger strategy decisions. Closed 15m/1h/4h candles are cached
+alongside 5m candles so the decision path does not make per-symbol REST calls
+at the next-candle execution boundary.
 """
 import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+import pandas as pd
 from websocket import WebSocketApp
 
 
@@ -17,6 +20,15 @@ class BinanceKlineStream:
         "spot": "wss://stream.binance.com:9443/ws",
         "futures": "wss://fstream.binance.com/ws",
     }
+    CACHE_LIMITS = {
+        "futures": {"5m": 100, "15m": 60, "1h": 60},
+        "spot": {"5m": 100, "15m": 60, "1h": 210, "4h": 210},
+    }
+    REQUIRED_ROWS = {
+        "futures": {"5m": 60, "15m": 60, "1h": 60},
+        "spot": {"5m": 60, "15m": 60, "1h": 210, "4h": 210},
+    }
+    MAX_STREAMS_PER_CONNECTION = 1024
 
     def __init__(self, market_feed, on_kline, max_symbols=None,
                  refresh_seconds=1800, reconnect_seconds=3):
@@ -28,15 +40,25 @@ class BinanceKlineStream:
         self.reconnect_seconds = max(1, int(reconnect_seconds))
         self._stop = threading.Event()
         self._lock = threading.RLock()
+        self._cache_lock = threading.RLock()
         self._apps = {}
         self._threads = {}
+        self._connection_threads = []
+        self._connection_live = {}
+        self._cache = {}
+        self._cache_ready = set()
         self._last_open = {}
+        self._closed_seen = set()
         self._latest_candles = {}
+        self._warm_errors = {}
         self._status = {
             market: {
-                "connected": False, "symbols": 0, "last_event": None,
-                "last_closed_candle": None, "reconnects": 0,
-                "last_error": None, "state": "stopped",
+                "connected": False, "state": "stopped",
+                "symbols": 0, "total_chunks": 0, "connected_chunks": 0,
+                "last_event": None, "last_closed_candle": None,
+                "reconnects": 0, "last_error": None,
+                "cache_ready_symbols": 0, "cache_warmup_total": 0,
+                "cache_warmup_completed": 0, "cache_warmup_errors": 0,
             }
             for market in ("spot", "futures")
         }
@@ -67,9 +89,11 @@ class BinanceKlineStream:
             )
             self._threads[market] = thread
             thread.start()
-        threading.Thread(
+        refresh = threading.Thread(
             target=self._refresh_loop, name="binance-ws-refresh", daemon=True
-        ).start()
+        )
+        self._threads["refresh"] = refresh
+        refresh.start()
         return self.status()
 
     def stop(self):
@@ -98,8 +122,7 @@ class BinanceKlineStream:
 
     def _load_symbols(self, market):
         if market == "futures":
-            rows = self.feed.fetch_symbols("futures")
-            eligible = set(rows)
+            eligible = set(self.feed.fetch_symbols("futures"))
             tickers = self.feed._request("futures", "/fapi/v1/ticker/24hr", {})
         else:
             eligible = set(self.feed.fetch_symbols("spot"))
@@ -122,117 +145,334 @@ class BinanceKlineStream:
             raise RuntimeError("Binance returned no eligible liquid symbols for " + market)
         return symbols
 
+    @staticmethod
+    def _row_key(value):
+        stamp = value
+        if not isinstance(stamp, pd.Timestamp):
+            stamp = pd.to_datetime(stamp, utc=True)
+        return int(stamp.timestamp() * 1000)
+
+    def _merge_frame(self, market, symbol, interval, frame):
+        if frame is None or frame.empty:
+            return
+        key = (market, symbol, interval)
+        incoming = frame.copy()
+        if "open_time" not in incoming.columns:
+            return
+        incoming["open_time"] = pd.to_datetime(incoming["open_time"], utc=True)
+        incoming["close_time"] = pd.to_datetime(incoming["close_time"], utc=True)
+        incoming["is_closed"] = incoming["is_closed"].astype(bool)
+        with self._cache_lock:
+            current = self._cache.get(key)
+            merged = incoming if current is None else pd.concat(
+                [current, incoming], ignore_index=True)
+            merged = merged.drop_duplicates(subset=["open_time"], keep="last")
+            merged = merged.sort_values("open_time").tail(
+                self.CACHE_LIMITS[market][interval]).reset_index(drop=True)
+            merged.attrs.update({
+                "market": market, "symbol": symbol,
+                "interval": interval, "timeframe": interval,
+                "source": "binance_websocket_cache",
+            })
+            self._cache[key] = merged
+
+    def _merge_event_candle(self, market, symbol, interval, kline):
+        try:
+            open_ms, close_ms = int(kline["t"]), int(kline["T"])
+            row = {
+                "open_time": pd.to_datetime(open_ms, unit="ms", utc=True),
+                "open": float(kline["o"]), "high": float(kline["h"]),
+                "low": float(kline["l"]), "close": float(kline["c"]),
+                "volume": float(kline["v"]),
+                "close_time": pd.to_datetime(close_ms, unit="ms", utc=True),
+                "quote_volume": float(kline.get("q", 0) or 0),
+                "trades": int(kline.get("n", 0) or 0),
+                "taker_buy_base": float(kline.get("V", 0) or 0),
+                "taker_buy_quote": float(kline.get("Q", 0) or 0),
+                "ignore": 0.0, "is_closed": True,
+            }
+            self._merge_frame(market, symbol, interval, pd.DataFrame([row]))
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            with self._lock:
+                self._status[market]["last_error"] = "cache candle: " + str(error)
+
+    def _snapshot(self, market, symbol):
+        required = self.REQUIRED_ROWS[market]
+        frames = {}
+        with self._cache_lock:
+            for interval, minimum in required.items():
+                frame = self._cache.get((market, symbol, interval))
+                if frame is None or len(frame) < minimum:
+                    return None
+                copied = frame.copy()
+                if "is_closed" not in copied.columns or not bool(copied["is_closed"].iloc[-1]):
+                    return None
+                copied.attrs.update({
+                    "market": market, "symbol": symbol,
+                    "interval": interval, "timeframe": interval,
+                    "source": "binance_websocket_cache",
+                })
+                frames[interval] = copied
+        return frames
+
+    def _warm_symbol(self, market, symbol):
+        for interval, limit in self.CACHE_LIMITS[market].items():
+            if self._stop.is_set():
+                return False
+            try:
+                frame = self.feed.fetch_candles(
+                    market, symbol, interval, limit=limit, closed_only=True)
+                self._merge_frame(market, symbol, interval, frame)
+            except Exception as error:
+                with self._lock:
+                    self._warm_errors[(market, symbol, interval)] = str(error)
+        ready = self._snapshot(market, symbol) is not None
+        with self._lock:
+            if ready:
+                self._cache_ready.add((market, symbol))
+            state = self._status[market]
+            state["cache_warmup_completed"] += 1
+            state["cache_ready_symbols"] = sum(
+                1 for key in self._cache_ready if key[0] == market)
+            state["cache_warmup_errors"] = sum(
+                1 for key in self._warm_errors if key[0] == market)
+        return ready
+
+    def _warm_market(self, market, symbols):
+        with self._lock:
+            self._status[market]["cache_warmup_total"] = len(symbols)
+            self._status[market]["cache_warmup_completed"] = 0
+            self._status[market]["cache_ready_symbols"] = 0
+            self._status[market]["cache_warmup_errors"] = 0
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="candle-warm-" + market) as pool:
+            futures = [pool.submit(self._warm_symbol, market, symbol) for symbol in symbols]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as error:
+                    with self._lock:
+                        self._status[market]["last_error"] = "cache warmup: " + str(error)
+                if self._stop.is_set():
+                    break
+
+    def _recompute_connection_status(self, market):
+        live = sum(1 for key, value in self._connection_live.items()
+                   if key[0] == market and value)
+        total = int(self._status[market]["total_chunks"])
+        self._status[market]["connected_chunks"] = live
+        self._status[market]["connected"] = total > 0 and live == total
+        if live == total and total:
+            self._status[market]["state"] = "live"
+        elif live:
+            self._status[market]["state"] = "partial"
+        elif not self._stop.is_set():
+            self._status[market]["state"] = "connecting"
+
     def _run_market(self, market):
         while not self._stop.is_set():
             try:
                 symbols = self._load_symbols(market)
-                streams = [symbol.lower() + "@kline_5m" for symbol in symbols]
-                url = self.BASE_URLS[market]
+                intervals = list(self.CACHE_LIMITS[market])
+                stream_names = [
+                    symbol.lower() + "@kline_" + interval
+                    for symbol in symbols for interval in intervals
+                ]
+                chunks = [
+                    stream_names[i:i + self.MAX_STREAMS_PER_CONNECTION]
+                    for i in range(0, len(stream_names), self.MAX_STREAMS_PER_CONNECTION)
+                ]
                 with self._lock:
-                    self._status[market]["state"] = "connecting"
-                    self._status[market]["symbols"] = len(symbols)
-                    self._status[market]["last_error"] = None
+                    self._status[market].update({
+                        "symbols": len(symbols), "total_chunks": len(chunks),
+                        "connected_chunks": 0, "connected": False,
+                        "state": "warming_and_connecting", "last_error": None,
+                    })
+                    for key in list(self._connection_live):
+                        if key[0] == market:
+                            self._connection_live.pop(key, None)
+                threading.Thread(
+                    target=self._warm_market, args=(market, symbols),
+                    name="binance-cache-warm-" + market, daemon=True,
+                ).start()
+                threads = []
+                for index, streams in enumerate(chunks):
+                    thread = threading.Thread(
+                        target=self._run_connection,
+                        args=(market, index, streams),
+                        name="binance-ws-%s-%s" % (market, index),
+                        daemon=True,
+                    )
+                    threads.append(thread)
+                    thread.start()
+                self._connection_threads.extend(threads)
+                while not self._stop.wait(1):
+                    if not any(thread.is_alive() for thread in threads):
+                        break
+                if self._stop.is_set():
+                    return
+            except Exception as error:
+                with self._lock:
+                    self._status[market]["state"] = "error"
+                    self._status[market]["connected"] = False
+                    self._status[market]["last_error"] = str(error)
+            if not self._stop.wait(self.reconnect_seconds):
+                continue
 
-                def on_open(_app):
-                    _app.send(json.dumps({
-                        "method": "SUBSCRIBE", "params": streams, "id": 1
+    def _run_connection(self, market, index, streams):
+        conn_key = (market, index)
+        ack_id = index + 1
+        while not self._stop.is_set():
+            try:
+                def on_open(app):
+                    app.send(json.dumps({
+                        "method": "SUBSCRIBE", "params": streams, "id": ack_id,
                     }))
                     with self._lock:
-                        self._status[market]["connected"] = True
-                        self._status[market]["state"] = "live"
-                        self._status[market]["last_error"] = None
-                    print("[WS] %s subscribed: %s symbols, 5m klines" %
-                          (market.upper(), len(symbols)))
+                        self._connection_live[conn_key] = False
+                        self._status[market]["state"] = "subscribing"
+                        self._recompute_connection_status(market)
 
-                def on_message(_app, message):
-                    try:
-                        packet = json.loads(message)
-                        data = packet.get("data", packet)
-                        if data.get("e") != "kline":
-                            return
-                        kline = data.get("k") or {}
-                        if kline.get("i") != "5m":
-                            return
-                        symbol = str(data.get("s") or kline.get("s") or "").upper()
-                        open_time = int(kline.get("t", 0))
-                        if not symbol or open_time <= 0:
-                            return
-                        key = (market, symbol)
-                        with self._lock:
-                            previous = self._last_open.get(key)
-                            first_update = previous != open_time
-                            if first_update:
-                                self._last_open[key] = open_time
-                            self._latest_candles[key] = {
-                                "symbol": symbol, "interval": "5m",
-                                "time": open_time // 1000,
-                                "open_time": open_time,
-                                "open": float(kline.get("o", 0)),
-                                "high": float(kline.get("h", 0)),
-                                "low": float(kline.get("l", 0)),
-                                "close": float(kline.get("c", 0)),
-                                "volume": float(kline.get("v", 0)),
-                                "is_closed": bool(kline.get("x")),
-                                "event_time": int(data.get("E", 0)),
-                                "source": "binance_websocket",
-                            }
-                            self._status[market]["last_event"] = datetime.now(
-                                timezone.utc).isoformat()
-                            if bool(kline.get("x")):
-                                self._status[market]["last_closed_candle"] = {
-                                    "symbol": symbol, "open_time": open_time,
-                                    "close": kline.get("c"),
-                                }
-                        # First update of the next candle is the entry clock.
-                        # Closed events are the only events that trigger analysis.
-                        if first_update or bool(kline.get("x")):
-                            self.on_kline(market, {
-                                "symbol": symbol,
-                                "interval": "5m",
-                                "open_time": open_time,
-                                "close_time": int(kline.get("T", 0)),
-                                "open": float(kline.get("o", 0)),
-                                "high": float(kline.get("h", 0)),
-                                "low": float(kline.get("l", 0)),
-                                "close": float(kline.get("c", 0)),
-                                "volume": float(kline.get("v", 0)),
-                                "event_time": int(data.get("E", 0)),
-                                "is_closed": bool(kline.get("x")),
-                                "first_update": first_update,
-                                "source": "binance_websocket",
-                            })
-                    except Exception as error:
-                        with self._lock:
-                            self._status[market]["last_error"] = (
-                                "message: " + str(error)
-                            )
+                def on_message(app, message):
+                    self._handle_message(market, index, ack_id, app, message)
 
                 def on_error(_app, error):
                     with self._lock:
+                        self._connection_live[conn_key] = False
                         self._status[market]["last_error"] = str(error)
                         self._status[market]["state"] = "error"
+                        self._recompute_connection_status(market)
 
                 def on_close(_app, code, reason):
                     with self._lock:
-                        self._status[market]["connected"] = False
-                        if not self._stop.is_set():
-                            self._status[market]["state"] = "reconnecting"
+                        self._connection_live[conn_key] = False
+                        self._recompute_connection_status(market)
 
                 app = WebSocketApp(
-                    url, on_open=on_open, on_message=on_message,
-                    on_error=on_error, on_close=on_close,
+                    self.BASE_URLS[market], on_open=on_open,
+                    on_message=on_message, on_error=on_error,
+                    on_close=on_close,
                 )
                 with self._lock:
-                    self._apps[market] = app
-                app.run_forever(ping_interval=20, ping_timeout=10, reconnect=0)
+                    self._apps[conn_key] = app
+                app.run_forever(ping_interval=20, ping_timeout=10)
             except Exception as error:
                 with self._lock:
                     self._status[market]["last_error"] = str(error)
                     self._status[market]["state"] = "error"
             finally:
                 with self._lock:
-                    self._status[market]["connected"] = False
+                    self._connection_live[conn_key] = False
+                    self._recompute_connection_status(market)
                     self._status[market]["reconnects"] += 1
-                    self._apps.pop(market, None)
+                    self._apps.pop(conn_key, None)
             if not self._stop.wait(self.reconnect_seconds):
-                print("[WS] %s reconnecting" % market.upper())
+                continue
+
+    def _handle_message(self, market, index, ack_id, app, message):
+        try:
+            packet = json.loads(message)
+            if packet.get("id") == ack_id:
+                if packet.get("result", "__missing__") is None and "code" not in packet:
+                    with self._lock:
+                        self._connection_live[(market, index)] = True
+                        self._status[market]["last_error"] = None
+                        self._recompute_connection_status(market)
+                else:
+                    with self._lock:
+                        self._connection_live[(market, index)] = False
+                        self._status[market]["last_error"] = str(
+                            packet.get("msg") or packet.get("error") or packet)
+                        self._status[market]["state"] = "subscription_error"
+                        self._recompute_connection_status(market)
+                    app.close()
+                return
+
+            data = packet.get("data", packet)
+            if data.get("e") != "kline":
+                return
+            kline = data.get("k") or {}
+            interval = str(kline.get("i", ""))
+            if interval not in self.CACHE_LIMITS[market]:
+                return
+            symbol = str(data.get("s") or kline.get("s") or "").upper()
+            open_time = int(kline.get("t", 0))
+            if not symbol or open_time <= 0:
+                return
+            event_time = int(data.get("E", 0))
+            is_closed = bool(kline.get("x"))
+            if is_closed:
+                self._merge_event_candle(market, symbol, interval, kline)
+
+            if interval != "5m":
+                with self._lock:
+                    self._status[market]["last_event"] = datetime.now(
+                        timezone.utc).isoformat()
+                return
+
+            key = (market, symbol)
+            with self._lock:
+                previous = self._last_open.get(key)
+                first_for_candle = previous != open_time
+                if first_for_candle:
+                    self._last_open[key] = open_time
+                opening_event = (
+                    first_for_candle and not is_closed
+                    and event_time >= open_time
+                    and event_time - open_time <= 10000
+                )
+                self._latest_candles[key] = {
+                    "symbol": symbol, "interval": "5m",
+                    "time": open_time // 1000, "open_time": open_time,
+                    "open": float(kline.get("o", 0)),
+                    "high": float(kline.get("h", 0)),
+                    "low": float(kline.get("l", 0)),
+                    "close": float(kline.get("c", 0)),
+                    "volume": float(kline.get("v", 0)),
+                    "is_closed": is_closed, "event_time": event_time,
+                    "source": "binance_websocket",
+                }
+                self._status[market]["last_event"] = datetime.now(
+                    timezone.utc).isoformat()
+                if is_closed:
+                    self._status[market]["last_closed_candle"] = {
+                        "symbol": symbol, "open_time": open_time,
+                        "close": kline.get("c"),
+                    }
+
+            identity = (market, symbol, open_time)
+            if is_closed:
+                with self._lock:
+                    if identity in self._closed_seen:
+                        return
+                    self._closed_seen.add(identity)
+                    if len(self._closed_seen) > 20000:
+                        self._closed_seen = set(list(self._closed_seen)[-10000:])
+                frames = self._snapshot(market, symbol)
+                self.on_kline(market, {
+                    "symbol": symbol, "interval": "5m",
+                    "open_time": open_time, "close_time": int(kline.get("T", 0)),
+                    "open": float(kline.get("o", 0)),
+                    "high": float(kline.get("h", 0)),
+                    "low": float(kline.get("l", 0)),
+                    "close": float(kline.get("c", 0)),
+                    "volume": float(kline.get("v", 0)),
+                    "event_time": event_time, "is_closed": True,
+                    "first_update": False, "source": "binance_websocket",
+                    "market_data": frames,
+                    "cache_ready": frames is not None,
+                })
+            elif opening_event:
+                self.on_kline(market, {
+                    "symbol": symbol, "interval": "5m",
+                    "open_time": open_time, "close_time": int(kline.get("T", 0)),
+                    "open": float(kline.get("o", 0)),
+                    "high": float(kline.get("h", 0)),
+                    "low": float(kline.get("l", 0)),
+                    "close": float(kline.get("c", 0)),
+                    "volume": float(kline.get("v", 0)),
+                    "event_time": event_time, "is_closed": False,
+                    "first_update": True, "source": "binance_websocket",
+                })
+        except Exception as error:
+            with self._lock:
+                self._status[market]["last_error"] = "message: " + str(error)
