@@ -1557,6 +1557,167 @@ class TradingCoordinator(SpotDemoMixin):
             "scan": scan_meta,
         }
 
+    def scan_spot(self, limit=None, min_quote_volume=None):
+        """Analyze every eligible Binance USDT spot pair in persistent batches.
+
+        All active spot-enabled USDT pairs are included by default. Quote volume
+        determines processing order only; it never filters symbols unless the
+        caller explicitly supplies min_quote_volume or limit.
+        """
+        if not self._agent_enabled("spot"):
+            return {
+                "success": False,
+                "reason": "Spot agent is stopped",
+                "opportunities": [],
+            }
+
+        try:
+            symbols = self.market_feed.fetch_symbols("spot")
+            tickers = self.market_feed._request("spot", "/api/v3/ticker/24hr", {})
+            ticker_map = {
+                str(item.get("symbol", "")).upper(): item
+                for item in tickers if isinstance(item, dict)
+            }
+            universe = []
+            minimum = (
+                float(min_quote_volume)
+                if min_quote_volume is not None else None
+            )
+            for symbol in symbols:
+                item = ticker_map.get(symbol, {})
+                try:
+                    volume = float(item.get("quoteVolume", 0) or 0)
+                    price = float(item.get("lastPrice", 0) or 0)
+                    change = float(item.get("priceChangePercent", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                if minimum is not None and volume < minimum:
+                    continue
+                universe.append({
+                    "symbol": symbol,
+                    "quote_volume": volume,
+                    "last_price": price,
+                    "change_24h_percent": change,
+                })
+            universe.sort(
+                key=lambda item: item["quote_volume"], reverse=True
+            )
+        except Exception as error:
+            return {
+                "success": False,
+                "reason": "Spot market universe scan failed: " + str(error),
+                "opportunities": [],
+                "scanned": 0,
+            }
+
+        if limit is not None:
+            try:
+                requested_limit = max(1, int(limit))
+            except (TypeError, ValueError):
+                return {
+                    "success": False,
+                    "reason": "Invalid scan limit",
+                    "opportunities": [],
+                    "scanned": 0,
+                }
+            universe = universe[:requested_limit]
+            scan_meta = {
+                "universe_total": len(universe),
+                "batch_size": len(universe),
+                "cycle": 0,
+                "cycle_complete": True,
+                "last_symbol": universe[-1]["symbol"] if universe else None,
+            }
+        else:
+            from core.scan_rotation import next_scan_batch
+            universe, scan_meta = next_scan_batch(
+                "spot", universe, batch_size=20
+            )
+
+        opportunities = []
+        errors = {}
+        rejections = {}
+        rejection_samples = []
+
+        def reject(reason, symbol):
+            key = str(reason or "No actionable signal")
+            rejections[key] = rejections.get(key, 0) + 1
+            if len(rejection_samples) < 12:
+                rejection_samples.append({
+                    "symbol": symbol, "reason": key
+                })
+
+        for item in universe:
+            symbol = item["symbol"]
+            try:
+                analysis = self.analyze_live(symbol, domains=["spot"])
+                signal = analysis.get("signals", {}).get("spot", {})
+                if not isinstance(signal, dict):
+                    reject("Missing Spot analysis", symbol)
+                    continue
+
+                direction = str(
+                    signal.get("direction", "WAIT")
+                ).upper()
+                plan = signal.get("trade_plan")
+                if direction not in ("BUY", "LONG"):
+                    reject(
+                        signal.get("reason") or "No Spot LONG signal",
+                        symbol,
+                    )
+                    continue
+                if (
+                    signal.get("strategy_version") != "v3"
+                    or not isinstance(plan, dict)
+                    or plan.get("strategy_version") != "v3"
+                ):
+                    reject("Only V3 Spot signals and plans are eligible", symbol)
+                    continue
+                if (
+                    plan.get("success") is not True
+                    or str(plan.get("direction", "")).upper() != "LONG"
+                ):
+                    reject(
+                        plan.get("reason") or "Spot V3 plan rejected",
+                        symbol,
+                    )
+                    continue
+
+                opportunities.append({
+                    **item,
+                    "direction": "LONG",
+                    "confidence": float(signal.get("confidence", 0) or 0),
+                    "trade_plan": plan,
+                    "signal": signal,
+                })
+            except Exception as error:
+                errors[symbol] = str(error)
+
+        opportunities.sort(
+            key=lambda item: (
+                item["confidence"], item["quote_volume"]
+            ),
+            reverse=True,
+        )
+        if opportunities:
+            self.last_signals["spot"] = opportunities[0]["signal"]
+
+        return {
+            "success": True,
+            "scanned": len(universe),
+            "actionable": len(opportunities),
+            "selected": (
+                opportunities[0]["symbol"] if opportunities else None
+            ),
+            "opportunities": opportunities,
+            "errors": errors,
+            "rejections": rejections,
+            "rejection_samples": rejection_samples,
+            "scan": scan_meta,
+        }
+
     def analyze_all(self, market_data):
         results = {}
 
