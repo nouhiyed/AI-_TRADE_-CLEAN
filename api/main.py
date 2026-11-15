@@ -26,6 +26,7 @@ from core.binance_websocket import BinanceKlineStream
 coordinator = None
 autopilot = None
 market_stream = None
+monitor_thread = None
 
 # Continuous market scanning is analysis-only. It never invokes the execution
 # engine or Autopilot. Every pass analyzes the complete eligible Binance universe.
@@ -542,6 +543,9 @@ class APIHandler(BaseHTTPRequestHandler):
                     "execution_writer": bool(
                         (runtime.get("analysis_pools", {}).get("execution_writer") or {}).get("alive")
                     ),
+                    "position_monitor": bool(
+                        monitor_thread is not None and monitor_thread.is_alive()
+                    ),
                 }
                 components["analysis_futures"] = bool(
                     runtime.get("analysis_pools", {}).get("futures", {}).get("workers", 0)
@@ -717,7 +721,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
             if path == "/autopilot/run":
                 # The app's "Scan now" control must never trigger trading.
-                # Full-universe analysis already runs in continuous_scan_worker.
+                # Full-universe REST scanning is intentionally not auto-started on mobile;
                 with scan_status_lock:
                     snapshot = json.loads(json.dumps(scan_status))
                 return self.send_json({
