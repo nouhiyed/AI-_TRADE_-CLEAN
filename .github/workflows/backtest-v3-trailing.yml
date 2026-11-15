@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: v3-live-parity-historical-validation
+  group: v3-trailing-historical-backtest
   cancel-in-progress: true
 
 jobs:
