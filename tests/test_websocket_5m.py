@@ -141,7 +141,7 @@ class ManualEntryQueueTests(unittest.TestCase):
             signal = {
                 "symbol": "BTCUSDT", "direction": "LONG",
                 "strategy_version": "v3", "signal_generated_at_ms": (now - 60) * 1000,
-                "trade_plan": {"success": True, "strategy_version": "v3", "timeframe": "5m"},
+                "trade_plan": {"success": True, "strategy_version": "v3", "timeframe": "5m", "direction": "LONG"},
             }
             result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
             self.assertFalse(result["success"])
