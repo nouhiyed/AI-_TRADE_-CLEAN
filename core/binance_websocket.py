@@ -268,7 +268,7 @@ class BinanceKlineStream:
             self._status[market]["cache_ready_symbols"] = 0
             self._status[market]["cache_warmup_errors"] = 0
         while not self._stop.is_set():
-            with self._cache_lock:
+            with self._lock:
                 ready = {symbol for m, symbol in self._cache_ready if m == market}
             pending = [symbol for symbol in symbols if symbol not in ready]
             if not pending:
