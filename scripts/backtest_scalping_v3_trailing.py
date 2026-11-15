@@ -185,12 +185,10 @@ def simulate(market,symbol,raw):
                             active["stop"]=max(candidate,entry) if side=="LONG" else min(candidate,entry)
                             active["best_price"]=float(update["best_price"])
                             active["trail_updates"]+=1
-                # Check current candle against the tightened stop; if touched, conservative stop fill.
-                stop_hit=(lo<=active["stop"]) if side=="LONG" else (hi>=active["stop"])
-                if stop_hit:
-                    exit_price=active["stop"]; reason="TRAILING_STOP" if active["armed"] else "STOP_LOSS"
-                else:
-                    exit_price=None; reason=None
+                # A newly calculated stop becomes active from the next 1m candle.
+                # This avoids look-ahead fills from lows/highs that may have occurred
+                # before the current candle close used to calculate the new stop.
+                exit_price=None; reason=None
             if reason:
                 gross=((exit_price-entry)/entry if side=="LONG" else (entry-exit_price)/entry)
                 net=gross-cost
