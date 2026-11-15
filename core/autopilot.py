@@ -353,6 +353,8 @@ class Autopilot:
             return {"success": False, "reason": "DEMO mode or agent control blocks this entry"}
         if not isinstance(signal, dict):
             return {"success": False, "reason": "Missing approved agent signal"}
+        if str(signal.get("symbol", "")).strip().upper() != symbol:
+            return {"success": False, "reason": "Signal symbol does not match requested symbol"}
         plan = signal.get("trade_plan") or {}
         direction = str(signal.get("direction", "WAIT")).upper()
         if (signal.get("strategy_version") != "v3"
