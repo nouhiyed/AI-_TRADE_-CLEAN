@@ -53,7 +53,7 @@ class BinanceKlineStream:
         self._warm_errors = {}
         self._status = {
             market: {
-                "connected": False, "state": "stopped",
+                "connected": False, "fully_connected": False, "state": "stopped",
                 "symbols": 0, "total_chunks": 0, "connected_chunks": 0,
                 "last_event": None, "last_closed_candle": None,
                 "reconnects": 0, "last_error": None,
@@ -260,7 +260,8 @@ class BinanceKlineStream:
                    if key[0] == market and value)
         total = int(self._status[market]["total_chunks"])
         self._status[market]["connected_chunks"] = live
-        self._status[market]["connected"] = total > 0 and live == total
+        self._status[market]["connected"] = live > 0
+        self._status[market]["fully_connected"] = total > 0 and live == total
         if live == total and total:
             self._status[market]["state"] = "live"
         elif live:
@@ -285,6 +286,7 @@ class BinanceKlineStream:
                     self._status[market].update({
                         "symbols": len(symbols), "total_chunks": len(chunks),
                         "connected_chunks": 0, "connected": False,
+                        "fully_connected": False,
                         "state": "warming_and_connecting", "last_error": None,
                     })
                     for key in list(self._connection_live):
