@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.15.10"
+API_VERSION = "2026.11.15.11"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -562,6 +562,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "demo": coordinator.get_demo_positions(),
                     "scan": scan_snapshot,
                     "websocket": market_stream.status() if market_stream else {},
+                    "analysis_pools": autopilot.status().get("analysis_pools", {}),
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
@@ -639,13 +640,14 @@ class APIHandler(BaseHTTPRequestHandler):
                         # from reaching its agent; keep the job readable in memory.
                         submission_jobs[request_id]["persistence_error"] = str(error)
                 try:
-                    worker = threading.Thread(
-                        target=_process_agent_submission,
-                        args=(request_id, dict(data)),
-                        name="agent-submission-" + request_id[:8],
-                        daemon=True,
-                    )
-                    worker.start()
+                    domain = str(data.get("domain", "")).strip().lower()
+                    accepted = autopilot.submit_analysis(
+                        domain, _process_agent_submission, request_id, dict(data)
+                    ) if autopilot is not None else False
+                    if not accepted:
+                        raise RuntimeError(
+                            "Analysis queue is full or market domain is invalid"
+                        )
                 except Exception as error:
                     with submission_jobs_lock:
                         job = submission_jobs.get(request_id)
