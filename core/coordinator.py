@@ -795,11 +795,9 @@ class TradingCoordinator(SpotDemoMixin):
                     elif target is not None and exit_price <= target:
                         reason = "TAKE_PROFIT"
 
-                max_hold = int(snapshot.get("max_hold_minutes") or 0)
-                opened_ms = int(snapshot.get("opened_at_ms") or 0)
-                if not reason and max_hold > 0 and opened_ms > 0:
-                    if int(time.time() * 1000) - opened_ms >= max_hold * 60_000:
-                        reason = "TIME_EXIT"
+                # Do not expire positions by elapsed time. Keep them open until
+                # their price-based stop-loss/take-profit is reached or the user
+                # explicitly closes them. Legacy max_hold_minutes values are ignored.
 
                 # Serialize only the short state/ledger update. If a manual close
                 # started while Binance was responding, its DEMO_CLOSING status
