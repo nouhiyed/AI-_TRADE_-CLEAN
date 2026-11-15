@@ -1461,39 +1461,23 @@ class TradingCoordinator(SpotDemoMixin):
             "success": True, "direction": "SHORT" if is_short else "LONG",
             "entry": float(entry), "stop_loss": float(stop),
             "take_profit": float(target), "reward_risk": round(float(reward_risk), 4),
-            "timeframe": timeframe,
-            "method": "AGENT_STRUCTURE_REJECTION_PLAN",
+            "timeframe": "5m",
+            "method": "AGENT_V3_5M_SIGNAL_PLAN",
             "chart_reference_levels": {k: str(v) for k, v in proposed.items()},
         })
         signal["trade_plan"] = plan
         self.last_signals[domain] = signal
 
-        try:
-            if domain == "futures":
-                execution = self.request_demo_futures_trade(
-                    symbol, direction, signal_override=signal
-                )
-            else:
-                execution = self.request_demo_spot_trade(
-                    symbol, domain=domain, signal_override=signal
-                )
-            opened = bool(execution.get("approved"))
-            reason = (
-                "Agent accepted the setup and DEMO risk/execution checks passed"
-                if opened else str(execution.get("reason", "Risk or execution checks rejected the setup"))
-            )
-            status = "APPROVED" if opened else "REJECTED"
-        except Exception as error:
-            execution = {"approved": False, "reason": str(error)}
-            opened = False
-            reason = str(error)
-            status = "REJECTED"
-
+        # A chart submission is an agent decision, not an immediate market order.
+        # The API queues approved decisions and the WebSocket opens them only on
+        # the first update of the following 5m candle.
+        reason = "Agent approved the setup; waiting for the next 5m candle open"
         return {
-            **base, "success": True, "opened": opened,
-            "decision_status": status, "decision_reason": reason,
-            "decision": status + ": " + reason,
-            "signal": signal, "trade_plan": plan, "execution": execution,
+            **base, "success": True, "opened": False,
+            "decision_status": "QUEUED", "decision_reason": reason,
+            "decision": "QUEUED: " + reason,
+            "signal": signal, "trade_plan": plan,
+            "execution": {"queued": True, "executed": False},
             "proposed_levels": {k: str(v) for k, v in proposed.items()},
         }
 
