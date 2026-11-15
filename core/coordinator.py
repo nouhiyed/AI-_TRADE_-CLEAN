@@ -1522,8 +1522,38 @@ class TradingCoordinator(SpotDemoMixin):
             })
         # Binance request pacing is isolated per market; concurrent
         # symbol analysis overlaps network latency without burst flooding.
+        progress_state = {"started": 0, "active": 0}
+        progress_lock = threading.Lock()
+
         def analyze_scan_symbol(scan_item):
-            return self.analyze_live(scan_item["symbol"], domains=["futures"])
+            symbol = scan_item["symbol"]
+            with progress_lock:
+                progress_state["started"] += 1
+                progress_state["active"] += 1
+                started = progress_state["started"]
+                active = progress_state["active"]
+            if callable(progress_callback):
+                progress_callback({
+                    "phase": "fetching_market_data",
+                    "current_symbol": symbol,
+                    "started_in_batch": started,
+                    "active_workers": active,
+                    "universe_total": len(universe),
+                })
+            try:
+                return self.analyze_live(scan_item["symbol"], domains=["futures"])
+            finally:
+                with progress_lock:
+                    progress_state["active"] = max(0, progress_state["active"] - 1)
+                    active = progress_state["active"]
+                if callable(progress_callback):
+                    progress_callback({
+                        "phase": "processing_analysis",
+                        "current_symbol": symbol,
+                        "started_in_batch": started,
+                        "active_workers": active,
+                        "universe_total": len(universe),
+                    })
 
         # More in-flight symbols hide mobile-network latency. Process each
         # completed future immediately so a slow first symbol cannot stall progress.
@@ -1718,8 +1748,38 @@ class TradingCoordinator(SpotDemoMixin):
                 "universe_total": len(universe),
             })
         # Keep bounded concurrency with independent Spot API pacing.
+        progress_state = {"started": 0, "active": 0}
+        progress_lock = threading.Lock()
+
         def analyze_scan_symbol(scan_item):
-            return self.analyze_live(scan_item["symbol"], domains=["spot"])
+            symbol = scan_item["symbol"]
+            with progress_lock:
+                progress_state["started"] += 1
+                progress_state["active"] += 1
+                started = progress_state["started"]
+                active = progress_state["active"]
+            if callable(progress_callback):
+                progress_callback({
+                    "phase": "fetching_market_data",
+                    "current_symbol": symbol,
+                    "started_in_batch": started,
+                    "active_workers": active,
+                    "universe_total": len(universe),
+                })
+            try:
+                return self.analyze_live(scan_item["symbol"], domains=["spot"])
+            finally:
+                with progress_lock:
+                    progress_state["active"] = max(0, progress_state["active"] - 1)
+                    active = progress_state["active"]
+                if callable(progress_callback):
+                    progress_callback({
+                        "phase": "processing_analysis",
+                        "current_symbol": symbol,
+                        "started_in_batch": started,
+                        "active_workers": active,
+                        "universe_total": len(universe),
+                    })
 
         # More in-flight symbols hide mobile-network latency. Process each
         # completed future immediately so a slow first symbol cannot stall progress.
