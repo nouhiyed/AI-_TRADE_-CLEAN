@@ -192,9 +192,11 @@ class Autopilot:
             return {"success": False, "reason": "Signal symbol does not match requested symbol"}
         plan = signal.get("trade_plan") or {}
         direction = str(signal.get("direction", "WAIT")).upper()
+        expected_plan_direction = "LONG" if direction == "BUY" else direction
         if (signal.get("strategy_version") != "v3"
                 or plan.get("strategy_version") != "v3"
                 or str(plan.get("timeframe", "")).lower() != "5m"
+                or str(plan.get("direction", "")).upper() != expected_plan_direction
                 or plan.get("success") is not True
                 or direction not in (("BUY",) if domain == "spot" else ("LONG", "SHORT"))):
             return {"success": False, "reason": "The agent signal is not an approved V3 setup"}
@@ -326,6 +328,8 @@ class Autopilot:
             open_time = int(opening_candle.get("open_time") or 0)
             entry_price = float(opening_candle.get("open") or 0)
             if (int(pending.get("next_open_time") or 0) != open_time
+                    or opening_candle.get("first_update") is not True
+                    or opening_candle.get("source") != "binance_websocket"
                     or entry_price <= 0 or event_time < open_time
                     or event_time - open_time > 10000
                     or int(time.time() * 1000) - open_time > 10000):
@@ -333,6 +337,11 @@ class Autopilot:
                 result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
                 return
             signal = dict(pending["signal"])
+            signal_close_time = int(signal.get("signal_candle_close_time") or 0)
+            if signal_close_time and signal_close_time + 1 != open_time:
+                result["status"] = "SKIPPED"
+                result["skipped"].append({"reason": "Entry is not the immediate next 5m candle"})
+                return
             if str(signal.get("symbol", "")).upper() != symbol:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Signal symbol mismatch"})
