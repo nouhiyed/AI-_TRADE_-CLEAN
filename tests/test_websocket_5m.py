@@ -90,6 +90,17 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.stream._merge_frame("futures", "BTCUSDT", "5m", open_frame)
         self.assertIsNone(self.stream._snapshot("futures", "BTCUSDT"))
 
+    def test_spot_cache_does_not_require_optional_4h_history(self):
+        for interval, freq, rows in (
+            ("5m", "5min", 60), ("15m", "15min", 60), ("1h", "1h", 210),
+        ):
+            frame = candle_frame(freq, rows=rows)
+            frame.attrs["timeframe"] = interval
+            self.stream._merge_frame("spot", "NEWUSDT", interval, frame)
+        snapshot = self.stream._snapshot("spot", "NEWUSDT")
+        self.assertIsNotNone(snapshot)
+        self.assertNotIn("4h", snapshot)
+
     def test_snapshot_rejects_gaps_and_stale_candles(self):
         for interval in ("5m", "15m", "1h"):
             freq = {"5m": "5min", "15m": "15min", "1h": "1h"}[interval]
