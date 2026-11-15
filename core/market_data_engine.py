@@ -132,7 +132,7 @@ class MarketDataEngine:
 
         return result
 
-    def build_live(self, symbol, domains=None):
+    def build_live(self, symbol, domains=None, include_orderbook=True):
         symbol = str(symbol).strip().upper()
 
         if not symbol:
@@ -174,7 +174,8 @@ class MarketDataEngine:
                     symbol=symbol,
                     timeframes=frames,
                     candle_limit=500,
-                    orderbook_limit=100
+                    orderbook_limit=100,
+                    include_orderbook=include_orderbook
                 )
 
                 for timeframe, error in snapshot.get("errors", {}).items():
