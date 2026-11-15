@@ -7,7 +7,7 @@ class TrailingStopTests(unittest.TestCase):
         rows=[]
         for i in range(20):
             c=base+i*0.1
-            rows.append({"high":c+0.4,"low":c-0.3,"close":c})
+            rows.append({"high":c+0.4,"low":c-0.3,"close":c,"ATR":1.0})
         return pd.DataFrame(rows)
 
     def test_long_stop_only_tightens(self):
