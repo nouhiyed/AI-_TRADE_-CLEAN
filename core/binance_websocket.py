@@ -29,6 +29,7 @@ class BinanceKlineStream:
         "spot": {"5m": 60, "15m": 60, "1h": 210, "4h": 210},
     }
     MAX_STREAMS_PER_CONNECTION = 1020
+    INTERVAL_MS = {"5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000}
 
     def __init__(self, market_feed, on_kline, max_symbols=None,
                  refresh_seconds=1800, reconnect_seconds=3):
@@ -205,17 +206,38 @@ class BinanceKlineStream:
             with self._lock:
                 self._status[market]["last_error"] = "cache candle: " + str(error)
 
+    def _frame_healthy(self, market, interval, frame, now_ms=None):
+        minimum = self.REQUIRED_ROWS[market][interval]
+        if frame is None or len(frame) < minimum:
+            return False
+        if "is_closed" not in frame.columns or not bool(frame["is_closed"].iloc[-1]):
+            return False
+        if "open_time" not in frame.columns or "close_time" not in frame.columns:
+            return False
+        try:
+            interval_ms = self.INTERVAL_MS[interval]
+            opens = pd.to_datetime(frame["open_time"], utc=True).astype("int64") // 1_000_000
+            if len(opens) > 1 and not bool((opens.diff().dropna() == interval_ms).all()):
+                return False
+            last_close = int(pd.Timestamp(frame["close_time"].iloc[-1]).timestamp() * 1000)
+            now_ms = int(now_ms or time.time() * 1000)
+            if last_close > now_ms + 30000:
+                return False
+            if now_ms - last_close > (2 * interval_ms + 30000):
+                return False
+            return True
+        except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+            return False
+
     def _snapshot(self, market, symbol):
         required = self.REQUIRED_ROWS[market]
         frames = {}
         with self._cache_lock:
             for interval, minimum in required.items():
                 frame = self._cache.get((market, symbol, interval))
-                if frame is None or len(frame) < minimum:
+                if not self._frame_healthy(market, interval, frame):
                     return None
                 copied = frame.copy()
-                if "is_closed" not in copied.columns or not bool(copied["is_closed"].iloc[-1]):
-                    return None
                 copied.attrs.update({
                     "market": market, "symbol": symbol,
                     "interval": interval, "timeframe": interval,
@@ -230,12 +252,7 @@ class BinanceKlineStream:
                 return False
             with self._cache_lock:
                 existing = self._cache.get((market, symbol, interval))
-                already_ready = (
-                    existing is not None
-                    and len(existing) >= self.REQUIRED_ROWS[market][interval]
-                    and "is_closed" in existing.columns
-                    and bool(existing["is_closed"].iloc[-1])
-                )
+                already_ready = self._frame_healthy(market, interval, existing)
             if already_ready:
                 continue
             last_error = None
@@ -262,6 +279,8 @@ class BinanceKlineStream:
         with self._lock:
             if ready:
                 self._cache_ready.add((market, symbol))
+            else:
+                self._cache_ready.discard((market, symbol))
             state = self._status[market]
             state["cache_warmup_completed"] = len(
                 [key for key in self._cache_ready if key[0] == market])
@@ -277,22 +296,33 @@ class BinanceKlineStream:
             self._status[market]["cache_ready_symbols"] = 0
             self._status[market]["cache_warmup_errors"] = 0
         while not self._stop.is_set():
+            ready = {
+                symbol for symbol in symbols
+                if self._snapshot(market, symbol) is not None
+            }
             with self._lock:
-                ready = {symbol for m, symbol in self._cache_ready if m == market}
+                self._cache_ready = {
+                    key for key in self._cache_ready
+                    if key[0] != market or key[1] in ready
+                }
+                self._cache_ready.update((market, symbol) for symbol in ready)
+                state = self._status[market]
+                state["cache_ready_symbols"] = len(ready)
+                state["cache_warmup_completed"] = len(ready)
             pending = [symbol for symbol in symbols if symbol not in ready]
-            if not pending:
-                return
-            with ThreadPoolExecutor(max_workers=8, thread_name_prefix="candle-warm-" + market) as pool:
-                futures = [pool.submit(self._warm_symbol, market, symbol) for symbol in pending]
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as error:
-                        with self._lock:
-                            self._status[market]["last_error"] = "cache warmup: " + str(error)
-                    if self._stop.is_set():
-                        return
-            if self._stop.wait(30):
+            if pending:
+                with ThreadPoolExecutor(max_workers=6, thread_name_prefix="candle-warm-" + market) as pool:
+                    futures = [pool.submit(self._warm_symbol, market, symbol) for symbol in pending]
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as error:
+                            with self._lock:
+                                self._status[market]["last_error"] = "cache warmup: " + str(error)
+                        if self._stop.is_set():
+                            return
+            # Keep checking cache continuity and age while the stream runs.
+            if self._stop.wait(60):
                 return
 
     def _recompute_connection_status(self, market):
