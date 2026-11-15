@@ -173,18 +173,25 @@ class Autopilot:
                 with self._analysis_stats_lock:
                     self._analysis_stats[domain]["superseded"] += 1
             self._analysis_pending[key] = event
+            domain_pending = sum(1 for pending_domain, _ in self._analysis_pending
+                                 if pending_domain == domain)
+            domain_scheduled = sum(1 for scheduled_domain, _ in self._analysis_scheduled
+                                   if scheduled_domain == domain)
             with self._analysis_stats_lock:
                 stats = self._analysis_stats[domain]
                 stats["last_received_at_ms"] = received_at_ms
-                stats["queue_depth"] = len(self._analysis_pending)
+                stats["queue_depth"] = domain_pending
             if key in self._analysis_scheduled:
                 return True
-            if len(self._analysis_scheduled) >= self._analysis_stats[domain]["queue_limit"]:
+            if domain_scheduled >= self._analysis_stats[domain]["queue_limit"]:
                 self._analysis_pending.pop(key, None)
                 with self._analysis_stats_lock:
                     stats = self._analysis_stats[domain]
                     stats["rejected"] += 1
-                    stats["queue_depth"] = len(self._analysis_pending)
+                    stats["queue_depth"] = sum(
+                        1 for pending_domain, _ in self._analysis_pending
+                        if pending_domain == domain
+                    )
                 return False
             self._analysis_scheduled.add(key)
         if not self.submit_analysis(domain, self._drain_symbol_analysis, domain, symbol):
@@ -206,7 +213,10 @@ class Autopilot:
                 if candle is None:
                     self._analysis_scheduled.discard(key)
                     with self._analysis_stats_lock:
-                        self._analysis_stats[domain]["queue_depth"] = len(self._analysis_pending)
+                        self._analysis_stats[domain]["queue_depth"] = sum(
+                            1 for pending_domain, _ in self._analysis_pending
+                            if pending_domain == domain
+                        )
                     return
                 with self._analysis_stats_lock:
                     self._analysis_stats[domain]["queue_depth"] = len(self._analysis_pending)
