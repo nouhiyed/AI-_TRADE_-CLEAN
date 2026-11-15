@@ -184,6 +184,45 @@ class ManualEntryQueueTests(unittest.TestCase):
             autopilot._event_executor.shutdown(wait=True)
 
 
+class LatestEventQueueTests(unittest.TestCase):
+    def test_only_latest_pending_candle_is_kept_per_symbol(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json"
+            )
+            # Keep the drain queued so two incoming closes can be coalesced.
+            autopilot.submit_analysis = lambda *_args: True
+            first = {
+                "symbol": "BTCUSDT", "interval": "5m",
+                "open_time": 300000, "close_time": 599999, "is_closed": True,
+            }
+            second = {
+                "symbol": "BTCUSDT", "interval": "5m",
+                "open_time": 600000, "close_time": 899999, "is_closed": True,
+            }
+            self.assertTrue(autopilot._queue_latest_analysis("futures", "BTCUSDT", first))
+            self.assertTrue(autopilot._queue_latest_analysis("futures", "BTCUSDT", second))
+            pending = autopilot._analysis_pending[("futures", "BTCUSDT")]
+            self.assertEqual(pending["close_time"], 899999)
+            stats = autopilot.status()["analysis_pools"]["futures"]
+            self.assertEqual(stats["superseded"], 1)
+            self.assertEqual(stats["queue_depth"], 1)
+            self.assertEqual(len(autopilot._analysis_scheduled), 1)
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
+
+    def test_demo_execution_has_one_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json"
+            )
+            self.assertEqual(autopilot._event_executor._max_workers, 1)
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
+
+
 class ParallelAnalysisPoolTests(unittest.TestCase):
     def test_futures_and_spot_analysis_run_in_parallel(self):
         with tempfile.TemporaryDirectory() as directory:
