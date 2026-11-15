@@ -1441,6 +1441,7 @@ class TradingCoordinator(SpotDemoMixin):
             return {**base, "success": True, "decision_status": "REJECTED",
                     "decision_reason": reason, "reason": reason, "signal": signal}
         signal["chart_market"] = domain
+        signal["signal_generated_at_ms"] = int(time.time() * 1000)
         direction = str(signal.get("direction", "WAIT")).strip().upper()
         if domain == "futures":
             is_long = direction == "LONG"
