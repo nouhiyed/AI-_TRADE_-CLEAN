@@ -1324,6 +1324,71 @@ class TradingCoordinator(SpotDemoMixin):
         }
 
 
+    def analyze_live_from_frames(self, symbol, domain, frames):
+        """Run V3 against the closed multi-timeframe WebSocket cache (no REST I/O)."""
+        symbol = str(symbol).strip().upper()
+        domain = str(domain).strip().lower()
+        if not symbol or domain not in self.agents or not isinstance(frames, dict):
+            return {"symbol": symbol, "signals": {},
+                    "data_errors": {"input": "Invalid symbol, domain or candle cache"}}
+        required = self.market_engine.timeframes[domain]
+        prepared = {}
+        errors = {}
+        for timeframe in required:
+            frame = frames.get(timeframe)
+            if frame is None:
+                errors[timeframe] = "Candle cache is not ready"
+                continue
+            if (len(frame) < 60 or "is_closed" not in frame.columns
+                    or not bool(frame["is_closed"].iloc[-1])):
+                errors[timeframe] = "Latest " + timeframe + " candle is not confirmed closed"
+                continue
+            try:
+                prepared[timeframe] = self.market_engine._prepare_frame(
+                    frame, symbol, domain, timeframe)
+            except Exception as error:
+                errors[timeframe] = str(error)
+        if errors or any(tf not in prepared for tf in required):
+            return {"symbol": symbol, "source": "binance_websocket_cache",
+                    "signals": {}, "data_errors": errors}
+        live_data = {
+            "symbol": symbol,
+            "source": "binance_websocket_cache",
+            "timeframes": {domain: prepared},
+            "orderbooks": {domain: {"available": False,
+                                    "reason": "not_required_for_v3_signal"}},
+        }
+        try:
+            agent_data = self.market_engine.for_live_agent(live_data, domain)
+            signal = self.agents[domain].analyze(agent_data)
+            if not isinstance(signal, dict) or signal.get("strategy_version") != "v3":
+                raise RuntimeError("V3-only strategy path is unavailable")
+            plan = signal.get("trade_plan")
+            if not isinstance(plan, dict):
+                raise RuntimeError("V3 did not return a trade plan")
+            signal["symbol"] = symbol
+            signal["signal_timeframe"] = "5m"
+            signal["signal_source"] = "BINANCE_WEBSOCKET_CACHE"
+            signal["strategy_tag"] = (
+                "v3_" + str(plan.get("setup", "no_setup")).lower())
+            if plan.get("success") is True and self.market_context is not None:
+                direction = str(signal.get("direction", "WAIT")).upper()
+                context_direction = "LONG" if direction == "BUY" else direction
+                assessment = self.market_context.assess(symbol, context_direction)
+                signal["market_context"] = assessment
+                if assessment.get("veto"):
+                    signal["trade_plan"] = {
+                        **plan, "success": False,
+                        "reason": "Market/news context veto: " + str(assessment["veto"]),
+                    }
+            self.last_signals[domain] = signal
+            return {"symbol": symbol, "source": "binance_websocket_cache",
+                    "signals": {domain: signal}, "data_errors": {}}
+        except Exception as error:
+            return {"symbol": symbol, "source": "binance_websocket_cache",
+                    "signals": {}, "data_errors": {domain: str(error)}}
+
+
     def submit_chart_signal(
         self, domain, symbol, timeframe,
         entry_price=None, take_profit=None, stop_loss=None
