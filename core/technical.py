@@ -59,7 +59,12 @@ def analyze(df, timeframe=None):
     # Momentum
     df["RSI"] = RSIIndicator(close, profile["rsi_period"]).rsi()
 
-    macd = MACD(close, window_fast=profile["macd_fast"],\n                 window_slow=profile["macd_slow"],\n                 window_sign=profile["macd_signal"])
+    macd = MACD(
+        close,
+        window_fast=profile["macd_fast"],
+        window_slow=profile["macd_slow"],
+        window_sign=profile["macd_signal"],
+    )
     df["MACD"] = macd.macd()
     df["MACD_signal"] = macd.macd_signal()
     df["MACD_hist"] = macd.macd_diff()
