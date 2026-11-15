@@ -26,8 +26,7 @@ coordinator = None
 autopilot = None
 
 # Continuous market scanning is analysis-only. It never invokes the execution
-# engine or Autopilot and advances the persistent 20-symbol cursors until every
-# eligible symbol in each Binance market has been analyzed.
+# engine or Autopilot. Every pass analyzes the complete eligible Binance universe.
 scan_status = {
     "running": False,
     "futures": {
@@ -619,7 +618,16 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json(autopilot.update(data))
 
             if path == "/autopilot/run":
-                return self.send_json(autopilot.tick(force=True))
+                # The app's "Scan now" control must never trigger trading.
+                # Full-universe analysis already runs in continuous_scan_worker.
+                with scan_status_lock:
+                    snapshot = json.loads(json.dumps(scan_status))
+                return self.send_json({
+                    "success": True,
+                    "executed": False,
+                    "message": "Continuous market scan is running; no trade was executed.",
+                    "scan": snapshot,
+                })
 
             if path == "/learning/enable":
                 key = str(data.get("setup", ""))
