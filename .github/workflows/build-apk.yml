@@ -254,4 +254,4 @@ jobs:
               target_url: `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`
             });
 
-# Trigger a fresh release APK build for the latest Android UI changes.
+# Trigger a fresh release APK build for the latest main-branch application state.
