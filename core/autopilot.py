@@ -4,6 +4,7 @@ Safety: off by default; every trade still goes through the signal match, trade
 plan checks, risk reservation and the learning engine's setup filter.
 """
 import json
+import math
 import os
 import threading
 import time
