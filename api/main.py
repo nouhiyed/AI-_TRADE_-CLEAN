@@ -67,87 +67,95 @@ def record_scan_progress(domain, details):
         )
 
 
+def _scan_domain_worker(domain):
+    """Run one market scanner independently; Futures never blocks Spot."""
+    scan_method = (
+        coordinator.scan_futures if domain == "futures"
+        else coordinator.scan_spot
+    )
+    while True:
+        with scan_status_lock:
+            scan_status[domain].update({
+                "phase": "loading_universe",
+                "current_symbol": None,
+                "scanned_in_batch": 0,
+                "universe_total": None,
+                "scan_started_at": time.time(),
+            })
+            scan_status["updated_at"] = time.time()
+        print("[SCAN] %s independent full-universe scan starting" % domain.upper())
+        try:
+            result = scan_method(
+                progress_callback=lambda details: record_scan_progress(domain, details)
+            )
+            with scan_status_lock:
+                current = scan_status[domain]
+                current["last_batch"] = {
+                    "success": bool(result.get("success")),
+                    "scanned": int(result.get("scanned", 0) or 0),
+                    "actionable": int(result.get("actionable", 0) or 0),
+                    "scan": result.get("scan", {}),
+                    "errors": len(result.get("errors", {})),
+                    "opportunities": [
+                        {
+                            "symbol": item.get("symbol"),
+                            "direction": item.get("direction"),
+                            "confidence": item.get("confidence"),
+                            "quote_volume": item.get("quote_volume"),
+                            "trade_plan": item.get("trade_plan"),
+                        }
+                        for item in result.get("opportunities", [])
+                    ],
+                    "reason": result.get("reason"),
+                    "completed_at": time.time(),
+                }
+                if result.get("success"):
+                    current["batches"] += 1
+                    if (result.get("scan") or {}).get("cycle_complete"):
+                        current["cycles_completed"] += 1
+                current["phase"] = "idle" if result.get("success") else "error"
+                current["current_symbol"] = None
+                current["scanned_in_batch"] = int(result.get("scanned", 0) or 0)
+                current["universe_total"] = (result.get("scan") or {}).get("universe_total")
+                scan_status["last_error"] = None if result.get("success") else {
+                    "domain": domain, "reason": result.get("reason"),
+                }
+                scan_status["updated_at"] = time.time()
+            print(
+                "[SCAN] %s full pass: %s/%s symbols, actionable=%s"
+                % (
+                    domain.upper(),
+                    (result.get("scan") or {}).get("batch_size", result.get("scanned", 0)),
+                    (result.get("scan") or {}).get("universe_total", "?"),
+                    result.get("actionable", 0),
+                )
+            )
+        except Exception as error:
+            with scan_status_lock:
+                scan_status[domain]["phase"] = "error"
+                scan_status[domain]["current_symbol"] = None
+                scan_status["last_error"] = {"domain": domain, "reason": str(error)}
+                scan_status["updated_at"] = time.time()
+            print("[SCAN] %s scanner error: %s" % (domain.upper(), error))
+        time.sleep(max(1.0, float(os.environ.get("SCAN_BATCH_PAUSE_SECONDS", "2"))))
+
+
 def continuous_scan_worker():
+    """Start isolated Futures and Spot loops; neither market waits for the other."""
     with scan_status_lock:
         scan_status["running"] = True
         scan_status["updated_at"] = time.time()
-    print("[SCAN] Continuous Futures + Spot scanner started (analysis only)")
+    print("[SCAN] Independent Futures + Spot scanners started (analysis only)")
+    for domain in ("futures", "spot"):
+        threading.Thread(
+            target=_scan_domain_worker,
+            args=(domain,),
+            name="continuous-%s-scanner" % domain,
+            daemon=True,
+        ).start()
+    # Keep this supervisor alive; each market owns its own loop and status.
     while True:
-        for domain in ("futures", "spot"):
-            with scan_status_lock:
-                scan_status[domain].update({
-                    "phase": "loading_universe",
-                    "current_symbol": None,
-                    "scanned_in_batch": 0,
-                    "universe_total": None,
-                    "scan_started_at": time.time(),
-                })
-                scan_status["updated_at"] = time.time()
-            print("[SCAN] %s full-universe scan starting" % domain.upper())
-            try:
-                result = (
-                    coordinator.scan_futures(
-                        progress_callback=lambda details: record_scan_progress(domain, details)
-                    )
-                    if domain == "futures"
-                    else coordinator.scan_spot(
-                        progress_callback=lambda details: record_scan_progress(domain, details)
-                    )
-                )
-                with scan_status_lock:
-                    current = scan_status[domain]
-                    current["last_batch"] = {
-                        "success": bool(result.get("success")),
-                        "scanned": int(result.get("scanned", 0) or 0),
-                        "actionable": int(result.get("actionable", 0) or 0),
-                        "scan": result.get("scan", {}),
-                        "errors": len(result.get("errors", {})),
-                        "opportunities": [
-                            {
-                                "symbol": item.get("symbol"),
-                                "direction": item.get("direction"),
-                                "confidence": item.get("confidence"),
-                                "quote_volume": item.get("quote_volume"),
-                                "trade_plan": item.get("trade_plan"),
-                            }
-                            for item in result.get("opportunities", [])
-                        ],
-                        "reason": result.get("reason"),
-                        "completed_at": time.time(),
-                    }
-                    if result.get("success"):
-                        current["batches"] += 1
-                        if (result.get("scan") or {}).get("cycle_complete"):
-                            current["cycles_completed"] += 1
-                    current["phase"] = "idle" if result.get("success") else "error"
-                    current["current_symbol"] = None
-                    current["scanned_in_batch"] = int(result.get("scanned", 0) or 0)
-                    current["universe_total"] = (result.get("scan") or {}).get("universe_total")
-                    scan_status["last_error"] = None if result.get("success") else {
-                        "domain": domain, "reason": result.get("reason"),
-                    }
-                    scan_status["updated_at"] = time.time()
-                print(
-                    "[SCAN] %s full pass: %s/%s symbols, actionable=%s"
-                    % (
-                        domain.upper(),
-                        (result.get("scan") or {}).get("batch_size", result.get("scanned", 0)),
-                        (result.get("scan") or {}).get("universe_total", "?"),
-                        result.get("actionable", 0),
-                    )
-                )
-            except Exception as error:
-                with scan_status_lock:
-                    scan_status[domain]["phase"] = "error"
-                    scan_status[domain]["current_symbol"] = None
-                    scan_status["last_error"] = {
-                        "domain": domain, "reason": str(error),
-                    }
-                    scan_status["updated_at"] = time.time()
-                print("[SCAN] %s scanner error: %s" % (domain.upper(), error))
-        # Brief pause between complete Futures+Spot passes; the next pass starts
-        # again from the complete current Binance-eligible universe.
-        time.sleep(max(1.0, float(os.environ.get("SCAN_BATCH_PAUSE_SECONDS", "2"))))
+        time.sleep(3600)
 
 
 def initialize_runtime():
