@@ -1506,52 +1506,52 @@ class TradingCoordinator(SpotDemoMixin):
             analyses = scan_pool.map(analyze_scan_symbol, universe)
             for item, analysis in zip(universe, analyses):
                 symbol = item["symbol"]
+                if callable(progress_callback):
+                    progress_callback({
+                        "phase": "analyzing",
+                        "current_symbol": symbol,
+                        "scanned_in_batch": processed,
+                        "universe_total": len(universe),
+                    })
+                try:
+                    signal = analysis.get("signals", {}).get("futures", {})
+                    if not isinstance(signal, dict):
+                        reject("Missing Futures analysis", symbol)
+                        continue
+
+                    direction = str(signal.get("direction", "WAIT")).upper()
+                    confidence = float(signal.get("confidence", 0) or 0)
+
+                    if direction not in ("LONG", "SHORT"):
+                        reject(signal.get("reason") or "Signal is WAIT", symbol)
+                        continue
+
+                    trade_plan = signal.get("trade_plan")
+                    if signal.get("strategy_version") != "v3" or not isinstance(trade_plan, dict) or trade_plan.get("strategy_version") != "v3":
+                        reject("Only V3 signals and plans are eligible", symbol)
+                        continue
+                    if trade_plan.get("success") is not True:
+                        reject(trade_plan.get("reason") or "Trade plan rejected", symbol)
+                        continue
+
+                    opportunities.append({
+                        **item,
+                        "direction": direction,
+                        "confidence": confidence,
+                        "trade_plan": trade_plan,
+                        "signal": signal,
+                    })
+                except Exception as error:
+                    errors[symbol] = str(error)
+                finally:
+                    processed += 1
                     if callable(progress_callback):
                         progress_callback({
-                            "phase": "analyzing",
+                            "phase": "symbol_complete",
                             "current_symbol": symbol,
                             "scanned_in_batch": processed,
                             "universe_total": len(universe),
                         })
-                    try:
-                        signal = analysis.get("signals", {}).get("futures", {})
-                        if not isinstance(signal, dict):
-                            reject("Missing Futures analysis", symbol)
-                            continue
-
-                        direction = str(signal.get("direction", "WAIT")).upper()
-                        confidence = float(signal.get("confidence", 0) or 0)
-
-                        if direction not in ("LONG", "SHORT"):
-                            reject(signal.get("reason") or "Signal is WAIT", symbol)
-                            continue
-
-                        trade_plan = signal.get("trade_plan")
-                        if signal.get("strategy_version") != "v3" or not isinstance(trade_plan, dict) or trade_plan.get("strategy_version") != "v3":
-                            reject("Only V3 signals and plans are eligible", symbol)
-                            continue
-                        if trade_plan.get("success") is not True:
-                            reject(trade_plan.get("reason") or "Trade plan rejected", symbol)
-                            continue
-
-                        opportunities.append({
-                            **item,
-                            "direction": direction,
-                            "confidence": confidence,
-                            "trade_plan": trade_plan,
-                            "signal": signal,
-                        })
-                    except Exception as error:
-                        errors[symbol] = str(error)
-                    finally:
-                        processed += 1
-                        if callable(progress_callback):
-                            progress_callback({
-                                "phase": "symbol_complete",
-                                "current_symbol": symbol,
-                                "scanned_in_batch": processed,
-                                "universe_total": len(universe),
-                            })
 
         opportunities.sort(
             key=lambda item: (
@@ -1685,64 +1685,64 @@ class TradingCoordinator(SpotDemoMixin):
             analyses = scan_pool.map(analyze_scan_symbol, universe)
             for item, analysis in zip(universe, analyses):
                 symbol = item["symbol"]
-            if callable(progress_callback):
-                progress_callback({
-                    "phase": "analyzing",
-                    "current_symbol": symbol,
-                    "scanned_in_batch": processed,
-                    "universe_total": len(universe),
-                })
-            try:
-                signal = analysis.get("signals", {}).get("spot", {})
-                if not isinstance(signal, dict):
-                    reject("Missing Spot analysis", symbol)
-                    continue
-
-                direction = str(
-                    signal.get("direction", "WAIT")
-                ).upper()
-                plan = signal.get("trade_plan")
-                if direction not in ("BUY", "LONG"):
-                    reject(
-                        signal.get("reason") or "No Spot LONG signal",
-                        symbol,
-                    )
-                    continue
-                if (
-                    signal.get("strategy_version") != "v3"
-                    or not isinstance(plan, dict)
-                    or plan.get("strategy_version") != "v3"
-                ):
-                    reject("Only V3 Spot signals and plans are eligible", symbol)
-                    continue
-                if (
-                    plan.get("success") is not True
-                    or str(plan.get("direction", "")).upper() != "LONG"
-                ):
-                    reject(
-                        plan.get("reason") or "Spot V3 plan rejected",
-                        symbol,
-                    )
-                    continue
-
-                opportunities.append({
-                    **item,
-                    "direction": "LONG",
-                    "confidence": float(signal.get("confidence", 0) or 0),
-                    "trade_plan": plan,
-                    "signal": signal,
-                })
-            except Exception as error:
-                errors[symbol] = str(error)
-            finally:
-                processed += 1
                 if callable(progress_callback):
                     progress_callback({
-                        "phase": "symbol_complete",
+                        "phase": "analyzing",
                         "current_symbol": symbol,
                         "scanned_in_batch": processed,
                         "universe_total": len(universe),
                     })
+                try:
+                    signal = analysis.get("signals", {}).get("spot", {})
+                    if not isinstance(signal, dict):
+                        reject("Missing Spot analysis", symbol)
+                        continue
+
+                    direction = str(
+                        signal.get("direction", "WAIT")
+                    ).upper()
+                    plan = signal.get("trade_plan")
+                    if direction not in ("BUY", "LONG"):
+                        reject(
+                            signal.get("reason") or "No Spot LONG signal",
+                            symbol,
+                        )
+                        continue
+                    if (
+                        signal.get("strategy_version") != "v3"
+                        or not isinstance(plan, dict)
+                        or plan.get("strategy_version") != "v3"
+                    ):
+                        reject("Only V3 Spot signals and plans are eligible", symbol)
+                        continue
+                    if (
+                        plan.get("success") is not True
+                        or str(plan.get("direction", "")).upper() != "LONG"
+                    ):
+                        reject(
+                            plan.get("reason") or "Spot V3 plan rejected",
+                            symbol,
+                        )
+                        continue
+
+                    opportunities.append({
+                        **item,
+                        "direction": "LONG",
+                        "confidence": float(signal.get("confidence", 0) or 0),
+                        "trade_plan": plan,
+                        "signal": signal,
+                    })
+                except Exception as error:
+                    errors[symbol] = str(error)
+                finally:
+                    processed += 1
+                    if callable(progress_callback):
+                        progress_callback({
+                            "phase": "symbol_complete",
+                            "current_symbol": symbol,
+                            "scanned_in_batch": processed,
+                            "universe_total": len(universe),
+                        })
 
         opportunities.sort(
             key=lambda item: (
