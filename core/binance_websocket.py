@@ -45,6 +45,7 @@ class BinanceKlineStream:
         self._threads = {}
         self._connection_threads = []
         self._connection_live = {}
+        self._symbol_connection = {}
         self._cache = {}
         self._cache_ready = set()
         self._last_open = {}
@@ -78,6 +79,13 @@ class BinanceKlineStream:
             value = self._latest_candles.get(key)
             return dict(value) if value else None
 
+    def symbol_connected(self, market, symbol):
+        key = (str(market).strip().lower(), str(symbol).strip().upper())
+        with self._lock:
+            index = self._symbol_connection.get(key)
+            return index is not None and bool(
+                self._connection_live.get((key[0], index), False))
+
     def start(self):
         if any(thread.is_alive() for thread in self._threads.values()):
             return self.status()
@@ -108,6 +116,7 @@ class BinanceKlineStream:
         with self._lock:
             for value in self._status.values():
                 value["connected"] = False
+                value["fully_connected"] = False
                 value["state"] = "stopping"
 
     def _refresh_loop(self):
@@ -313,7 +322,15 @@ class BinanceKlineStream:
                     stream_names[i:i + self.MAX_STREAMS_PER_CONNECTION]
                     for i in range(0, len(stream_names), self.MAX_STREAMS_PER_CONNECTION)
                 ]
+                symbol_connections = {}
+                for chunk_index, chunk in enumerate(chunks):
+                    for stream_name in chunk:
+                        if stream_name.endswith("@kline_5m"):
+                            symbol_connections[(
+                                market, stream_name.split("@", 1)[0].upper()
+                            )] = chunk_index
                 with self._lock:
+                    self._symbol_connection.update(symbol_connections)
                     self._status[market].update({
                         "symbols": len(symbols), "total_chunks": len(chunks),
                         "connected_chunks": 0, "connected": False,
