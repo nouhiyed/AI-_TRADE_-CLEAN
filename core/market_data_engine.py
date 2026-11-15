@@ -47,7 +47,7 @@ class MarketDataEngine:
                 f"{symbol} {timeframe}: only {len(df)} valid candles"
             )
 
-        technical = analyze_technical(df)
+        technical = analyze_technical(df, timeframe=timeframe)
         structure = analyze_market_structure(df)
 
         if len(technical) != len(df):
