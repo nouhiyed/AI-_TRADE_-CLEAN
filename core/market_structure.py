@@ -3,143 +3,152 @@ import numpy as np
 
 
 def analyze_market_structure(df, swing_window=3):
+    """Calculate causal SMC features with vectorized rolling operations.
+
+    The previous implementation repeatedly sliced pandas DataFrames and
+    assigned individual cells inside a per-candle loop. That made scanning
+    thousands of live symbols CPU-bound. This version preserves the same
+    confirmed-swing timing and BOS/CHoCH state transitions while moving
+    sweeps, FVGs, order blocks and trend calculations to NumPy/pandas vectors.
+    """
     df = df.copy().reset_index(drop=True)
 
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     n = len(df)
+    high = df["high"].to_numpy(dtype=float)
+    low = df["low"].to_numpy(dtype=float)
+    open_ = df["open"].to_numpy(dtype=float)
+    close = df["close"].to_numpy(dtype=float)
 
-    df["Swing_High"] = False
-    df["Swing_Low"] = False
-    df["BOS"] = ""
-    df["CHoCH"] = ""
-    df["Bullish_Sweep"] = False
-    df["Bearish_Sweep"] = False
-    df["Bullish_FVG"] = False
-    df["Bearish_FVG"] = False
-    df["FVG_Lower"] = np.nan
-    df["FVG_Upper"] = np.nan
-    df["Bullish_OB"] = False
-    df["Bearish_OB"] = False
-    df["OB_Lower"] = np.nan
-    df["OB_Upper"] = np.nan
+    # A swing at pivot p is confirmed at p + swing_window. The centered
+    # rolling window matches the original causal [p-w, p+w] comparison.
+    swing_window = max(0, int(swing_window))
+    swing_width = 2 * swing_window + 1
+    rolling_high = (
+        df["high"]
+        .rolling(swing_width, center=True, min_periods=swing_width)
+        .max()
+        .to_numpy()
+    )
+    rolling_low = (
+        df["low"]
+        .rolling(swing_width, center=True, min_periods=swing_width)
+        .min()
+        .to_numpy()
+    )
+    high_pivots = np.isfinite(rolling_high) & (high == rolling_high)
+    low_pivots = np.isfinite(rolling_low) & (low == rolling_low)
 
+    swing_high = np.zeros(n, dtype=bool)
+    swing_low = np.zeros(n, dtype=bool)
+    if swing_window == 0:
+        swing_high[:] = high_pivots
+        swing_low[:] = low_pivots
+    elif n > swing_window:
+        swing_high[swing_window:] = high_pivots[:-swing_window]
+        swing_low[swing_window:] = low_pivots[:-swing_window]
+
+    # Preserve the original sequential structure-break state machine, but
+    # operate on NumPy arrays rather than pandas iloc/loc for every candle.
+    bos = np.full(n, "", dtype=object)
+    choch = np.full(n, "", dtype=object)
     last_high = None
     last_low = None
     trend = 0
 
     for i in range(n):
-
-        # Confirmed swing: only use candles available now
-        pivot = i - swing_window
-
-        if pivot >= swing_window:
-            start = pivot - swing_window
-            end = i + 1
-
-            window_high = df["high"].iloc[start:end]
-            window_low = df["low"].iloc[start:end]
-
-            if df["high"].iloc[pivot] == window_high.max():
-                df.loc[i, "Swing_High"] = True
-                confirmed_high = df["high"].iloc[pivot]
-            else:
-                confirmed_high = None
-
-            if df["low"].iloc[pivot] == window_low.min():
-                df.loc[i, "Swing_Low"] = True
-                confirmed_low = df["low"].iloc[pivot]
-            else:
-                confirmed_low = None
-        else:
-            confirmed_high = None
-            confirmed_low = None
-
-        close = df["close"].iloc[i]
-
-        # Break of previously confirmed structure
-        if last_high is not None and close > last_high:
+        if last_high is not None and close[i] > last_high:
             if trend == -1:
-                df.loc[i, "CHoCH"] = "BULLISH"
+                choch[i] = "BULLISH"
             else:
-                df.loc[i, "BOS"] = "BULLISH"
-
+                bos[i] = "BULLISH"
             trend = 1
             last_high = None
-
-        elif last_low is not None and close < last_low:
+        elif last_low is not None and close[i] < last_low:
             if trend == 1:
-                df.loc[i, "CHoCH"] = "BEARISH"
+                choch[i] = "BEARISH"
             else:
-                df.loc[i, "BOS"] = "BEARISH"
-
+                bos[i] = "BEARISH"
             trend = -1
             last_low = None
 
-        # Register newly confirmed levels after break checks
-        if confirmed_high is not None:
-            last_high = confirmed_high
+        if swing_high[i]:
+            last_high = high[i - swing_window]
+        if swing_low[i]:
+            last_low = low[i - swing_window]
 
-        if confirmed_low is not None:
-            last_low = confirmed_low
-
-        # Liquidity sweeps
-        if i >= 20:
-            previous = df.iloc[i-20:i]
-
-            if (
-                df["low"].iloc[i] < previous["low"].min()
-                and close > previous["low"].min()
-            ):
-                df.loc[i, "Bullish_Sweep"] = True
-
-            if (
-                df["high"].iloc[i] > previous["high"].max()
-                and close < previous["high"].max()
-            ):
-                df.loc[i, "Bearish_Sweep"] = True
-
-        # Fair Value Gaps
-        if i >= 2:
-            if df["low"].iloc[i] > df["high"].iloc[i-2]:
-                df.loc[i, "Bullish_FVG"] = True
-                df.loc[i, "FVG_Lower"] = df["high"].iloc[i-2]
-                df.loc[i, "FVG_Upper"] = df["low"].iloc[i]
-
-            elif df["high"].iloc[i] < df["low"].iloc[i-2]:
-                df.loc[i, "Bearish_FVG"] = True
-                df.loc[i, "FVG_Lower"] = df["high"].iloc[i]
-                df.loc[i, "FVG_Upper"] = df["low"].iloc[i-2]
-
-        # Candidate Order Blocks
-        if i >= 2:
-            previous = df.iloc[i-1]
-
-            if (
-                close > df["high"].iloc[i-1]
-                and previous["close"] < previous["open"]
-            ):
-                df.loc[i, "Bullish_OB"] = True
-                df.loc[i, "OB_Lower"] = previous["low"]
-                df.loc[i, "OB_Upper"] = previous["high"]
-
-            elif (
-                close < df["low"].iloc[i-1]
-                and previous["close"] > previous["open"]
-            ):
-                df.loc[i, "Bearish_OB"] = True
-                df.loc[i, "OB_Lower"] = previous["low"]
-                df.loc[i, "OB_Upper"] = previous["high"]
-
-    # Trend filter
-    average = df["close"].rolling(20).mean()
-
-    df["Market_Trend"] = np.where(
-        df["close"] > average,
-        "BULLISH",
-        "BEARISH"
+    # Liquidity sweeps compare each candle only with the preceding 20 candles.
+    previous_min = (
+        df["low"].rolling(20, min_periods=20).min().shift(1).to_numpy()
     )
+    previous_max = (
+        df["high"].rolling(20, min_periods=20).max().shift(1).to_numpy()
+    )
+    bullish_sweep = (low < previous_min) & (close > previous_min)
+    bearish_sweep = (high > previous_max) & (close < previous_max)
+    bullish_sweep[:20] = False
+    bearish_sweep[:20] = False
+
+    # Fair Value Gaps; the bearish branch remains mutually exclusive.
+    bullish_fvg = np.zeros(n, dtype=bool)
+    bearish_fvg = np.zeros(n, dtype=bool)
+    fvg_lower = np.full(n, np.nan, dtype=float)
+    fvg_upper = np.full(n, np.nan, dtype=float)
+    if n > 2:
+        bullish_fvg[2:] = low[2:] > high[:-2]
+        bearish_fvg[2:] = (
+            (~bullish_fvg[2:]) & (high[2:] < low[:-2])
+        )
+        fvg_lower[2:] = np.where(
+            bullish_fvg[2:],
+            high[:-2],
+            np.where(bearish_fvg[2:], high[2:], np.nan),
+        )
+        fvg_upper[2:] = np.where(
+            bullish_fvg[2:],
+            low[2:],
+            np.where(bearish_fvg[2:], low[:-2], np.nan),
+        )
+
+    # Order blocks use the previous candle and preserve bullish-first priority.
+    bullish_ob = np.zeros(n, dtype=bool)
+    bearish_ob = np.zeros(n, dtype=bool)
+    ob_lower = np.full(n, np.nan, dtype=float)
+    ob_upper = np.full(n, np.nan, dtype=float)
+    if n > 2:
+        bullish_ob[2:] = (
+            (close[2:] > high[1:-1])
+            & (close[1:-1] < open_[1:-1])
+        )
+        bearish_ob[2:] = (
+            (~bullish_ob[2:])
+            & (close[2:] < low[1:-1])
+            & (close[1:-1] > open_[1:-1])
+        )
+        ob_mask = bullish_ob | bearish_ob
+        ob_lower[ob_mask] = low[np.maximum(np.flatnonzero(ob_mask) - 1, 0)]
+        ob_upper[ob_mask] = high[np.maximum(np.flatnonzero(ob_mask) - 1, 0)]
+
+    average = df["close"].rolling(20).mean().to_numpy()
+    market_trend = np.where(close > average, "BULLISH", "BEARISH")
+
+    df["Swing_High"] = swing_high
+    df["Swing_Low"] = swing_low
+    df["BOS"] = bos
+    df["CHoCH"] = choch
+    df["Bullish_Sweep"] = bullish_sweep
+    df["Bearish_Sweep"] = bearish_sweep
+    df["Bullish_FVG"] = bullish_fvg
+    df["Bearish_FVG"] = bearish_fvg
+    df["FVG_Lower"] = fvg_lower
+    df["FVG_Upper"] = fvg_upper
+    df["Bullish_OB"] = bullish_ob
+    df["Bearish_OB"] = bearish_ob
+    df["OB_Lower"] = ob_lower
+    df["OB_Upper"] = ob_upper
+    df["Market_Trend"] = market_trend
 
     return df
 
