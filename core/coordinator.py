@@ -1,7 +1,7 @@
 
 import math
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from decimal import Decimal
 import json
@@ -1518,10 +1518,20 @@ class TradingCoordinator(SpotDemoMixin):
         def analyze_scan_symbol(scan_item):
             return self.analyze_live(scan_item["symbol"], domains=["futures"])
 
-        with ThreadPoolExecutor(max_workers=5) as scan_pool:
-            analyses = scan_pool.map(analyze_scan_symbol, universe)
-            for item, analysis in zip(universe, analyses):
+        # More in-flight symbols hide mobile-network latency. Process each
+        # completed future immediately so a slow first symbol cannot stall progress.
+        with ThreadPoolExecutor(max_workers=12) as scan_pool:
+            pending = {
+                scan_pool.submit(analyze_scan_symbol, item): item
+                for item in universe
+            }
+            for future in as_completed(pending):
+                item = pending[future]
                 symbol = item["symbol"]
+                try:
+                    analysis = future.result()
+                except Exception as error:
+                    analysis = {"signals": {}, "data_errors": {"scan": str(error)}}
                 if callable(progress_callback):
                     progress_callback({
                         "phase": "analyzing",
@@ -1697,10 +1707,20 @@ class TradingCoordinator(SpotDemoMixin):
         def analyze_scan_symbol(scan_item):
             return self.analyze_live(scan_item["symbol"], domains=["spot"])
 
-        with ThreadPoolExecutor(max_workers=5) as scan_pool:
-            analyses = scan_pool.map(analyze_scan_symbol, universe)
-            for item, analysis in zip(universe, analyses):
+        # More in-flight symbols hide mobile-network latency. Process each
+        # completed future immediately so a slow first symbol cannot stall progress.
+        with ThreadPoolExecutor(max_workers=12) as scan_pool:
+            pending = {
+                scan_pool.submit(analyze_scan_symbol, item): item
+                for item in universe
+            }
+            for future in as_completed(pending):
+                item = pending[future]
                 symbol = item["symbol"]
+                try:
+                    analysis = future.result()
+                except Exception as error:
+                    analysis = {"signals": {}, "data_errors": {"scan": str(error)}}
                 if callable(progress_callback):
                     progress_callback({
                         "phase": "analyzing",
