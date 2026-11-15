@@ -118,7 +118,7 @@ def indicators(x):
     return x
 
 def resample(raw,rule):
-    # Binance timestamps 1m candles by OPEN time. Aggregate [open, close)
+    # Binance timestamps 5m candles by OPEN time. Aggregate [open, close)
     # windows, then shift the index to the actual higher-timeframe CLOSE time.
     x=raw.set_index("dt").resample(rule,label="left",closed="left",origin="start_day").agg(
         {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
@@ -161,12 +161,12 @@ def build_signals(raw,market):
     five["prior_high"]=five.high.shift(1).rolling(12).max()
     five["prior_low"]=five.low.shift(1).rolling(12).min()
 
-    bull=(five["15_close"]>five["15_EMA_50"])&(
-        (five.close>=five.EMA_21)|
-        (five["15_EMA_21"]>five["15_EMA_50"]))
-    bear=(five["15_close"]<five["15_EMA_50"])&(
-        (five.close<=five.EMA_21)|
-        (five["15_EMA_21"]<five["15_EMA_50"]))
+    bull=(five["1h_close"]>five["1h_EMA_50"])&(
+        (five["15_close"]>=five["15_EMA_21"])|
+        (five["1h_EMA_21"]>five["1h_EMA_50"]))
+    bear=(five["1h_close"]<five["1h_EMA_50"])&(
+        (five["15_close"]<=five["15_EMA_21"])|
+        (five["1h_EMA_21"]<five["1h_EMA_50"]))
 
     pl=(bull&(five.low<=five.EMA_20+.12*five.ATR)&
         (five.close>five.EMA_9)&(five.close>five.open)&
@@ -387,8 +387,8 @@ def main():
         "end_utc":datetime.fromtimestamp(END/1000,timezone.utc).isoformat(),
         "markets":MARKETS,"symbols":SYMBOLS,"data_source":"Binance Vision public archives",
         "live_strategy_source":"core/scalping_v3.py",
-        "bull_bias":"15m close > 15m EMA50 AND (5m close >= 5m EMA21 OR 15m EMA21 > 15m EMA50)",
-        "bear_bias":"15m close < 15m EMA50 AND (5m close <= 5m EMA21 OR 15m EMA21 < 15m EMA50)",
+        "bull_bias":"1h close > 1h EMA50 AND (15m close >= 15m EMA21 OR 1h EMA21 > 1h EMA50)",
+        "bear_bias":"1h close < 1h EMA50 AND (15m close <= 15m EMA21 OR 1h EMA21 < 1h EMA50)",
         "higher_timeframe_alignment":"5m open-time rows matched only to fully closed HTF candles by close timestamp",
         "native_binance_alignment_checks":alignment_checks,
         "archive_sha256_verified":True,"minimum_coverage_pct":MIN_COVERAGE*100,
