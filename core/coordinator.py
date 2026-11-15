@@ -277,14 +277,19 @@ class TradingCoordinator(SpotDemoMixin):
             ),
         }
 
-    def _demo_market_price(self, symbol, market="futures"):
-        quote = self.market_feed.fetch_book_ticker(market, symbol)
-        price = Decimal(str(quote["mid_price"]))
+    def _demo_market_price(self, symbol, market="futures", reference_price=None):
+        if reference_price is None:
+            quote = self.market_feed.fetch_book_ticker(market, symbol)
+            price = Decimal(str(quote["mid_price"]))
+            source = "BINANCE"
+        else:
+            price = Decimal(str(reference_price))
+            source = "BINANCE_WS_5M_OPEN"
         if not price.is_finite() or price <= 0:
             raise ValueError("Invalid live market price")
         market_type = "SPOT" if str(market).lower() == "spot" else "FUTURES"
         self.demo_execution.update_mark_price(
-            symbol, market_type, price, source="BINANCE"
+            symbol, market_type, price, source=source
         )
         return price
 
@@ -999,14 +1004,16 @@ class TradingCoordinator(SpotDemoMixin):
             return 1
 
     def request_demo_futures_trade(self, symbol, direction, risk_pct=0.5, leverage=1,
-                                   signal_override=None):
+                                   signal_override=None, entry_reference_price=None):
         with self._demo_lock:
             return self._request_demo_futures_trade_locked(
-                symbol, direction, risk_pct, leverage, signal_override
+                symbol, direction, risk_pct, leverage, signal_override,
+                entry_reference_price
             )
 
     def _request_demo_futures_trade_locked(
-        self, symbol, direction, risk_pct=0.5, leverage=1, signal_override=None
+        self, symbol, direction, risk_pct=0.5, leverage=1, signal_override=None,
+        entry_reference_price=None
     ):
         symbol = str(symbol).strip().upper()
         direction = str(direction).strip().upper()
@@ -1079,7 +1086,7 @@ class TradingCoordinator(SpotDemoMixin):
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
 
-            market_price = self._demo_market_price(symbol)
+            market_price = self._demo_market_price(symbol, reference_price=entry_reference_price)
             valid_entry, entry_reason = self._validate_demo_entry_price(
                 plan, direction, market_price, min_net_rr=1.5, market="futures"
             )
