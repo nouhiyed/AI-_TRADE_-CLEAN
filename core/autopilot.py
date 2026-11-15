@@ -50,14 +50,16 @@ class Autopilot:
         self._event_seen = set()
         self._pending_entries = {}
         self._latest_open = {}
+        # All DEMO position openings are serialized through one risk/execution writer.
         self._event_executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="v3-5m-execution")
+            max_workers=1, thread_name_prefix="demo-risk-execution-writer")
         # Independent parallel analysis pools: Futures work never queues behind
         # Spot work, and neither pool runs on the WebSocket callback thread.
-        workers = min(4, max(1, int(os.environ.get(
-            "AI_TRADER_ANALYSIS_WORKERS_PER_MARKET", "2"))))
-        queue_limit = min(2048, max(64, int(os.environ.get(
-            "AI_TRADER_ANALYSIS_QUEUE_LIMIT", "512"))))
+        # Start with one analyzer per market. Increase only after on-device profiling.
+        workers = min(2, max(1, int(os.environ.get(
+            "AI_TRADER_ANALYSIS_WORKERS_PER_MARKET", "1"))))
+        queue_limit = min(8, max(5, int(os.environ.get(
+            "AI_TRADER_ANALYSIS_QUEUE_LIMIT", "8"))))
         self._analysis_pools = {
             domain: ThreadPoolExecutor(
                 max_workers=workers,
@@ -72,10 +74,16 @@ class Autopilot:
         self._analysis_stats_lock = threading.Lock()
         self._analysis_local = threading.local()
         self._analysis_agents_created = {"futures": 0, "spot": 0}
+        self._analysis_pending = {}
+        self._analysis_scheduled = set()
         self._analysis_stats = {
             domain: {"workers": workers, "queue_limit": queue_limit,
                      "submitted": 0, "completed": 0, "failed": 0,
-                     "rejected": 0, "inflight": 0}
+                     "rejected": 0, "inflight": 0, "queue_depth": 0,
+                     "superseded": 0, "dropped_stale": 0,
+                     "last_received_at_ms": None, "last_started_at_ms": None,
+                     "last_completed_at_ms": None, "last_queue_wait_ms": None,
+                     "last_analysis_ms": None, "last_candle_close_time_ms": None}
             for domain in ("futures", "spot")
         }
         self._load()
@@ -122,6 +130,12 @@ class Autopilot:
                         for domain, stats in self._analysis_stats.items()}
         for domain in ("futures", "spot"):
             analysis[domain]["agent_instances"] = self._analysis_agents_created[domain]
+        analysis["execution_writer"] = {
+            "workers": 1,
+            "queue_depth": self._event_executor._work_queue.qsize(),
+            "alive": any(thread.is_alive()
+                         for thread in getattr(self._event_executor, "_threads", set())),
+        }
         return {"config": dict(self.config), "last_run": self.last_run,
                 "last_result": self.last_result,
                 "analysis_pools": analysis,
@@ -141,6 +155,66 @@ class Autopilot:
             with self._analysis_stats_lock:
                 self._analysis_agents_created[domain] += 1
         return current
+
+    def _queue_latest_analysis(self, domain, symbol, candle):
+        """Coalesce pending closes per market/symbol; only the newest may wait."""
+        key = (domain, symbol)
+        received_at_ms = int(time.time() * 1000)
+        event = dict(candle)
+        event["received_at_ms"] = received_at_ms
+        with self._event_lock:
+            previous = self._analysis_pending.get(key)
+            if previous:
+                if int(previous.get("close_time") or 0) >= int(event.get("close_time") or 0):
+                    with self._analysis_stats_lock:
+                        self._analysis_stats[domain]["dropped_stale"] += 1
+                    return False
+                with self._analysis_stats_lock:
+                    self._analysis_stats[domain]["superseded"] += 1
+            self._analysis_pending[key] = event
+            with self._analysis_stats_lock:
+                stats = self._analysis_stats[domain]
+                stats["last_received_at_ms"] = received_at_ms
+                stats["queue_depth"] = len(self._analysis_pending)
+            if key in self._analysis_scheduled:
+                return True
+            if len(self._analysis_scheduled) >= self._analysis_stats[domain]["queue_limit"]:
+                self._analysis_pending.pop(key, None)
+                with self._analysis_stats_lock:
+                    stats = self._analysis_stats[domain]
+                    stats["rejected"] += 1
+                    stats["queue_depth"] = len(self._analysis_pending)
+                return False
+            self._analysis_scheduled.add(key)
+        if not self.submit_analysis(domain, self._drain_symbol_analysis, domain, symbol):
+            with self._event_lock:
+                self._analysis_scheduled.discard(key)
+                self._analysis_pending.pop(key, None)
+                with self._analysis_stats_lock:
+                    stats = self._analysis_stats[domain]
+                    stats["queue_depth"] = len(self._analysis_pending)
+            return False
+        return True
+
+    def _drain_symbol_analysis(self, domain, symbol):
+        """One scheduled worker drains the latest pending event for this symbol."""
+        key = (domain, symbol)
+        while True:
+            with self._event_lock:
+                candle = self._analysis_pending.pop(key, None)
+                if candle is None:
+                    self._analysis_scheduled.discard(key)
+                    with self._analysis_stats_lock:
+                        self._analysis_stats[domain]["queue_depth"] = len(self._analysis_pending)
+                    return
+                with self._analysis_stats_lock:
+                    self._analysis_stats[domain]["queue_depth"] = len(self._analysis_pending)
+            received_at_ms = int(candle.get("received_at_ms") or 0)
+            if received_at_ms <= 0 or int(time.time() * 1000) - received_at_ms > 30000:
+                with self._analysis_stats_lock:
+                    self._analysis_stats[domain]["dropped_stale"] += 1
+                continue
+            self._analyze_ws_close(domain, symbol, candle, received_at_ms)
 
     def submit_analysis(self, domain, fn, *args):
         """Dispatch analysis to a bounded, market-isolated worker pool."""
@@ -256,14 +330,11 @@ class Autopilot:
                 if len(self._event_seen) > 20000:
                     # Bounded memory: retain only recent candle identities.
                     self._event_seen = set(list(self._event_seen)[-10000:])
-            if not self.submit_analysis(domain, self._analyze_ws_close,
-                                        domain, symbol, dict(event)):
-                # The event remains deduplicated: overload is visible in pool
-                # metrics and must never cause concurrent duplicate decisions.
+            if not self._queue_latest_analysis(domain, symbol, event):
                 self.last_result = {
                     "status": "ANALYSIS_QUEUE_FULL", "phase": "websocket_analysis",
                     "domain": domain, "symbol": symbol,
-                    "reason": "Market analysis queue is full; this candle was not reprocessed",
+                    "reason": "Bounded latest-event analysis queue is full; stale work was not replayed",
                 }
 
 
@@ -319,9 +390,16 @@ class Autopilot:
             "next_entry_candle_open_ms": next_open,
         }
 
-    def _analyze_ws_close(self, domain, symbol, candle):
-        """Analyze exactly once after Binance confirms the 5m candle is closed."""
+    def _analyze_ws_close(self, domain, symbol, candle, received_at_ms=None):
+        """Analyze a fresh confirmed 5m close and record end-to-end timing."""
+        analysis_started_at_ms = int(time.time() * 1000)
+        received_at_ms = int(received_at_ms or candle.get("received_at_ms") or analysis_started_at_ms)
         try:
+            with self._analysis_stats_lock:
+                stats = self._analysis_stats[domain]
+                stats["last_started_at_ms"] = analysis_started_at_ms
+                stats["last_queue_wait_ms"] = max(0, analysis_started_at_ms - received_at_ms)
+                stats["last_candle_close_time_ms"] = int(candle.get("close_time") or 0)
             if not self.c._agent_enabled(domain):
                 return
             if not candle.get("is_closed"):
@@ -358,7 +436,13 @@ class Autopilot:
             signal["signal_timeframe"] = "5m"
             signal["signal_candle_open_time"] = int(candle["open_time"])
             signal["signal_candle_close_time"] = int(candle["close_time"])
-            signal["signal_generated_at_ms"] = int(time.time() * 1000)
+            analysis_completed_at_ms = int(time.time() * 1000)
+            signal["signal_generated_at_ms"] = analysis_completed_at_ms
+            signal["signal_received_at_ms"] = received_at_ms
+            signal["analysis_started_at_ms"] = analysis_started_at_ms
+            signal["analysis_completed_at_ms"] = analysis_completed_at_ms
+            signal["analysis_queue_wait_ms"] = max(0, analysis_started_at_ms - received_at_ms)
+            signal["analysis_duration_ms"] = max(0, analysis_completed_at_ms - analysis_started_at_ms)
             signal["signal_source"] = "BINANCE_WEBSOCKET_CACHE"
             plan = signal.get("trade_plan")
             direction = str(signal.get("direction", "WAIT")).upper()
@@ -397,6 +481,12 @@ class Autopilot:
                 "status": "ERROR", "phase": "websocket_analysis",
                 "domain": domain, "symbol": symbol, "error": str(error),
             }
+        finally:
+            completed_at_ms = int(time.time() * 1000)
+            with self._analysis_stats_lock:
+                stats = self._analysis_stats[domain]
+                stats["last_completed_at_ms"] = completed_at_ms
+                stats["last_analysis_ms"] = max(0, completed_at_ms - analysis_started_at_ms)
 
     def _execute_ws_entry(self, domain, symbol, pending, opening_candle):
         """Execute DEMO at the observed next 5m candle open, never on 1m."""
@@ -458,6 +548,29 @@ class Autopilot:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "V3 trade plan is not approved"})
                 return
+            try:
+                planned_entry = float(plan.get("entry"))
+                max_deviation_pct = float(os.environ.get(
+                    "AI_TRADER_MAX_ENTRY_DEVIATION_PCT_FUTURES" if domain == "futures"
+                    else "AI_TRADER_MAX_ENTRY_DEVIATION_PCT_SPOT",
+                    "0.15" if domain == "futures" else "0.20"))
+            except (TypeError, ValueError):
+                planned_entry, max_deviation_pct = 0.0, 0.0
+            if (not math.isfinite(planned_entry) or planned_entry <= 0
+                    or not math.isfinite(max_deviation_pct) or max_deviation_pct <= 0):
+                result["status"] = "SKIPPED"
+                result["skipped"].append({"reason": "Invalid planned entry or deviation guard"})
+                return
+            deviation_pct = abs(entry_price - planned_entry) / planned_entry * 100.0
+            if deviation_pct > max_deviation_pct:
+                result["status"] = "SKIPPED"
+                result["skipped"].append({
+                    "reason": "Entry price moved %.4f%% from the approved signal price (limit %.4f%%)"
+                              % (deviation_pct, max_deviation_pct),
+                    "entry_deviation_pct": deviation_pct,
+                    "max_entry_deviation_pct": max_deviation_pct,
+                })
+                return
             confidence = float(signal.get("confidence") or 0)
             if confidence < float(cfg["min_confidence"]):
                 result["status"] = "SKIPPED"
@@ -491,6 +604,8 @@ class Autopilot:
             signal["entry_origin"] = "MANUAL_AGENT_WS_5M" if manual else "AUTOPILOT_WS_5M"
             signal["entry_open_time"] = open_time
             signal["entry_reference_price"] = entry_price
+            signal["execution_sent_at_ms"] = int(time.time() * 1000)
+            signal["entry_deviation_pct"] = deviation_pct
             signal["setup_key"] = key
             signal["confidence_adjusted"] = confidence
             self.c.last_signals[domain] = signal
