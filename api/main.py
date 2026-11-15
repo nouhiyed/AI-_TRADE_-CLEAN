@@ -33,12 +33,14 @@ scan_status = {
         "last_batch": None, "batches": 0, "cycles_completed": 0,
         "phase": "waiting", "current_symbol": None,
         "scanned_in_batch": 0, "universe_total": None,
+        "started_in_batch": 0, "active_workers": 0,
         "batch_started_at": None,
     },
     "spot": {
         "last_batch": None, "batches": 0, "cycles_completed": 0,
         "phase": "waiting", "current_symbol": None,
         "scanned_in_batch": 0, "universe_total": None,
+        "started_in_batch": 0, "active_workers": 0,
         "batch_started_at": None,
     },
     "last_error": None,
@@ -51,7 +53,7 @@ def record_scan_progress(domain, details):
     details = details if isinstance(details, dict) else {}
     with scan_status_lock:
         current = scan_status[domain]
-        for key in ("phase", "current_symbol", "scanned_in_batch", "universe_total"):
+        for key in ("phase", "current_symbol", "scanned_in_batch", "universe_total", "started_in_batch", "active_workers"):
             if key in details:
                 current[key] = details[key]
         scan_status["updated_at"] = time.time()
@@ -80,6 +82,8 @@ def _scan_domain_worker(domain):
                 "current_symbol": None,
                 "scanned_in_batch": 0,
                 "universe_total": None,
+                "started_in_batch": 0,
+                "active_workers": 0,
                 "scan_started_at": time.time(),
             })
             scan_status["updated_at"] = time.time()
