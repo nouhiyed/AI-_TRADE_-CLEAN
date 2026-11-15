@@ -216,8 +216,9 @@ class BinanceKlineStream:
             return False
         try:
             interval_ms = self.INTERVAL_MS[interval]
-            opens = pd.to_datetime(frame["open_time"], utc=True).astype("int64") // 1_000_000
-            if len(opens) > 1 and not bool((opens.diff().dropna() == interval_ms).all()):
+            opens = pd.to_datetime(frame["open_time"], utc=True)
+            expected_delta = pd.Timedelta(milliseconds=interval_ms)
+            if len(opens) > 1 and not bool((opens.diff().dropna() == expected_delta).all()):
                 return False
             last_close = int(pd.Timestamp(frame["close_time"].iloc[-1]).timestamp() * 1000)
             now_ms = int(now_ms or time.time() * 1000)
