@@ -1875,8 +1875,12 @@ class _TradeShellState extends State<TradeShell>
     final current = candles.isNotEmpty ? candles.last['close']! : 0.0;
     final entry = double.tryParse('${position['entry_price'] ?? ''}') ?? 0;
     final stop = double.tryParse('${position['stop_loss'] ?? ''}') ?? 0;
-    final target = double.tryParse('${position['take_profit'] ?? ''}') ?? 0;
-    final target2 = double.tryParse('${position['take_profit_2'] ?? ''}') ?? 0;
+    final trailingEnabled = position['trailing_take_profit_enabled'] == true ||
+        '${position['take_profit_mode'] ?? ''}'.toUpperCase() == 'TRAILING';
+    final target = trailingEnabled ? 0.0 :
+        (double.tryParse('${position['take_profit'] ?? ''}') ?? 0);
+    final target2 = trailingEnabled ? 0.0 :
+        (double.tryParse('${position['take_profit_2'] ?? ''}') ?? 0);
     final timeframeSeconds = <String, int>{
       '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400,
     }[interval] ?? 300;
@@ -1994,6 +1998,9 @@ class _TradeShellState extends State<TradeShell>
             final entry = '${position['entry_price'] ?? '—'}';
             final quantity = '${position['remaining_quantity'] ?? position['quantity'] ?? '—'}';
             final stop = position['stop_loss']?.toString() ?? '—';
+            final trailingEnabled = position['trailing_take_profit_enabled'] == true ||
+                '${position['take_profit_mode'] ?? ''}'.toUpperCase() == 'TRAILING';
+            final trailingArmed = position['trailing_take_profit_armed'] == true;
             final target = position['take_profit']?.toString() ?? '—';
             final target2 = position['take_profit_2']?.toString();
             final runnerPct = (100 - (double.tryParse('${position['tp1_close_pct']}') ?? 70))
@@ -2059,11 +2066,20 @@ class _TradeShellState extends State<TradeShell>
                     const SizedBox(height: 12),
                     Row(
                       children: [
-                        Expanded(child: _metric('STOP LOSS', stop, red)),
-                        Expanded(child: _metric('TAKE PROFIT 1', target, green)),
+                        Expanded(child: _metric(
+                          trailingEnabled ? (trailingArmed ? 'TRAILING STOP' : 'INITIAL STOP') : 'STOP LOSS',
+                          stop, red)),
+                        Expanded(child: _metric(
+                          trailingEnabled ? tr('جني ربح متحرك', 'TRAILING TAKE PROFIT') : 'TAKE PROFIT 1',
+                          trailingEnabled
+                              ? (trailingArmed
+                                  ? tr('مفعّل — يتبع السعر', 'ARMED — FOLLOWING PRICE')
+                                  : tr('ينتظر ربح 1R', 'WAITING FOR 1R PROFIT'))
+                              : target,
+                          trailingEnabled ? cyan : green)),
                       ],
                     ),
-                    if (target2 != null && target2.isNotEmpty)
+                    if (!trailingEnabled && target2 != null && target2.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
                         child: Row(children: [
