@@ -5,7 +5,7 @@ name: Build AI Trade APK
 
 concurrency:
   group: ai-trade-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 on:
   workflow_dispatch:
