@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Two-year, candle-by-candle Scalping V3 backtest. Analysis only; never places orders."""
-import os, time, zipfile, io, json
+import os, time, zipfile, io, json, hashlib, math, calendar
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 import numpy as np
 import pandas as pd
@@ -13,54 +13,161 @@ from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
 
-SYMBOLS = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT").split(",")
+SYMBOLS = [x.strip().upper() for x in os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT").split(",") if x.strip()]
 DAYS = int(os.getenv("DAYS", "730"))
-MARKETS = os.getenv("MARKETS", "spot,futures").split(",")
+MARKETS = [x.strip().lower() for x in os.getenv("MARKETS", "spot,futures").split(",") if x.strip()]
+if DAYS < 1 or not SYMBOLS or not MARKETS or any(x not in ("spot", "futures") for x in MARKETS):
+    raise ValueError("DAYS must be positive; SYMBOLS and MARKETS must be valid and non-empty")
+
 OUT = Path("backtest-results")
 CACHE = Path(".backtest-cache")
 OUT.mkdir(exist_ok=True); CACHE.mkdir(exist_ok=True)
+DAY_MS = 86400000
 NOW = int(time.time() * 1000)
-START = NOW - DAYS * 86400000
+# Use complete UTC days only. Binance publishes daily archive files on the following day.
+END = (NOW // DAY_MS) * DAY_MS - 60000
+START = END - DAYS * DAY_MS + 60000
+DATA_BASE = "https://data.binance.vision/data"
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "AI-Trader-V3-Historical-Backtest/1.0"})
+SESSION.headers.update({"User-Agent": "AI-Trader-V3-Historical-Backtest/2.0"})
+
+def _download(url, label):
+    last_error = None
+    for attempt in range(7):
+        try:
+            response = SESSION.get(url, timeout=(20, 120))
+            if response.status_code in (418, 429) or response.status_code >= 500:
+                wait = min(60, 2 ** (attempt + 1))
+                print(f"[RETRY] {label}: HTTP {response.status_code}; waiting {wait}s", flush=True)
+                time.sleep(wait)
+                continue
+            if response.status_code == 451:
+                raise RuntimeError(f"HTTP 451 from Binance public archive for {label}: {url}")
+            if response.status_code == 404:
+                raise RuntimeError(f"Missing Binance public archive file (HTTP 404) for {label}: {url}")
+            response.raise_for_status()
+            return response.content
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt == 6:
+                break
+            time.sleep(min(30, 2 ** (attempt + 1)))
+    raise RuntimeError(f"Could not download {label}: {last_error}")
+
+def _archive_url(market, period, symbol, date_part):
+    market_path = "spot" if market == "spot" else "futures/um"
+    filename = f"{symbol}-1m-{date_part}.zip"
+    return f"{DATA_BASE}/{market_path}/{period}/klines/{symbol}/1m/{filename}"
+
+def _read_verified_archive(url, label):
+    archive_bytes = _download(url, label)
+    checksum_text = _download(url + ".CHECKSUM", label + " checksum").decode("utf-8", errors="replace")
+    import re
+    match = re.search(r"([0-9a-fA-F]{64})", checksum_text)
+    if not match:
+        raise RuntimeError(f"Binance checksum file has no SHA-256 value for {label}")
+    actual = hashlib.sha256(archive_bytes).hexdigest()
+    expected = match.group(1).lower()
+    if actual.lower() != expected:
+        raise RuntimeError(f"SHA-256 checksum mismatch for {label}: expected {expected}, got {actual}")
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            csv_names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+            if len(csv_names) != 1:
+                raise RuntimeError(f"Expected one CSV in {label}, found {len(csv_names)}")
+            with archive.open(csv_names[0]) as csv_file:
+                frame = pd.read_csv(csv_file, header=None, usecols=[0, 1, 2, 3, 4, 5],
+                                    names=["open_time", "open", "high", "low", "close", "volume"])
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(f"Downloaded archive is not a valid ZIP for {label}") from exc
+
+    frame["open_time"] = pd.to_numeric(frame["open_time"], errors="coerce")
+    # Binance Spot archives changed timestamps from milliseconds to microseconds on 2025-01-01.
+    if frame["open_time"].dropna().median() > 100000000000000:
+        frame["open_time"] = frame["open_time"] // 1000
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna().drop_duplicates("open_time").sort_values("open_time")
+    frame["open_time"] = frame["open_time"].astype("int64")
+    if frame.empty:
+        raise RuntimeError(f"Binance archive contained no usable candles for {label}")
+    print(f"[ARCHIVE] verified {label}: {len(frame):,} rows SHA256={actual[:12]}...", flush=True)
+    return frame
+
+def _month_iter(start_dt, end_dt):
+    cursor = datetime(start_dt.year, start_dt.month, 1, tzinfo=timezone.utc)
+    last = datetime(end_dt.year, end_dt.month, 1, tzinfo=timezone.utc)
+    while cursor <= last:
+        yield cursor
+        if cursor.month == 12:
+            cursor = datetime(cursor.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            cursor = datetime(cursor.year, cursor.month + 1, 1, tzinfo=timezone.utc)
+
+def _download_symbol_archives(market, symbol):
+    start_dt = datetime.fromtimestamp(START / 1000, timezone.utc)
+    end_dt = datetime.fromtimestamp(END / 1000, timezone.utc)
+    current_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    frames = []
+    for month_start in _month_iter(start_dt, end_dt):
+        if month_start < current_month:
+            date_part = month_start.strftime("%Y-%m")
+            url = _archive_url(market, "monthly", symbol, date_part)
+            frames.append(_read_verified_archive(url, f"{market}/{symbol}/1m/{date_part}"))
+        else:
+            first_day = max(start_dt.date(), month_start.date())
+            last_day = min(end_dt.date(), month_start.replace(day=calendar.monthrange(month_start.year, month_start.month)[1]).date())
+            day = first_day
+            while day <= last_day:
+                date_part = day.strftime("%Y-%m-%d")
+                url = _archive_url(market, "daily", symbol, date_part)
+                frames.append(_read_verified_archive(url, f"{market}/{symbol}/1m/{date_part}"))
+                day += timedelta(days=1)
+                time.sleep(0.03)
+    if not frames:
+        raise RuntimeError(f"No monthly/daily archive files were selected for {market} {symbol}")
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates("open_time").sort_values("open_time")
+    combined = combined[(combined.open_time >= START) & (combined.open_time <= END)].copy()
+    combined = combined[["open_time", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    return combined
+
+def _validate_candles(frame, market, symbol, source):
+    expected = DAYS * 1440
+    minimum = math.ceil(expected * 0.995)
+    if frame.empty:
+        raise RuntimeError(f"No historical candles loaded for {market} {symbol} from {source}")
+    first, last = int(frame.open_time.iloc[0]), int(frame.open_time.iloc[-1])
+    if first > START + 60000 or last < END - 60000 or len(frame) < minimum:
+        coverage = len(frame) / expected * 100
+        raise RuntimeError(
+            f"Incomplete historical data for {market} {symbol} from {source}: "
+            f"{len(frame):,}/{expected:,} candles ({coverage:.3f}%), "
+            f"first={first}, last={last}, required range={START}..{END}"
+        )
+    return expected, expected - len(frame)
 
 def fetch_1m(market, symbol):
     path = CACHE / f"{market}_{symbol}_{DAYS}d.csv"
     if path.exists():
-        df = pd.read_csv(path)
-        if len(df) and int(df.open_time.iloc[0]) <= START + 60000 and int(df.open_time.iloc[-1]) >= NOW - 180000:
-            return df
-    base = "https://api.binance.com/api/v3/klines" if market == "spot" else "https://fapi.binance.com/fapi/v1/klines"
-    rows, cursor = [], START
-    while cursor < NOW:
-        for attempt in range(8):
-            try:
-                response = SESSION.get(base, params={"symbol": symbol, "interval": "1m",
-                    "startTime": cursor, "endTime": NOW, "limit": 1000}, timeout=25)
-                if response.status_code == 429 or response.status_code == 418:
-                    time.sleep(min(60, 3 ** (attempt + 1))); continue
-                response.raise_for_status()
-                batch = response.json()
-                break
-            except Exception:
-                if attempt == 7: raise
-                time.sleep(2 + attempt * 2)
-        if not batch: break
-        rows.extend(batch)
-        nxt = int(batch[-1][0]) + 60000
-        if nxt <= cursor: break
-        cursor = nxt
-        if len(batch) < 1000: break
-        time.sleep(0.07)
-        if len(rows) % 100000 < 1000:
-            print(f"[DATA] {market} {symbol}: {len(rows):,} one-minute candles", flush=True)
-    if not rows: raise RuntimeError(f"No Binance data for {market} {symbol}")
-    cols = ["open_time","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"]
-    df = pd.DataFrame(rows, columns=cols)
-    df = df[["open_time","open","high","low","close","volume"]]
-    for c in cols[1:6]: df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["open_time"] = pd.to_numeric(df.open_time, errors="coerce").astype("int64")
-    df = df.dropna().drop_duplicates("open_time").sort_values("open_time")
+        cached = pd.read_csv(path)
+        cached["open_time"] = pd.to_numeric(cached["open_time"], errors="coerce")
+        if cached["open_time"].dropna().median() > 100000000000000:
+            cached["open_time"] = cached["open_time"] // 1000
+        cached = cached.dropna().drop_duplicates("open_time").sort_values("open_time").reset_index(drop=True)
+        try:
+            _validate_candles(cached, market, symbol, "cache")
+            print(f"[CACHE] validated {market} {symbol}: {len(cached):,} candles", flush=True)
+            return cached
+        except RuntimeError:
+            print(f"[CACHE] stale/incomplete cache ignored for {market} {symbol}", flush=True)
+    print(f"[DATA] {market.upper()} {symbol}: downloading verified Binance Vision monthly/daily archives", flush=True)
+    df = _download_symbol_archives(market, symbol)
+    expected, missing = _validate_candles(df, market, symbol, "Binance Vision archive")
+    print(f"[DATA] complete {market} {symbol}: {len(df):,}/{expected:,} candles; missing={missing}", flush=True)
     df.to_csv(path, index=False)
     return df
 
@@ -150,7 +257,7 @@ def simulate(market, symbol, raw):
                 active.update(exit_time=str(row.dt),exit_price=exit_price,reason=reason,gross_pct=gross*100,net_pct=net*100,
                               net_usdt=active["notional"]*net,hold_minutes=held)
                 trades.append(active); active=None
-        if active is None and str(row.direction):
+        if active is None and row.direction in ("LONG", "SHORT"):
             entry=float(nxt.open)
             atr=float(row["5_ATR"])
             if not np.isfinite(entry) or not np.isfinite(atr) or entry<=0 or atr<=0: continue
@@ -195,12 +302,16 @@ def chart_trade(trade, arr, path):
     fig.autofmt_xdate(); fig.tight_layout(); fig.savefig(path,dpi=130); plt.close(fig)
 
 def main():
-    all_trades=[]; summaries=[]
+    all_trades=[]; summaries=[]; audit=[]; errors=[]
+    expected_pairs = len(MARKETS) * len(SYMBOLS)
+    print(f"[START] Binance Vision archive backtest: days={DAYS}, markets={MARKETS}, symbols={SYMBOLS}", flush=True)
+    print(f"[WINDOW] {datetime.fromtimestamp(START/1000,timezone.utc).isoformat()} .. {datetime.fromtimestamp(END/1000,timezone.utc).isoformat()} (UTC, complete days)", flush=True)
     for market in MARKETS:
         for symbol in SYMBOLS:
-            print(f"[RUN] {market.upper()} {symbol} downloading {DAYS} days",flush=True)
+            print(f"[RUN] {market.upper()} {symbol}", flush=True)
             try:
                 df=fetch_1m(market,symbol)
+                expected, missing = _validate_candles(df, market, symbol, "validated archive/cache")
                 df["dt"]=pd.to_datetime(df.open_time,unit="ms",utc=True)
                 raw=df[["dt","open","high","low","close","volume"]].copy()
                 trades,arr=simulate(market,symbol,raw)
@@ -208,16 +319,26 @@ def main():
                 t=pd.DataFrame(trades)
                 if len(t):
                     wins=int((t.net_usdt>0).sum()); net=float(t.net_usdt.sum())
-                    equity=100+ t.net_usdt.cumsum()
+                    equity=100 + t.net_usdt.cumsum()
                     peak=equity.cummax(); dd=float(((peak-equity)/peak).max()*100)
-                    summary={"market":market,"symbol":symbol,"candles":len(df),"trades":len(t),"wins":wins,
-                        "losses":len(t)-wins,"win_rate_pct":round(wins/len(t)*100,2),
-                        "net_pnl_usdt_per_100_notional":round(net,4),"profit_factor":round(float(t.loc[t.net_usdt>0,"net_usdt"].sum()/abs(t.loc[t.net_usdt<0,"net_usdt"].sum())),3) if (t.net_usdt<0).any() else None,
+                    summary={"market":market,"symbol":symbol,"candles":len(df),"expected_candles":expected,
+                        "missing_candles":missing,"data_coverage_pct":round(len(df)/expected*100,4),
+                        "trades":len(t),"wins":wins,"losses":len(t)-wins,"win_rate_pct":round(wins/len(t)*100,2),
+                        "net_pnl_usdt_per_100_notional":round(net,4),
+                        "profit_factor":round(float(t.loc[t.net_usdt>0,"net_usdt"].sum()/abs(t.loc[t.net_usdt<0,"net_usdt"].sum())),3) if (t.net_usdt<0).any() else None,
                         "max_drawdown_pct":round(dd,3),"avg_net_rr":round(float(t.net_rr.mean()),3)}
                 else:
-                    summary={"market":market,"symbol":symbol,"candles":len(df),"trades":0,"wins":0,"losses":0,"win_rate_pct":0,"net_pnl_usdt_per_100_notional":0,"profit_factor":None,"max_drawdown_pct":0,"avg_net_rr":0}
-                summaries.append(summary); print("[DONE]",summary,flush=True)
-                # Up to 5 representative trade charts per market/symbol, spread through the test.
+                    summary={"market":market,"symbol":symbol,"candles":len(df),"expected_candles":expected,
+                        "missing_candles":missing,"data_coverage_pct":round(len(df)/expected*100,4),
+                        "trades":0,"wins":0,"losses":0,"win_rate_pct":0,
+                        "net_pnl_usdt_per_100_notional":0,"profit_factor":None,
+                        "max_drawdown_pct":0,"avg_net_rr":0}
+                summaries.append(summary)
+                audit.append({"market":market,"symbol":symbol,"source":"Binance Vision public archive",
+                    "candles":len(df),"expected_candles":expected,"missing_candles":missing,
+                    "coverage_pct":round(len(df)/expected*100,4),"first_open_time_ms":int(df.open_time.iloc[0]),
+                    "last_open_time_ms":int(df.open_time.iloc[-1]),"status":"VALID"})
+                print("[DONE]",summary,flush=True)
                 if trades:
                     indices=np.linspace(0,len(trades)-1,min(5,len(trades)),dtype=int)
                     for j in sorted(set(indices)):
@@ -225,19 +346,34 @@ def main():
                         name=f'{market}_{symbol}_{j+1}_{tr["reason"]}.png'
                         chart_trade(tr,arr,OUT/name)
             except Exception as e:
-                summaries.append({"market":market,"symbol":symbol,"error":str(e)})
-                print(f"[ERROR] {market} {symbol}: {e}",flush=True)
+                message=f"{market} {symbol}: {type(e).__name__}: {e}"
+                errors.append(message)
+                audit.append({"market":market,"symbol":symbol,"source":"Binance Vision public archive",
+                    "status":"ERROR","error":message})
+                print(f"[ERROR] {message}",flush=True)
+
     pd.DataFrame(summaries).to_csv(OUT/"summary.csv",index=False)
     pd.DataFrame(all_trades).drop(columns=["entry_i"],errors="ignore").to_csv(OUT/"trades.csv",index=False)
-    (OUT/"methodology.json").write_text(json.dumps({"strategy":"Scalping V3 vectorized rule-equivalent","days":DAYS,
+    successful_pairs=len(summaries)
+    status="FAILED" if errors or successful_pairs != expected_pairs else "VALID"
+    methodology={"strategy":"Scalping V3 vectorized rule-equivalent","days":DAYS,
         "start_utc":datetime.fromtimestamp(START/1000,timezone.utc).isoformat(),
-        "end_utc":datetime.fromtimestamp(NOW/1000,timezone.utc).isoformat(),
-        "symbols":SYMBOLS,"markets":MARKETS,"fees":{"spot_round_trip":0.002,"futures_round_trip":0.001},
+        "end_utc":datetime.fromtimestamp(END/1000,timezone.utc).isoformat(),
+        "symbols":SYMBOLS,"markets":MARKETS,"data_source":"Binance Public Data archive (data.binance.vision)",
+        "archive_policy":"Monthly archives for completed UTC months; daily archives for the current UTC month through yesterday",
+        "integrity":"SHA-256 checksum verified for every downloaded ZIP archive",
+        "timestamp_normalization":"Unix microseconds normalized to milliseconds when required",
+        "minimum_data_coverage_pct":99.5,"fees":{"spot_round_trip":0.002,"futures_round_trip":0.001},
         "adverse_cost_per_side":0.0005,"entry":"next 1m candle open after closed signal candle",
         "intrabar_collision":"SL first (conservative)","position":"one at a time per symbol, fixed 100 USDT notional",
-        "charts":"up to 5 representative trades per market/symbol; CSV contains all trades"},indent=2))
+        "expected_pairs":expected_pairs,"successful_pairs":successful_pairs,"data_validation_status":status,
+        "trade_count":len(all_trades),"errors":errors}
+    (OUT/"methodology.json").write_text(json.dumps(methodology,indent=2))
+    (OUT/"data_audit.json").write_text(json.dumps({"status":status,"pairs":audit,"errors":errors},indent=2))
     with zipfile.ZipFile("AI-Trader-V3-Backtest-Charts.zip","w",zipfile.ZIP_DEFLATED) as z:
         for p in OUT.glob("*.png"): z.write(p,p.name)
-    print(f"[FINISHED] trades={len(all_trades)} summaries={len(summaries)}",flush=True)
+    print(f"[FINISHED] status={status} trades={len(all_trades)} valid_pairs={successful_pairs}/{expected_pairs} errors={len(errors)}",flush=True)
+    if status != "VALID":
+        raise SystemExit("Historical backtest aborted: one or more symbols did not provide validated historical candles; results are NOT valid.")
 
 if __name__=="__main__": main()
