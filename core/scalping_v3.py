@@ -43,18 +43,23 @@ class _V3Base:
             return None
 
     @classmethod
-    def frame_is_closed_5m(cls, frame):
+    def frame_is_closed(cls, frame, expected_timeframe):
         if frame is None or len(frame) < 60:
             return False
-        timeframe = str(getattr(frame, "attrs", {}).get("timeframe", "")).lower()
-        if timeframe and timeframe != cls.TIMEFRAME:
+        attrs = getattr(frame, "attrs", {})
+        timeframe = str(attrs.get("timeframe") or attrs.get("interval") or "").lower()
+        if timeframe != str(expected_timeframe).lower():
             return False
-        if "is_closed" in frame.columns:
-            try:
-                return bool(frame["is_closed"].iloc[-1])
-            except (TypeError, ValueError, IndexError):
-                return False
-        return True
+        if "is_closed" not in frame.columns:
+            return False
+        try:
+            return bool(frame["is_closed"].iloc[-1])
+        except (TypeError, ValueError, IndexError):
+            return False
+
+    @classmethod
+    def frame_is_closed_5m(cls, frame):
+        return cls.frame_is_closed(frame, cls.TIMEFRAME)
 
     @classmethod
     def volume_ratio(cls, frame, lookback=None):
@@ -148,8 +153,9 @@ class FuturesScalpingStrategyV3(_V3Base):
         trigger, fifteen, hourly = (data.get(x) for x in ("5m", "15m", "1h"))
         if not self.frame_is_closed_5m(trigger):
             return {"success": False, "reason": "V3 requires at least 60 closed 5m candles"}
-        if any(x is None or len(x) < 60 for x in (fifteen, hourly)):
-            return {"success": False, "reason": "V3 Futures requires sufficient 15m and 1h context"}
+        if (not self.frame_is_closed(fifteen, "15m")
+                or not self.frame_is_closed(hourly, "1h")):
+            return {"success": False, "reason": "V3 Futures requires confirmed closed 15m and 1h context"}
         v = self.value
         c, o, h, low, ema9, ema20, atr, rsi = (
             v(trigger, x) for x in ("close", "open", "high", "low", "EMA_9", "EMA_20", "ATR", "RSI")
@@ -223,8 +229,9 @@ class SpotScalpingStrategyV3(_V3Base):
         trigger, fifteen, hourly, four = (data.get(x) for x in ("5m", "15m", "1h", "4h"))
         if not self.frame_is_closed_5m(trigger):
             return {"success": False, "reason": "V3 requires at least 60 closed 5m candles"}
-        if any(x is None or len(x) < 60 for x in (fifteen, hourly)):
-            return {"success": False, "reason": "V3 Spot requires sufficient 15m and 1h context"}
+        if (not self.frame_is_closed(fifteen, "15m")
+                or not self.frame_is_closed(hourly, "1h")):
+            return {"success": False, "reason": "V3 Spot requires confirmed closed 15m and 1h context"}
         v = self.value
         c, o, h, low, ema9, ema20, atr, rsi = (
             v(trigger, x) for x in ("close", "open", "high", "low", "EMA_9", "EMA_20", "ATR", "RSI")
@@ -234,6 +241,8 @@ class SpotScalpingStrategyV3(_V3Base):
         if None in (c, o, h, low, ema9, ema20, atr, rsi, hist, prev, c1, e200) or atr <= 0:
             return {"success": False, "reason": "V3 Spot indicators are incomplete"}
         if four is not None and len(four) >= 210:
+            if not self.frame_is_closed(four, "4h"):
+                return {"success": False, "reason": "V3 Spot requires confirmed closed 4h context"}
             c4, e2004 = v(four, "close"), v(four, "EMA_200")
             if c4 is not None and e2004 and c4 < e2004*.985 and c1 < e200:
                 return {"success": False, "reason": "Deep 4h and 1h bearish context"}
