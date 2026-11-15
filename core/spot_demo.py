@@ -18,15 +18,21 @@ class SpotDemoMixin:
 
     # ---- prices ----------------------------------------------------------------
 
-    def _spot_like_price(self, domain, symbol, side):
+    def _spot_like_price(self, domain, symbol, side, reference_price=None):
         """Reference price for a BUY/SELL, also stored as the account mark."""
         side = side.upper()
-        quote = self.market_feed.fetch_book_ticker("spot", symbol)
-        mid = Decimal(str(quote["mid_price"]))
-        ref = Decimal(str(quote["ask"] if side == "BUY" else quote["bid"]))
+        if reference_price is None:
+            quote = self.market_feed.fetch_book_ticker("spot", symbol)
+            mid = Decimal(str(quote["mid_price"]))
+            ref = Decimal(str(quote["ask"] if side == "BUY" else quote["bid"]))
+            source = "BINANCE"
+        else:
+            ref = Decimal(str(reference_price))
+            mid = ref
+            source = "BINANCE_WS_5M_OPEN"
         if not ref.is_finite() or ref <= 0 or not mid.is_finite() or mid <= 0:
             raise ValueError("Invalid market price")
-        self.demo_execution.update_mark_price(symbol, "SPOT", mid, source="BINANCE")
+        self.demo_execution.update_mark_price(symbol, "SPOT", mid, source=source)
         return ref
 
     # ---- scanning ----------------------------------------------------------------
@@ -160,14 +166,14 @@ class SpotDemoMixin:
     # ---- open --------------------------------------------------------------------
 
     def request_demo_spot_trade(self, symbol, domain="spot", risk_pct=0.5,
-                                signal_override=None):
+                                signal_override=None, entry_reference_price=None):
         with self._demo_lock:
             return self._request_demo_spot_trade_locked(
-                symbol, domain, risk_pct, signal_override
+                symbol, domain, risk_pct, signal_override, entry_reference_price
             )
 
     def _request_demo_spot_trade_locked(self, symbol, domain, risk_pct,
-                                        signal_override=None):
+                                        signal_override=None, entry_reference_price=None):
         symbol = str(symbol).strip().upper()
         domain = str(domain).strip().lower()
         if domain not in SPOT_LIKE:
@@ -209,7 +215,7 @@ class SpotDemoMixin:
             if not stop < entry < target:
                 raise ValueError("Invalid LONG trade plan levels")
 
-            price = self._spot_like_price(domain, symbol, "BUY")
+            price = self._spot_like_price(domain, symbol, "BUY", entry_reference_price)
             valid_entry, entry_reason = self._validate_demo_entry_price(
                 plan, "LONG", price, min_net_rr=1.5, market="spot"
             )
