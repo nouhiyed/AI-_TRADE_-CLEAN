@@ -155,7 +155,7 @@ def simulate(market, symbol, raw):
             atr=float(row["5_ATR"])
             if not np.isfinite(entry) or not np.isfinite(atr) or entry<=0 or atr<=0: continue
             distance=max(.90*atr,entry*.0008); risk=distance/entry
-            required=1.5+2.5*(fee+adverse)/risk
+            required=1.5+5.0*(fee+adverse)/risk
             target_r=max(float(row.base_r),required)
             net_reward=target_r*risk-2*(fee+adverse)
             net_rr=net_reward/(risk+2*(fee+adverse))
