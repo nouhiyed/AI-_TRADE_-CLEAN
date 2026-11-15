@@ -26,7 +26,8 @@ class BinanceKlineStream:
     }
     REQUIRED_ROWS = {
         "futures": {"5m": 60, "15m": 60, "1h": 60},
-        "spot": {"5m": 60, "15m": 60, "1h": 210, "4h": 210},
+        # Spot's 4h EMA200 is an optional macro filter for newer listings.
+        "spot": {"5m": 60, "15m": 60, "1h": 210},
     }
     MAX_STREAMS_PER_CONNECTION = 1020
     INTERVAL_MS = {"5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000}
@@ -207,7 +208,8 @@ class BinanceKlineStream:
                 self._status[market]["last_error"] = "cache candle: " + str(error)
 
     def _frame_healthy(self, market, interval, frame, now_ms=None):
-        minimum = self.REQUIRED_ROWS[market][interval]
+        minimum = self.REQUIRED_ROWS[market].get(
+            interval, self.CACHE_LIMITS[market][interval])
         if frame is None or len(frame) < minimum:
             return False
         if "is_closed" not in frame.columns or not bool(frame["is_closed"].iloc[-1]):
@@ -248,6 +250,16 @@ class BinanceKlineStream:
                     "source": "binance_websocket_cache",
                 })
                 frames[interval] = copied
+            if market == "spot":
+                optional_four_hour = self._cache.get((market, symbol, "4h"))
+                if self._frame_healthy(market, "4h", optional_four_hour):
+                    copied = optional_four_hour.copy()
+                    copied.attrs.update({
+                        "market": market, "symbol": symbol,
+                        "interval": "4h", "timeframe": "4h",
+                        "source": "binance_websocket_cache",
+                    })
+                    frames["4h"] = copied
         return frames
 
     def _warm_symbol(self, market, symbol):
