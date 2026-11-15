@@ -1328,8 +1328,8 @@ class TradingCoordinator(SpotDemoMixin):
         symbol = str(symbol).strip().upper()
         timeframe = str(timeframe).strip().lower()
         allowed_timeframes = {
-            "futures": {"1m", "5m", "15m", "1h"},
-            "spot": {"1m", "5m", "15m", "1h", "4h"},
+            "futures": {"5m"},
+            "spot": {"5m"},
         }
         base = {
             "success": False, "opened": False, "domain": domain,
@@ -1344,7 +1344,7 @@ class TradingCoordinator(SpotDemoMixin):
         if timeframe not in allowed_timeframes[domain]:
             return {**base, "decision_status": "REJECTED",
                     "decision_reason": "Unsupported timeframe for this agent",
-                    "reason": "Unsupported timeframe for this agent"}
+                    "reason": "V3 entry decisions are evaluated only on the 5m chart"}
         if not self._agent_enabled(domain):
             reason = domain.title() + " agent is stopped"
             return {**base, "decision_status": "REJECTED",
