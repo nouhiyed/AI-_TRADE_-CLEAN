@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.15.11"
+API_VERSION = "2026.11.15.12"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -534,10 +534,26 @@ class APIHandler(BaseHTTPRequestHandler):
 
             if path == "/health":
                 stream = market_stream.status() if market_stream else {}
+                runtime = autopilot.status() if autopilot else {}
+                components = {
+                    "api": True,
+                    "spot_stream": bool((stream.get("spot") or {}).get("watchdog_healthy")),
+                    "futures_stream": bool((stream.get("futures") or {}).get("watchdog_healthy")),
+                    "execution_writer": bool(
+                        (runtime.get("analysis_pools", {}).get("execution_writer") or {}).get("alive")
+                    ),
+                }
+                components["analysis_futures"] = bool(
+                    runtime.get("analysis_pools", {}).get("futures", {}).get("workers", 0)
+                )
+                components["analysis_spot"] = bool(
+                    runtime.get("analysis_pools", {}).get("spot", {}).get("workers", 0)
+                )
                 return self.send_json({
-                    "ok": True, "mode": coordinator.mode,
-                    "api_version": API_VERSION,
-                    "websocket": stream,
+                    "ok": True, "healthy": all(components.values()),
+                    "mode": coordinator.mode, "api_version": API_VERSION,
+                    "components": components, "websocket": stream,
+                    "analysis": runtime.get("analysis_pools", {}),
                 })
             if path == "/market/stream/status":
                 return self.send_json({
@@ -564,6 +580,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "scan": scan_snapshot,
                     "websocket": market_stream.status() if market_stream else {},
                     "analysis_pools": autopilot.status().get("analysis_pools", {}),
+                    "analysis_metrics": autopilot.status().get("analysis_pools", {}),
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
