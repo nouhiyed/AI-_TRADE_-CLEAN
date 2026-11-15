@@ -103,206 +103,41 @@ class Autopilot:
                                        "DEMO_RECONCILIATION_REQUIRED")}
 
     def tick(self, force=False):
-        """Run one cycle and always publish its latest outcome."""
+        """Legacy polling is intentionally non-executing; WS close events own entries."""
         with self._lock:
-            cfg = dict(self.config)
-            result = {"status": "RUNNING", "phase": "starting",
-                      "opened": [], "skipped": [], "scanned": 0,
-                      "actionable": 0}
             self.last_run = int(self.clock())
-            self.last_result = dict(result)
-
-            if not (cfg["enabled"] or force):
-                result["status"] = "IDLE"
-                result["skipped"].append({"reason": "Autopilot is off"})
-                self.last_result = result
-                return result
             if self.c.mode != "DEMO":
-                result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": "Not in DEMO mode"})
-                self.last_result = result
-                return result
-
-            try:
-                open_symbols = self._open_symbols()
-                slots = int(cfg["max_concurrent"]) - len(open_symbols)
-                if slots <= 0:
-                    result["skipped"].append(
-                        {"reason": "Max concurrent trades reached"})
-
-                sources = []
-                # Automatic scanning always uses the complete eligible universe.
-                # scan_limit is retained only for backward-compatible config reads;
-                # it must never cap the market universe.
-                if cfg["trade_futures"]:
-                    sources.append(("futures", lambda: self.c.scan_futures()))
-                if cfg["trade_spot"]:
-                    sources.append(("spot", lambda: self.c.scan_spot()))
-
-                # Scan every enabled market independently. One failed scanner or
-                # domain processor must not hide results from the other domains.
-                for domain, scan_fn in sources:
-                    try:
-                        result["phase"] = "scanning"
-                        result["current_domain"] = domain
-                        self.last_result = dict(result)
-                        scan = scan_fn()
-                        if not isinstance(scan, dict):
-                            raise TypeError("Scanner returned an invalid response")
-                        result["scanned"] += scan.get("scanned") or 0
-                        result["actionable"] += scan.get("actionable") or 0
-                        if scan.get("rejections"):
-                            result.setdefault("rejections", {})[domain] = scan["rejections"]
-                        if scan.get("rejection_samples"):
-                            result.setdefault("rejection_samples", []).extend(
-                                scan["rejection_samples"][:8])
-                        if not scan.get("success"):
-                            result["skipped"].append({
-                                "domain": domain,
-                                "reason": scan.get("reason", "Scan failed"),
-                            })
-                            continue
-                        result["phase"] = "processing"
-                        self.last_result = dict(result)
-                        slots = self._process(
-                            domain, scan, cfg, open_symbols, slots, result)
-                    except Exception as error:
-                        result["skipped"].append({
-                            "domain": domain,
-                            "reason": "Domain processing error: " + str(error),
-                        })
-                result["status"] = "COMPLETED"
-                result["phase"] = "completed"
-                result.pop("current_domain", None)
-            except Exception as error:
-                result["status"] = "ERROR"
-                result["error"] = str(error)
-                result["skipped"].append({
-                    "reason": "Autopilot cycle error: " + str(error),
-                })
-            finally:
-                # Publish the terminal state even if one domain raises unexpectedly.
-                if result.get("status") == "RUNNING":
-                    result["status"] = "ERROR"
-                    result["phase"] = "error"
-                result.pop("current_domain", None)
-                self.last_result = dict(result)
+                result = {
+                    "status": "SKIPPED", "phase": "websocket_5m",
+                    "skipped": [{"reason": "Only internal DEMO execution is enabled"}],
+                    "opened": [], "scanned": 0, "actionable": 0,
+                }
+            elif not self.config.get("enabled") and not force:
+                result = {
+                    "status": "IDLE", "phase": "websocket_5m",
+                    "skipped": [{"reason": "Autopilot is off"}],
+                    "opened": [], "scanned": 0, "actionable": 0,
+                }
+            else:
+                result = {
+                    "status": "WAITING_FOR_5M_EVENT",
+                    "phase": "websocket_5m",
+                    "message": "Entries are evaluated only from confirmed closed 5m WebSocket candles.",
+                    "opened": [], "skipped": [], "scanned": 0, "actionable": 0,
+                }
+            self.last_result = dict(result)
             return result
 
+
     def _process(self, domain, scan, cfg, open_symbols, slots, result):
-        for opp in scan.get("opportunities", []):
-            if slots <= 0:
-                break
-            symbol = str(opp.get("symbol", "")).upper()
-            try:
-                direction = str(opp["direction"]).upper()
-                signal, plan = opp["signal"], opp["trade_plan"]
-                confidence = float(opp.get("confidence") or 0)
-
-                def skip(reason):
-                    result["skipped"].append({
-                        "domain": domain, "symbol": symbol, "reason": str(reason)})
-
-                if not symbol:
-                    skip("Missing symbol")
-                    continue
-                if symbol in open_symbols:
-                    skip("Already open")
-                    continue
-                if self._cooldown.get(symbol, 0) > self.clock():
-                    skip("Cooldown after a recent trade")
-                    continue
-
-                # Rebuild analysis from fresh, closed Binance candles immediately
-                # before execution. Scanner opportunities may be stale by the time
-                # the autopilot reaches them.
-                fresh = self.c.analyze_live(symbol, domains=[domain])
-                fresh_signal = (fresh.get("signals") or {}).get(domain)
-                if not isinstance(fresh_signal, dict):
-                    skip("Fresh pre-entry analysis is unavailable")
-                    continue
-                fresh_direction = str(fresh_signal.get("direction", "WAIT")).upper()
-                normalized_direction = "LONG" if fresh_direction == "BUY" else fresh_direction
-                if normalized_direction != direction:
-                    skip("Direction changed during pre-entry confirmation")
-                    continue
-                fresh_plan = fresh_signal.get("trade_plan")
-                if fresh_signal.get("strategy_version") != "v3" or not isinstance(fresh_plan, dict) or fresh_plan.get("strategy_version") != "v3":
-                    skip("Fresh analysis is not an approved V3 signal and plan")
-                    continue
-                if fresh_plan.get("success") is not True:
-                    skip(fresh_plan.get("reason") or
-                         "Fresh V3 confirmation failed; waiting for a better entry")
-                    continue
-                signal, plan = fresh_signal, fresh_plan
-                confidence = float(signal.get("confidence") or 0)
-
-                if confidence < float(cfg["min_confidence"]):
-                    skip("Fresh confidence below minimum")
-                    continue
-
-                if confidence < float(cfg["min_confidence"]):
-                    skip("Confidence below minimum")
-                    continue
-
-                strategy_tag = signal.get("strategy_tag") or "momentum"
-                key = setup_key(
-                    direction, confidence, plan.get("reward_risk"), domain, strategy_tag)
-                if not self.c.learning.allows(key):
-                    skip("Setup disabled by learning: " + key)
-                    continue
-
-                assessment = signal.get("market_context")
-                if assessment is None and cfg["use_context"] and self.context is not None:
-                    assessment = self.context.assess(symbol, direction)
-                if assessment is not None:
-                    if assessment.get("veto"):
-                        skip("Context veto: " + assessment["veto"])
-                        continue
-                    confidence += float(assessment.get("score") or 0) * 5
-                    confidence = max(0.0, min(100.0, confidence))
-                    if confidence < float(cfg["min_confidence"]):
-                        skip("Confidence below minimum after context")
-                        continue
-
-                signal = dict(signal)
-                signal["market_context"] = assessment
-                signal["entry_origin"] = "AUTOPILOT"
-                signal["setup_key"] = key
-                signal["confidence"] = confidence
-                signal["confidence_adjusted"] = confidence
-                self.c.last_signals[domain] = signal
-
-                selected_leverage = 1
-                if domain == "futures":
-                    selected_leverage = self.c.select_futures_leverage(signal, plan)
-                    trade = self.c.request_demo_futures_trade(
-                        symbol, direction, risk_pct=float(cfg["risk_pct"]),
-                        leverage=selected_leverage, signal_override=signal)
-                else:
-                    trade = self.c.request_demo_spot_trade(
-                        symbol, domain=domain, risk_pct=float(cfg["risk_pct"]),
-                        signal_override=signal)
-
-                if trade.get("approved"):
-                    slots -= 1
-                    open_symbols.add(symbol)
-                    self._cooldown[symbol] = (
-                        self.clock() + cfg["cooldown_min"] * 60)
-                    result["opened"].append({
-                        "domain": domain, "symbol": symbol,
-                        "direction": direction,
-                        "leverage": trade.get("leverage", selected_leverage),
-                        "trade_id": trade.get("trade_id"),
-                    })
-                else:
-                    skip(trade.get("reason", "Rejected"))
-            except Exception as error:
-                # Isolate malformed opportunities and transient agent errors.
-                result["skipped"].append({
-                    "domain": domain, "symbol": symbol,
-                    "reason": "Opportunity processing error: " + str(error),
-                })
+        # Kept for API compatibility only. Polling/scanner opportunities are
+        # never allowed to bypass the confirmed 5m WebSocket opening event.
+        for opportunity in scan.get("opportunities", []):
+            result["skipped"].append({
+                "domain": domain,
+                "symbol": str(opportunity.get("symbol", "")).upper(),
+                "reason": "Waiting for the confirmed 5m close and next-candle WebSocket open",
+            })
         return slots
 
 
@@ -364,6 +199,9 @@ class Autopilot:
                 or direction not in (("BUY",) if domain == "spot" else ("LONG", "SHORT"))):
             return {"success": False, "reason": "The agent signal is not an approved V3 setup"}
         now_ms = int(self.clock() * 1000)
+        generated_at = int(signal.get("signal_generated_at_ms") or 0)
+        if generated_at <= 0 or now_ms - generated_at > 30000 or generated_at > now_ms + 2000:
+            return {"success": False, "reason": "Agent signal is stale; request a fresh 5m analysis"}
         next_open = ((now_ms // 300000) + 1) * 300000
         key = (domain, symbol)
         with self._event_lock:
@@ -395,8 +233,20 @@ class Autopilot:
         try:
             if not self.c._agent_enabled(domain):
                 return
-            analysis = self.c.analyze_live(
-                symbol, domains=[domain], include_orderbook=False)
+            if not candle.get("is_closed"):
+                return
+            close_time = int(candle.get("close_time") or 0)
+            if close_time <= 0 or int(time.time() * 1000) - close_time > 10000:
+                return
+            frames = candle.get("market_data")
+            if not isinstance(frames, dict):
+                self.last_result = {
+                    "status": "WAITING_FOR_CACHE", "phase": "websocket_analysis",
+                    "domain": domain, "symbol": symbol,
+                    "reason": "Closed multi-timeframe candle cache is not ready",
+                }
+                return
+            analysis = self.c.analyze_live_from_frames(symbol, domain, frames)
             signal = (analysis.get("signals") or {}).get(domain)
             if not isinstance(signal, dict):
                 return
@@ -405,14 +255,16 @@ class Autopilot:
             signal["signal_timeframe"] = "5m"
             signal["signal_candle_open_time"] = int(candle["open_time"])
             signal["signal_candle_close_time"] = int(candle["close_time"])
-            signal["signal_source"] = "BINANCE_WEBSOCKET"
+            signal["signal_generated_at_ms"] = int(time.time() * 1000)
+            signal["signal_source"] = "BINANCE_WEBSOCKET_CACHE"
             plan = signal.get("trade_plan")
             direction = str(signal.get("direction", "WAIT")).upper()
             valid_direction = direction in (("BUY",) if domain == "spot"
                                              else ("LONG", "SHORT"))
             if (not valid_direction or signal.get("strategy_version") != "v3"
                     or not isinstance(plan, dict) or plan.get("success") is not True
-                    or plan.get("strategy_version") != "v3"):
+                    or plan.get("strategy_version") != "v3"
+                    or str(plan.get("timeframe", "")).lower() != "5m"):
                 return
             with self._event_lock:
                 self.c.last_signals[domain] = signal
@@ -467,13 +319,18 @@ class Autopilot:
             event_time = int(opening_candle.get("event_time") or 0)
             open_time = int(opening_candle.get("open_time") or 0)
             entry_price = float(opening_candle.get("open") or 0)
-            if (entry_price <= 0 or event_time < open_time
+            if (int(pending.get("next_open_time") or 0) != open_time
+                    or entry_price <= 0 or event_time < open_time
                     or event_time - open_time > 10000
                     or int(time.time() * 1000) - open_time > 10000):
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
                 return
             signal = dict(pending["signal"])
+            if str(signal.get("symbol", "")).upper() != symbol:
+                result["status"] = "SKIPPED"
+                result["skipped"].append({"reason": "Signal symbol mismatch"})
+                return
             direction = str(signal.get("direction", "WAIT")).upper()
             normalized = "LONG" if direction == "BUY" else direction
             if normalized not in ("LONG", "SHORT"):
