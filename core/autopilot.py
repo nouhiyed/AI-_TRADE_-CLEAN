@@ -11,6 +11,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 from core.learning import setup_key
+from agents.futures.agent import FuturesAgent
+from agents.spot.agent import SpotAgent
 
 DEFAULTS = {
     "enabled": False,
@@ -68,6 +70,8 @@ class Autopilot:
             for domain in ("futures", "spot")
         }
         self._analysis_stats_lock = threading.Lock()
+        self._analysis_local = threading.local()
+        self._analysis_agents_created = {"futures": 0, "spot": 0}
         self._analysis_stats = {
             domain: {"workers": workers, "queue_limit": queue_limit,
                      "submitted": 0, "completed": 0, "failed": 0,
@@ -116,11 +120,27 @@ class Autopilot:
         with self._analysis_stats_lock:
             analysis = {domain: dict(stats)
                         for domain, stats in self._analysis_stats.items()}
+        for domain in ("futures", "spot"):
+            analysis[domain]["agent_instances"] = self._analysis_agents_created[domain]
         return {"config": dict(self.config), "last_run": self.last_run,
                 "last_result": self.last_result,
                 "analysis_pools": analysis,
                 "cooldowns": {k: int(v - self.clock())
                               for k, v in self._cooldown.items() if v > self.clock()}}
+
+    def worker_agent(self, domain):
+        """Return this analysis worker's own persistent market-specific agent."""
+        domain = str(domain).strip().lower()
+        if domain not in ("futures", "spot"):
+            raise ValueError("Unknown analysis market")
+        current = getattr(self._analysis_local, "agent", None)
+        if current is None or getattr(self._analysis_local, "domain", None) != domain:
+            current = FuturesAgent() if domain == "futures" else SpotAgent()
+            self._analysis_local.agent = current
+            self._analysis_local.domain = domain
+            with self._analysis_stats_lock:
+                self._analysis_agents_created[domain] += 1
+        return current
 
     def submit_analysis(self, domain, fn, *args):
         """Dispatch analysis to a bounded, market-isolated worker pool."""
@@ -321,7 +341,9 @@ class Autopilot:
                     "reason": "Closed multi-timeframe candle cache is not ready",
                 }
                 return
-            analysis = self.c.analyze_live_from_frames(symbol, domain, frames)
+            analysis = self.c.analyze_live_from_frames(
+                symbol, domain, frames, agent=self.worker_agent(domain)
+            )
             signal = (analysis.get("signals") or {}).get(domain)
             if not isinstance(signal, dict):
                 self.last_result = {
