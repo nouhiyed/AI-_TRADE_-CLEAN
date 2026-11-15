@@ -2,6 +2,8 @@
 """Two-year V3 historical backtest using the production ATR/structure trailing stop."""
 import os, io, re, time, zipfile, hashlib, calendar, json, math
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datetime import datetime, timezone, timedelta
 import requests
 import numpy as np
