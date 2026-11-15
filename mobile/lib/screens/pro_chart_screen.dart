@@ -500,11 +500,11 @@ class _ProChartScreenState extends State<ProChartScreen> {
             child: SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed: _submitting ? null : _submitToAgent,
+                onPressed: (_submitting || _interval != '5m') ? null : _submitToAgent,
                 icon: const Icon(Icons.psychology_alt, size: 18),
                 label: Text(_submitting
                     ? t('جارٍ التحليل...', 'ANALYZING...')
-                    : t('إرسال للوكيل', 'SEND TO AGENT')),
+                    : t('إرسال للوكيل · 5 دقائق', 'SEND TO AGENT · 5m')),
               ),
             ),
           ),
