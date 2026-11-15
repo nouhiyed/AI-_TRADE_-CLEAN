@@ -1513,14 +1513,14 @@ class TradingCoordinator(SpotDemoMixin):
                 rejection_samples.append({"symbol": symbol, "reason": key})
 
         processed = 0
-        # Binance request pacing remains globally rate-limited; concurrent
+        # Binance request pacing is isolated per market; concurrent
         # symbol analysis overlaps network latency without burst flooding.
         def analyze_scan_symbol(scan_item):
             return self.analyze_live(scan_item["symbol"], domains=["futures"])
 
         # More in-flight symbols hide mobile-network latency. Process each
         # completed future immediately so a slow first symbol cannot stall progress.
-        with ThreadPoolExecutor(max_workers=12) as scan_pool:
+        with ThreadPoolExecutor(max_workers=8) as scan_pool:
             pending = {
                 scan_pool.submit(analyze_scan_symbol, item): item
                 for item in universe
@@ -1703,13 +1703,13 @@ class TradingCoordinator(SpotDemoMixin):
                 })
 
         processed = 0
-        # Keep the same bounded concurrency and Binance global request pacing.
+        # Keep bounded concurrency with independent Spot API pacing.
         def analyze_scan_symbol(scan_item):
             return self.analyze_live(scan_item["symbol"], domains=["spot"])
 
         # More in-flight symbols hide mobile-network latency. Process each
         # completed future immediately so a slow first symbol cannot stall progress.
-        with ThreadPoolExecutor(max_workers=12) as scan_pool:
+        with ThreadPoolExecutor(max_workers=8) as scan_pool:
             pending = {
                 scan_pool.submit(analyze_scan_symbol, item): item
                 for item in universe
