@@ -1,6 +1,7 @@
 
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from decimal import Decimal
 import json
@@ -1496,8 +1497,15 @@ class TradingCoordinator(SpotDemoMixin):
                 rejection_samples.append({"symbol": symbol, "reason": key})
 
         processed = 0
-        for item in universe:
-            symbol = item["symbol"]
+        # Binance request pacing remains globally rate-limited; concurrent
+        # symbol analysis overlaps network latency without burst flooding.
+        def analyze_scan_symbol(scan_item):
+            return self.analyze_live(scan_item["symbol"], domains=["futures"])
+
+        with ThreadPoolExecutor(max_workers=5) as scan_pool:
+            analyses = scan_pool.map(analyze_scan_symbol, universe)
+            for item, analysis in zip(universe, analyses):
+                symbol = item["symbol"]
             if callable(progress_callback):
                 progress_callback({
                     "phase": "analyzing",
@@ -1506,7 +1514,6 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                analysis = self.analyze_live(symbol, domains=["futures"])
                 signal = analysis.get("signals", {}).get("futures", {})
                 if not isinstance(signal, dict):
                     reject("Missing Futures analysis", symbol)
@@ -1670,8 +1677,14 @@ class TradingCoordinator(SpotDemoMixin):
                 })
 
         processed = 0
-        for item in universe:
-            symbol = item["symbol"]
+        # Keep the same bounded concurrency and Binance global request pacing.
+        def analyze_scan_symbol(scan_item):
+            return self.analyze_live(scan_item["symbol"], domains=["spot"])
+
+        with ThreadPoolExecutor(max_workers=5) as scan_pool:
+            analyses = scan_pool.map(analyze_scan_symbol, universe)
+            for item, analysis in zip(universe, analyses):
+                symbol = item["symbol"]
             if callable(progress_callback):
                 progress_callback({
                     "phase": "analyzing",
@@ -1680,7 +1693,6 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                analysis = self.analyze_live(symbol, domains=["spot"])
                 signal = analysis.get("signals", {}).get("spot", {})
                 if not isinstance(signal, dict):
                     reject("Missing Spot analysis", symbol)
