@@ -59,6 +59,16 @@ def continuous_scan_worker():
                         "actionable": int(result.get("actionable", 0) or 0),
                         "scan": result.get("scan", {}),
                         "errors": len(result.get("errors", {})),
+                        "opportunities": [
+                            {
+                                "symbol": item.get("symbol"),
+                                "direction": item.get("direction"),
+                                "confidence": item.get("confidence"),
+                                "quote_volume": item.get("quote_volume"),
+                                "trade_plan": item.get("trade_plan"),
+                            }
+                            for item in result.get("opportunities", [])
+                        ],
                         "reason": result.get("reason"),
                         "completed_at": time.time(),
                     }
