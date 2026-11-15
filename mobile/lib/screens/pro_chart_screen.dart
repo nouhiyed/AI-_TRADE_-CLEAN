@@ -58,6 +58,9 @@ class _ProChartScreenState extends State<ProChartScreen> {
   List<String> _symbols = [];
   final Map<String, String> _symbolNames = {};
   double? _lastPrice;
+  bool _historyLoaded = false;
+  String _historyKey = '';
+  DateTime _lastRestRefresh = DateTime.fromMillisecondsSinceEpoch(0);
 
   final Map<String, bool> _indicators = {
     'volume': true,
@@ -149,14 +152,39 @@ class _ProChartScreenState extends State<ProChartScreen> {
 
   Future<void> _loadCandles({bool fit = false}) async {
     if (!_pageReady || _loading) return;
+    final key = '$_market:$_symbol:$_interval';
+    if (_historyKey != key) {
+      _historyKey = key;
+      _historyLoaded = false;
+    }
     _loading = true;
     try {
+      // 5m charts consume the backend Binance WebSocket candle after REST backfill.
+      if (_interval == '5m' && _historyLoaded) {
+        try {
+          final live = await ApiService.liveStreamCandle(
+            market: _market, symbol: _symbol,
+          );
+          if (live['success'] == true) {
+            await _controller.runJavaScript(
+              'updateLiveCandle(${jsonEncode(live)});',
+            );
+            if (mounted) {
+              setState(() {
+                _lastPrice = (live['close'] as num?)?.toDouble();
+                _error = null;
+              });
+            }
+            return;
+          }
+        } catch (_) {
+          // Symbols outside the active stream universe fall back to REST.
+        }
+        if (DateTime.now().difference(_lastRestRefresh).inSeconds < 20) return;
+      }
       final result = await ApiService.marketCandles(
-        market: _market,
-        symbol: _symbol,
-        interval: _interval,
-        limit: 300,
-        live: true,
+        market: _market, symbol: _symbol, interval: _interval,
+        limit: 300, live: true,
       );
       final candles = result['candles'];
       if (candles is List && candles.isNotEmpty) {
@@ -170,20 +198,17 @@ class _ProChartScreenState extends State<ProChartScreen> {
             _error = null;
           });
         }
+        _historyLoaded = true;
+        _lastRestRefresh = DateTime.now();
         _pushLevels();
         _pushTradeMarkers();
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = '$e';
-        });
-      }
+      if (mounted) setState(() => _error = '$e');
     } finally {
       _loading = false;
     }
   }
-
   void _pushLevels() {
     final levels = <Map<String, dynamic>>[];
     for (final p in widget.positions) {
@@ -1063,6 +1088,17 @@ function setCandles(arr, fit) {
   }));
   drawIndicators();
   if (fit) chart.timeScale().fitContent();
+}
+function updateLiveCandle(x) {
+  if (!x || !Number.isFinite(Number(x.time))) return;
+  var point = { time: Number(x.time), open: Number(x.open), high: Number(x.high), low: Number(x.low), close: Number(x.close), volume: Number(x.volume || 0) };
+  if (![point.open, point.high, point.low, point.close].every(Number.isFinite)) return;
+  var last = data.length ? data[data.length - 1] : null;
+  if (last && point.time < last.time) return;
+  if (last && point.time === last.time) data[data.length - 1] = point; else data.push(point);
+  candle.update(point);
+  volume.update({ time: point.time, value: point.volume, color: point.close >= point.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
+  drawIndicators();
 }
 function zoomTimeScale(factor) {
   var range = chart.timeScale().getVisibleLogicalRange();
