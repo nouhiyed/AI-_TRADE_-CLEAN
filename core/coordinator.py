@@ -1203,7 +1203,9 @@ class TradingCoordinator(SpotDemoMixin):
             return {"error": "Symbol cannot be empty"}
 
         try:
-            live_data = self.market_engine.build_live(\n                symbol, domains=domains, include_orderbook=include_orderbook\n            )
+            live_data = self.market_engine.build_live(
+                symbol, domains=domains, include_orderbook=include_orderbook
+            )
         except Exception as error:
             return {
                 "symbol": symbol,
