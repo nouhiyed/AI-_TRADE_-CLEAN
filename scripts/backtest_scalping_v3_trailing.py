@@ -42,9 +42,9 @@ def download(url,label):
             if attempt<5: time.sleep(min(30,2**(attempt+1)))
     raise RuntimeError(f"Download failed for {label}: {error}")
 
-def archive_url(market,period,symbol,date):
+def archive_url(market,period,symbol,date,interval="1m"):
     m="spot" if market=="spot" else "futures/um"
-    return f"{BASE}/{m}/{period}/klines/{symbol}/1m/{symbol}-1m-{date}.zip"
+    return f"{BASE}/{m}/{period}/klines/{symbol}/{interval}/{symbol}-{interval}-{date}.zip"
 
 def read_archive(url,label):
     raw=download(url,label); checksum=download(url+".CHECKSUM",label+" checksum").decode("utf8","replace")
@@ -238,43 +238,34 @@ def simulate(market,symbol,raw):
     return trades,len(sig)
 
 def verify_binance_5m_alignment():
-    """Compare locally aggregated 1m bars with Binance-native 5m candles."""
+    """Compare 1m aggregation with Binance-native 5m archives (no regional REST API)."""
     checks=[]
-    endpoints={
-        "spot":"https://api.binance.com/api/v3/klines",
-        "futures":"https://fapi.binance.com/fapi/v1/klines",
-    }
-    now_ms=int(time.time()*1000)
-    for market,url in endpoints.items():
-        one=SESSION.get(url,params={"symbol":"BTCUSDT","interval":"1m","limit":120},timeout=(15,30))
-        one.raise_for_status()
-        five=SESSION.get(url,params={"symbol":"BTCUSDT","interval":"5m","limit":30},timeout=(15,30))
-        five.raise_for_status()
-        def frame(payload):
-            d=pd.DataFrame(payload,columns=["open_time","open","high","low","close","volume",
-                "close_time","quote_volume","trades","taker_base","taker_quote","ignore"])
-            for c in ("open","high","low","close","volume"): d[c]=pd.to_numeric(d[c],errors="raise")
-            d["dt"]=pd.to_datetime(pd.to_numeric(d.open_time),unit="ms",utc=True)
-            return d
-        m1=frame(one.json()); m5=frame(five.json())
-        m1=m1[pd.to_numeric(m1.close_time)<=now_ms]
-        m5=m5[pd.to_numeric(m5.close_time)<=now_ms]
-        agg=m1.set_index("dt").resample("5min",label="left",closed="left",origin="start_day").agg(
+    previous_month=(datetime.now(timezone.utc).replace(day=1)-timedelta(days=1)).replace(day=1)
+    part=previous_month.strftime("%Y-%m")
+    for market in ("spot","futures"):
+        one=read_archive(archive_url(market,"monthly","BTCUSDT",part,"1m"),
+            f"{market}/BTCUSDT/1m/{part} alignment audit")
+        native=read_archive(archive_url(market,"monthly","BTCUSDT",part,"5m"),
+            f"{market}/BTCUSDT/5m/{part} alignment audit")
+        one["dt"]=pd.to_datetime(one.open_time,unit="ms",utc=True)
+        native["dt"]=pd.to_datetime(native.open_time,unit="ms",utc=True)
+        agg=one.set_index("dt").resample("5min",label="left",closed="left",origin="start_day").agg(
             {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
-        agg=agg[agg.index+pd.Timedelta(minutes=5)<=pd.Timestamp(now_ms,unit="ms",tz="UTC")]
-        native=m5.set_index("dt")[["open","high","low","close","volume"]]
-        common=agg.index.intersection(native.index)
-        if len(common)<10:
+        reference=native.set_index("dt")[["open","high","low","close","volume"]]
+        common=agg.index.intersection(reference.index)
+        if len(common)<100:
             raise RuntimeError(f"{market} native 5m alignment audit has only {len(common)} comparable candles")
-        a=agg.loc[common].tail(20); b=native.loc[common].tail(20)
+        a=agg.loc[common]; b=reference.loc[common]
         for col in ("open","high","low","close","volume"):
             if not np.allclose(a[col].to_numpy(float),b[col].to_numpy(float),rtol=1e-8,atol=1e-10):
                 delta=float(np.max(np.abs(a[col].to_numpy(float)-b[col].to_numpy(float))))
                 raise RuntimeError(f"{market} 1m->5m {col} mismatch vs Binance native candles; max_delta={delta}")
-        checks.append({"market":market,"symbol":"BTCUSDT","matched_5m_candles":len(common),
-            "ohlcv":"MATCH","aggregation":"left-closed/open-time bins; index shifted to close time"})
-        print(f"[ALIGNMENT PASS] {market.upper()} BTCUSDT: {len(common)} native 5m candles match 1m aggregation",flush=True)
+        checks.append({"market":market,"symbol":"BTCUSDT","month":part,
+            "matched_5m_candles":len(common),"ohlcv":"MATCH",
+            "aggregation":"left-closed/open-time bins; higher-timeframe index is candle close"})
+        print(f"[ALIGNMENT PASS] {market.upper()} BTCUSDT {part}: {len(common)} native 5m candles match 1m aggregation",flush=True)
     return checks
+
 
 def main():
     all_trades=[]; summaries=[]; audit=[]; errors=[]
