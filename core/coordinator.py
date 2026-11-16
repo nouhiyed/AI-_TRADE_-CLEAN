@@ -23,7 +23,11 @@ from core.learning import LearningEngine, setup_key as make_setup_key
 from core.notifier import Notifier
 from core.chart_image import render_trade_chart
 from core.spot_demo import SpotDemoMixin
-from core.trailing_stop import (\n    calculate_trailing_stop, apply_cost_aware_trailing_floor,\n    initialize_trailing_take_profit, is_trailing_take_profit_enabled,\n    active_fixed_take_profit,\n)
+from core.trailing_stop import (
+    calculate_trailing_stop, apply_cost_aware_trailing_floor,
+    initialize_trailing_take_profit, is_trailing_take_profit_enabled,
+    active_fixed_take_profit,
+)
 
 
 class TradingCoordinator(SpotDemoMixin):
