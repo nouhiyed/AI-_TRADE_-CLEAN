@@ -757,7 +757,6 @@ class _TradeShellState extends State<TradeShell>
     final symbol = '${scan['current_symbol'] ?? ''}'.toUpperCase();
     final total = int.tryParse('${scan['universe_total'] ?? 0}') ?? 0;
     final completed = int.tryParse('${scan['scanned_in_batch'] ?? 0}') ?? 0;
-    final active = int.tryParse('${scan['active_workers'] ?? 0}') ?? 0;
     final lastRaw = scan['last_batch'];
     final lastBatch = lastRaw is Map
         ? Map<String, dynamic>.from(lastRaw)
@@ -874,7 +873,7 @@ class _TradeShellState extends State<TradeShell>
             children: [
               Expanded(
                 child: Text(
-                  '$phaseLabel${active > 0 ? ' · $active ${tr('عمّال تحليل', 'workers')}' : ''}',
+                  phaseLabel,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: widget.muted, fontSize: 9),
