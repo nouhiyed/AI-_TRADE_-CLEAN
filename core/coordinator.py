@@ -783,32 +783,47 @@ class TradingCoordinator(SpotDemoMixin):
                         exit_price >= activation if direction == "LONG"
                         else exit_price <= activation
                     )
+                trailing_best_price = Decimal(str(
+                    snapshot.get("trailing_best_price") or entry_price
+                ))
                 if trailing_enabled and trailing_armed:
+                    # Track the favorable live quote even if candle retrieval fails.
+                    if direction == "LONG":
+                        trailing_best_price = max(trailing_best_price, exit_price)
+                    else:
+                        trailing_best_price = min(trailing_best_price, exit_price)
                     try:
                         trail_frame = self.market_feed.fetch_candles(
                             "futures", symbol, "5m", limit=40, closed_only=True)
                         trail_update = calculate_trailing_stop(
                             trail_frame, direction, stop,
-                            snapshot.get("trailing_best_price"), exit_price)
+                            trailing_best_price, exit_price)
                         if trail_update:
-                            candidate = Decimal(str(trail_update["stop"]))
-                            # Once trailing profit is armed, never let its stop fall
-                            # back through entry (gross break-even protection).
-                            stop = Decimal(str(apply_cost_aware_trailing_floor(
-                                candidate, entry_price, direction,
-                                trail_update["best_price"],
-                                self.demo_execution.futures_fee_rate,
-                                self.demo_execution.futures_slippage_rate,
-                            )))
-                            trail_update["stop"] = float(stop)
+                            trailing_best_price = Decimal(str(trail_update["best_price"]))
+                            stop = Decimal(str(trail_update["stop"]))
                     except Exception as trail_error:
                         with self._demo_lock:
                             current = self.demo_positions.get(position_id)
                             if current:
                                 current["trailing_update_error"] = str(trail_error)
+                    # Even when ATR/structure data is temporarily unavailable,
+                    # an armed trailing stop must never remain on the loss side
+                    # after the favorable move has covered execution costs.
+                    stop = Decimal(str(apply_cost_aware_trailing_floor(
+                        stop, entry_price, direction, trailing_best_price,
+                        self.demo_execution.futures_fee_rate,
+                        self.demo_execution.futures_slippage_rate,
+                    )))
+                    if trail_update:
+                        trail_update["stop"] = float(stop)
+                        trail_update["best_price"] = float(trailing_best_price)
+                catch_snapshot = dict(snapshot)
+                catch_snapshot["trailing_stop_active"] = bool(trailing_armed)
+                catch_snapshot["trailing_best_price"] = str(trailing_best_price)
+                catch_snapshot["stop_loss"] = str(stop)
                 try:
                     missed = self._catch_up(
-                        snapshot, direction, stop, target)
+                        catch_snapshot, direction, stop, target)
                 except Exception as catch_error:
                     missed = None
                     with self._demo_lock:
@@ -823,7 +838,7 @@ class TradingCoordinator(SpotDemoMixin):
                     exit_price = missed[1]
                 elif direction == "LONG":
                     if exit_price <= stop:
-                        reason = "TRAILING_STOP" if snapshot.get("trailing_stop_active") else "STOP_LOSS"
+                        reason = "TRAILING_STOP" if trailing_armed else "STOP_LOSS"
                     elif target is not None and exit_price >= target:
                         reason = "TAKE_PROFIT"
                 elif direction == "SHORT":
@@ -861,12 +876,16 @@ class TradingCoordinator(SpotDemoMixin):
                             current["trailing_no_fixed_target"] = True
                             current["trailing_take_profit_armed"] = bool(trailing_armed)
                             current["trailing_stop_active"] = bool(trailing_armed)
+                        if trailing_enabled and trailing_armed:
+                            current["stop_loss"] = str(stop)
+                            current["trailing_best_price"] = str(trailing_best_price)
+                            current["trailing_stop_method"] = (
+                                trail_update["method"] if trail_update
+                                else "COST_AWARE_BREAK_EVEN_FALLBACK"
+                            )
                         if trail_update:
-                            current["stop_loss"] = str(trail_update["stop"])
-                            current["trailing_best_price"] = str(trail_update["best_price"])
                             current["trailing_atr"] = str(trail_update["atr"])
                             current["trailing_structure_level"] = str(trail_update["structure_level"])
-                            current["trailing_stop_method"] = trail_update["method"]
 
                         if not reason:
                             self._save_demo_state()
