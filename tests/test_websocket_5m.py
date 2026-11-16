@@ -350,3 +350,82 @@ class ParallelAnalysisPoolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutopilotEntryLifecycleTests(unittest.TestCase):
+    class RecordingExecutor:
+        def __init__(self):
+            self.calls = []
+
+        def submit(self, fn, *args):
+            self.calls.append((fn, args))
+            return object()
+
+    def _autopilot(self, directory):
+        autopilot = Autopilot(
+            FakeCoordinator(), config_path=directory + "/autopilot.json"
+        )
+        autopilot._event_executor.shutdown(wait=True)
+        autopilot._event_executor = self.RecordingExecutor()
+        return autopilot
+
+    def test_exact_next_5m_open_submits_pending_entry_and_audits_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = self._autopilot(directory)
+            expected_open = 1_800_000_000_000
+            pending = {
+                "signal": {"symbol": "BTCUSDT", "direction": "LONG"},
+                "next_open_time": expected_open,
+                "created_at": 1_800_000_000,
+            }
+            autopilot._pending_entries[("futures", "BTCUSDT")] = pending
+            event = {
+                "symbol": "BTCUSDT", "interval": "5m",
+                "open_time": expected_open, "event_time": expected_open + 100,
+                "first_update": True, "is_closed": False,
+                "source": "binance_websocket", "open": 100.0,
+            }
+
+            autopilot.on_market_kline("futures", event)
+
+            self.assertEqual(len(autopilot._event_executor.calls), 1)
+            self.assertNotIn(("futures", "BTCUSDT"), autopilot._pending_entries)
+            status = autopilot.status()
+            self.assertEqual(
+                status["symbol_auditors"]["futures"]["entry_submitted"], 1
+            )
+            self.assertEqual(
+                status["recent_entry_audits"][0]["state"], "entry_submitted"
+            )
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
+
+    def test_missed_exact_next_5m_open_expires_entry_with_expected_and_observed_times(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = self._autopilot(directory)
+            expected_open = 1_800_000_000_000
+            observed_open = expected_open + 300_000
+            autopilot._pending_entries[("spot", "ETHUSDT")] = {
+                "signal": {"symbol": "ETHUSDT", "direction": "BUY"},
+                "next_open_time": expected_open,
+                "created_at": 1_800_000_000,
+            }
+            event = {
+                "symbol": "ETHUSDT", "interval": "5m",
+                "open_time": observed_open, "event_time": observed_open + 100,
+                "first_update": True, "is_closed": False,
+                "source": "binance_websocket", "open": 2000.0,
+            }
+
+            autopilot.on_market_kline("spot", event)
+
+            self.assertNotIn(("spot", "ETHUSDT"), autopilot._pending_entries)
+            self.assertEqual(len(autopilot._event_executor.calls), 0)
+            status = autopilot.status()
+            audit = status["recent_entry_audits"][0]
+            self.assertEqual(audit["state"], "entry_expired")
+            self.assertEqual(audit["expected_open_time_ms"], expected_open)
+            self.assertEqual(audit["observed_open_time_ms"], observed_open)
+            self.assertEqual(status["symbol_auditors"]["spot"]["entry_expired"], 1)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
