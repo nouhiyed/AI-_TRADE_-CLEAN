@@ -51,16 +51,28 @@ class Autopilot:
         self._event_seen = set()
         self._pending_entries = {}
         self._latest_open = {}
+        # One logical audit record per symbol; work itself is dispatched to a
+        # bounded pool so hundreds of symbols never create hundreds of threads.
+        self._symbol_audits = {"futures": {}, "spot": {}}
+        self._symbol_audit_totals = {
+            domain: {
+                "events_received": 0, "prefilter_passed": 0,
+                "prefilter_rejected": 0, "deep_analysis": 0,
+                "actionable": 0, "opened": 0, "errors": 0,
+                "stale": 0, "queue_rejected": 0,
+            }
+            for domain in ("futures", "spot")
+        }
         # All DEMO position openings are serialized through one risk/execution writer.
         self._event_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="demo-risk-execution-writer")
-        # Independent parallel analysis pools: Futures work never queues behind
-        # Spot work, and neither pool runs on the WebSocket callback thread.
-        # Start with one analyzer per market. Increase only after on-device profiling.
-        workers = min(2, max(1, int(os.environ.get(
-            "AI_TRADER_ANALYSIS_WORKERS_PER_MARKET", "1"))))
-        queue_limit = min(8, max(5, int(os.environ.get(
-            "AI_TRADER_ANALYSIS_QUEUE_LIMIT", "8"))))
+        # Each market owns a separate group of persistent V3 worker agents.
+        # A symbol is an independent queued job; workers are shared safely instead
+        # of spawning one operating-system thread per coin.
+        workers = min(8, max(1, int(os.environ.get(
+            "AI_TRADER_ANALYSIS_WORKERS_PER_MARKET", "4"))))
+        queue_limit = min(2048, max(64, int(os.environ.get(
+            "AI_TRADER_ANALYSIS_QUEUE_LIMIT", "1024"))))
         self._analysis_pools = {
             domain: ThreadPoolExecutor(
                 max_workers=workers,
@@ -82,6 +94,8 @@ class Autopilot:
                      "submitted": 0, "completed": 0, "failed": 0,
                      "rejected": 0, "inflight": 0, "queue_depth": 0,
                      "superseded": 0, "dropped_stale": 0,
+                     "prefilter_passed": 0, "prefilter_rejected": 0,
+                     "deep_analysis": 0, "actionable": 0,
                      "last_received_at_ms": None, "last_started_at_ms": None,
                      "last_completed_at_ms": None, "last_queue_wait_ms": None,
                      "last_analysis_ms": None, "last_candle_close_time_ms": None}
@@ -142,6 +156,7 @@ class Autopilot:
         return {"config": dict(self.config), "last_run": self.last_run,
                 "last_result": self.last_result,
                 "analysis_pools": analysis,
+                "symbol_auditors": self.symbol_auditor_status(),
                 "cooldowns": {k: int(v - self.clock())
                               for k, v in self._cooldown.items() if v > self.clock()}}
 
@@ -159,12 +174,60 @@ class Autopilot:
                 self._analysis_agents_created[domain] += 1
         return current
 
+    def _record_symbol_audit(self, domain, symbol, state, increment=None,
+                             also_increment=None, **details):
+        domain = str(domain).strip().lower()
+        symbol = str(symbol).strip().upper()
+        if domain not in self._symbol_audits or not symbol:
+            return
+        with self._event_lock:
+            record = self._symbol_audits[domain].setdefault(symbol, {
+                "symbol": symbol, "state": "waiting", "events": 0,
+            })
+            record.update(details)
+            record["state"] = str(state)
+            record["updated_at_ms"] = int(time.time() * 1000)
+            if increment == "events_received":
+                record["events"] = int(record.get("events", 0)) + 1
+            for counter in (increment, also_increment):
+                if counter and counter in self._symbol_audit_totals[domain]:
+                    self._symbol_audit_totals[domain][counter] += 1
+
+    def symbol_auditor_status(self):
+        """Compact per-market counts; detailed per-symbol state stays internal."""
+        result = {}
+        with self._event_lock:
+            for domain in ("futures", "spot"):
+                records = self._symbol_audits[domain]
+                states = {}
+                for record in records.values():
+                    state = str(record.get("state", "unknown"))
+                    states[state] = states.get(state, 0) + 1
+                latest = max(
+                    records.values(),
+                    key=lambda item: int(item.get("updated_at_ms") or 0),
+                    default={},
+                )
+                result[domain] = {
+                    "symbols_tracked": len(records),
+                    "last_symbol": latest.get("symbol"),
+                    "last_state": latest.get("state"),
+                    "last_updated_at_ms": latest.get("updated_at_ms"),
+                    "states": states,
+                    **dict(self._symbol_audit_totals[domain]),
+                }
+        return result
+
     def _queue_latest_analysis(self, domain, symbol, candle):
         """Coalesce pending closes per market/symbol; only the newest may wait."""
         key = (domain, symbol)
         received_at_ms = int(time.time() * 1000)
         event = dict(candle)
         event["received_at_ms"] = received_at_ms
+        self._record_symbol_audit(
+            domain, symbol, "queued", increment="events_received",
+            close_time_ms=int(event.get("close_time") or 0),
+        )
         with self._event_lock:
             previous = self._analysis_pending.get(key)
             if previous:
@@ -200,6 +263,11 @@ class Autopilot:
             with self._event_lock:
                 self._analysis_scheduled.discard(key)
                 self._analysis_pending.pop(key, None)
+                self._record_symbol_audit(
+                    domain, symbol, "queue_rejected",
+                    increment="queue_rejected",
+                    reason="Could not submit analysis worker",
+                )
                 with self._analysis_stats_lock:
                     stats = self._analysis_stats[domain]
                     stats["queue_depth"] = sum(
@@ -232,6 +300,10 @@ class Autopilot:
             if received_at_ms <= 0 or int(time.time() * 1000) - received_at_ms > 30000:
                 with self._analysis_stats_lock:
                     self._analysis_stats[domain]["dropped_stale"] += 1
+                self._record_symbol_audit(
+                    domain, symbol, "stale", increment="stale",
+                    reason="Analysis event exceeded the 30-second entry freshness window",
+                )
                 continue
             self._analyze_ws_close(domain, symbol, candle, received_at_ms)
 
@@ -410,16 +482,26 @@ class Autopilot:
         }
 
     def _analyze_ws_close(self, domain, symbol, candle, received_at_ms=None):
-        """Analyze a fresh confirmed 5m close and record end-to-end timing."""
+        """Run the 5m symbol gate, then route candidates to the full V3 worker."""
         analysis_started_at_ms = int(time.time() * 1000)
         received_at_ms = int(received_at_ms or candle.get("received_at_ms") or analysis_started_at_ms)
+        prefilter_info = None
         try:
             with self._analysis_stats_lock:
                 stats = self._analysis_stats[domain]
                 stats["last_started_at_ms"] = analysis_started_at_ms
                 stats["last_queue_wait_ms"] = max(0, analysis_started_at_ms - received_at_ms)
                 stats["last_candle_close_time_ms"] = int(candle.get("close_time") or 0)
+            self._record_symbol_audit(
+                domain, symbol, "analyzing",
+                queue_wait_ms=max(0, analysis_started_at_ms - received_at_ms),
+                close_time_ms=int(candle.get("close_time") or 0),
+            )
             if not self.c._agent_enabled(domain):
+                self._record_symbol_audit(
+                    domain, symbol, "agent_stopped",
+                    reason="The market agent is stopped",
+                )
                 return
             if not candle.get("is_closed"):
                 return
@@ -429,27 +511,86 @@ class Autopilot:
             if (close_time <= 0 or close_event_time < close_time
                     or close_event_time - close_time > 10000
                     or abs(local_now_ms - close_event_time) > 30000):
+                self._record_symbol_audit(
+                    domain, symbol, "stale",
+                    increment="stale",
+                    reason="Closed-candle event is outside the live freshness window",
+                )
                 return
+
             frames = candle.get("market_data")
-            if not isinstance(frames, dict):
+            if not isinstance(frames, dict) or not frames:
                 self.last_result = {
                     "status": "WAITING_FOR_CACHE", "phase": "websocket_analysis",
                     "domain": domain, "symbol": symbol,
-                    "reason": "Closed multi-timeframe candle cache is not ready",
+                    "reason": "Closed 5m candle cache is not ready",
                 }
+                self._record_symbol_audit(
+                    domain, symbol, "waiting_cache",
+                    reason="5m candle history is still warming",
+                )
                 return
-            analysis = self.c.analyze_live_from_frames(
-                symbol, domain, frames, agent=self.worker_agent(domain)
-            )
+
+            agent = self.worker_agent(domain)
+            if set(frames) == {"5m"}:
+                # Full-universe stream: cheap V3-local 5m gate first. Only
+                # candidates pay for REST retrieval of closed 15m/1h(/4h) context.
+                raw_five = frames.get("5m")
+                try:
+                    prepared_five = self.c.market_engine._prepare_frame(
+                        raw_five, symbol, domain, "5m")
+                    prefilter_info = agent.strategy.prefilter_5m(prepared_five)
+                except Exception as error:
+                    self._record_symbol_audit(
+                        domain, symbol, "prefilter_error",
+                        increment="errors", reason=str(error),
+                    )
+                    return
+                if not prefilter_info.get("candidate"):
+                    with self._analysis_stats_lock:
+                        self._analysis_stats[domain]["prefilter_rejected"] += 1
+                    self._record_symbol_audit(
+                        domain, symbol, "prefilter_rejected",
+                        increment="prefilter_rejected",
+                        reason=prefilter_info.get("reason") or "No 5m-local setup",
+                    )
+                    return
+                with self._analysis_stats_lock:
+                    self._analysis_stats[domain]["prefilter_passed"] += 1
+                    self._analysis_stats[domain]["deep_analysis"] += 1
+                self._record_symbol_audit(
+                    domain, symbol, "deep_analysis",
+                    increment="prefilter_passed", also_increment="deep_analysis",
+                    candidate_setups=prefilter_info.get("setups", []),
+                )
+                analysis = self.c.analyze_live(
+                    symbol, domains=[domain], include_orderbook=False,
+                    agent_overrides={domain: agent},
+                )
+                signal_source = "BINANCE_WEBSOCKET_5M_PREFILTER_REST_CONTEXT"
+            else:
+                # Explicit top-N mode retains the original multi-timeframe cache path.
+                analysis = self.c.analyze_live_from_frames(
+                    symbol, domain, frames, agent=agent
+                )
+                signal_source = "BINANCE_WEBSOCKET_CACHE"
+
             signal = (analysis.get("signals") or {}).get(domain)
             if not isinstance(signal, dict):
+                reason = str(
+                    (analysis.get("data_errors") or {}).get(domain)
+                    or (analysis.get("data_errors") or {}).get("market_data")
+                    or "Agent returned no V3 signal"
+                )
+                self._record_symbol_audit(
+                    domain, symbol, "strategy_rejected", reason=reason,
+                )
                 self.last_result = {
                     "status": "SKIPPED", "phase": "websocket_analysis",
-                    "domain": domain, "symbol": symbol,
-                    "reason": str((analysis.get("data_errors") or {}).get(domain)
-                                  or "Agent returned no signal from the closed 5m cache"),
+                    "domain": domain, "symbol": symbol, "reason": reason,
                 }
                 return
+
             signal = dict(signal)
             signal["symbol"] = symbol
             signal["signal_timeframe"] = "5m"
@@ -462,7 +603,8 @@ class Autopilot:
             signal["analysis_completed_at_ms"] = analysis_completed_at_ms
             signal["analysis_queue_wait_ms"] = max(0, analysis_started_at_ms - received_at_ms)
             signal["analysis_duration_ms"] = max(0, analysis_completed_at_ms - analysis_started_at_ms)
-            signal["signal_source"] = "BINANCE_WEBSOCKET_CACHE"
+            signal["signal_source"] = signal_source
+
             plan = signal.get("trade_plan")
             direction = str(signal.get("direction", "WAIT")).upper()
             valid_direction = direction in (("BUY",) if domain == "spot"
@@ -471,7 +613,24 @@ class Autopilot:
                     or not isinstance(plan, dict) or plan.get("success") is not True
                     or plan.get("strategy_version") != "v3"
                     or str(plan.get("timeframe", "")).lower() != "5m"):
+                reason = str(
+                    (plan or {}).get("reason")
+                    or signal.get("reason")
+                    or "V3 did not approve a valid 5m entry plan"
+                )
+                self._record_symbol_audit(
+                    domain, symbol, "strategy_rejected", reason=reason,
+                )
                 return
+
+            with self._analysis_stats_lock:
+                self._analysis_stats[domain]["actionable"] += 1
+            self._record_symbol_audit(
+                domain, symbol, "signal_ready", increment="actionable",
+                direction=direction, setup=plan.get("setup"),
+                confidence=float(signal.get("confidence") or 0),
+                analysis_duration_ms=signal["analysis_duration_ms"],
+            )
             with self._event_lock:
                 self.c.last_signals[domain] = signal
                 cfg = dict(self.config)
@@ -487,8 +646,13 @@ class Autopilot:
                 }
                 self._pending_entries[key] = pending
                 already_open = self._latest_open.get(key)
-            # If the next-candle event arrived during local cached analysis,
-            # consume it now rather than losing the entry window.
+            self._record_symbol_audit(
+                domain, symbol, "entry_queued",
+                next_open_time_ms=expected_open,
+            )
+            # If the next-candle event arrived during REST context analysis,
+            # consume it immediately, but execution still validates its age,
+            # exact candle, price deviation, risk and agent state.
             if already_open and int(already_open.get("open_time", 0)) == expected_open:
                 with self._event_lock:
                     current = self._pending_entries.pop(key, None)
@@ -496,6 +660,12 @@ class Autopilot:
                     self._event_executor.submit(
                         self._execute_ws_entry, domain, symbol, current, already_open)
         except Exception as error:
+            with self._analysis_stats_lock:
+                self._analysis_stats[domain]["failed"] += 1
+            self._record_symbol_audit(
+                domain, symbol, "analysis_error",
+                increment="errors", reason=str(error),
+            )
             self.last_result = {
                 "status": "ERROR", "phase": "websocket_analysis",
                 "domain": domain, "symbol": symbol, "error": str(error),
@@ -654,6 +824,22 @@ class Autopilot:
             result["status"] = "ERROR"
             result["error"] = str(error)
         finally:
+            if result.get("opened"):
+                self._record_symbol_audit(
+                    domain, symbol, "opened", increment="opened",
+                    trade_ids=[item.get("trade_id") for item in result["opened"]],
+                )
+            elif result.get("error"):
+                self._record_symbol_audit(
+                    domain, symbol, "execution_error", increment="errors",
+                    reason=result.get("error"),
+                )
+            elif result.get("skipped"):
+                reasons = [str(item.get("reason", "")) for item in result["skipped"]]
+                self._record_symbol_audit(
+                    domain, symbol, "entry_skipped",
+                    reason="; ".join(reason for reason in reasons if reason)[:500],
+                )
             self.last_run = int(self.clock())
             self.last_result = result
 

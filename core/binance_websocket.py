@@ -36,9 +36,22 @@ class BinanceKlineStream:
                  refresh_seconds=1800, reconnect_seconds=3):
         self.feed = market_feed
         self.on_kline = on_kline
-        # Initial mobile rollout deliberately watches only the most liquid 5-8 symbols.
-        self.max_symbols = int(max_symbols or os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "8"))
-        self.max_symbols = min(8, max(5, self.max_symbols))
+        # Default to every eligible symbol. A positive limit preserves an
+        # explicit top-N deployment mode; zero means the full market universe.
+        raw_limit = (
+            max_symbols if max_symbols is not None
+            else os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "0")
+        )
+        try:
+            self.max_symbols = max(0, int(raw_limit))
+        except (TypeError, ValueError):
+            self.max_symbols = 0
+        self.full_universe = self.max_symbols == 0
+        try:
+            warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "4"))
+        except (TypeError, ValueError):
+            warmup_workers = 4
+        self.warmup_workers = min(6, max(1, warmup_workers))
         self.refresh_seconds = max(300, int(refresh_seconds))
         self.reconnect_seconds = max(1, int(reconnect_seconds))
         self._stop = threading.Event()
@@ -74,6 +87,11 @@ class BinanceKlineStream:
                 market: sum(1 for key in self._latest_candles if key[0] == market)
                 for market in ("spot", "futures")
             }
+            snapshot["symbol_mode"] = "full_universe" if self.full_universe else "top_n"
+            snapshot["active_intervals"] = {
+                market: self._active_intervals(market)
+                for market in ("spot", "futures")
+            }
             for market in ("spot", "futures"):
                 last_event = snapshot[market].get("last_event")
                 try:
@@ -100,6 +118,14 @@ class BinanceKlineStream:
             index = self._symbol_connection.get(key)
             return index is not None and bool(
                 self._connection_live.get((key[0], index), False))
+
+    def _active_intervals(self, market):
+        # Full-universe mode streams only the fast trigger timeframe for every
+        # symbol. Higher-timeframe context is fetched only after a 5m candidate
+        # passes the V3 local prefilter, avoiding thousands of idle candle streams.
+        if self.full_universe:
+            return ["5m"]
+        return list(self.CACHE_LIMITS[market])
 
     def start(self):
         if any(thread.is_alive() for thread in self._threads.values()):
@@ -205,7 +231,11 @@ class BinanceKlineStream:
             if volume > 0 and price > 0:
                 ranked.append((volume, symbol))
         ranked.sort(reverse=True)
-        symbols = [symbol for _, symbol in ranked[:self.max_symbols]]
+        symbols = [
+            symbol for _, symbol in (
+                ranked[:self.max_symbols] if self.max_symbols > 0 else ranked
+            )
+        ]
         if not symbols:
             raise RuntimeError("Binance returned no eligible liquid symbols for " + market)
         return symbols
@@ -290,7 +320,10 @@ class BinanceKlineStream:
             return False
 
     def _snapshot(self, market, symbol):
-        required = self.REQUIRED_ROWS[market]
+        required = (
+            {"5m": self.REQUIRED_ROWS[market]["5m"]}
+            if self.full_universe else self.REQUIRED_ROWS[market]
+        )
         frames = {}
         with self._cache_lock:
             for interval, minimum in required.items():
@@ -304,7 +337,7 @@ class BinanceKlineStream:
                     "source": "binance_websocket_cache",
                 })
                 frames[interval] = copied
-            if market == "spot":
+            if market == "spot" and not self.full_universe:
                 optional_four_hour = self._cache.get((market, symbol, "4h"))
                 if self._frame_healthy(market, "4h", optional_four_hour):
                     copied = optional_four_hour.copy()
@@ -317,7 +350,8 @@ class BinanceKlineStream:
         return frames
 
     def _warm_symbol(self, market, symbol):
-        for interval, limit in self.CACHE_LIMITS[market].items():
+        for interval in self._active_intervals(market):
+            limit = self.CACHE_LIMITS[market][interval]
             if self._stop.is_set():
                 return False
             with self._cache_lock:
@@ -381,7 +415,7 @@ class BinanceKlineStream:
                 state["cache_warmup_completed"] = len(ready)
             pending = [symbol for symbol in symbols if symbol not in ready]
             if pending:
-                with ThreadPoolExecutor(max_workers=6, thread_name_prefix="candle-warm-" + market) as pool:
+                with ThreadPoolExecutor(max_workers=self.warmup_workers, thread_name_prefix="candle-warm-" + market) as pool:
                     futures = [pool.submit(self._warm_symbol, market, symbol) for symbol in pending]
                     for future in as_completed(futures):
                         try:
@@ -413,7 +447,7 @@ class BinanceKlineStream:
         while not self._stop.is_set():
             try:
                 symbols = self._load_symbols(market)
-                intervals = list(self.CACHE_LIMITS[market])
+                intervals = self._active_intervals(market)
                 stream_names = [
                     symbol.lower() + "@kline_" + interval
                     for symbol in symbols for interval in intervals

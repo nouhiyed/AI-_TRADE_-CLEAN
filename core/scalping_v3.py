@@ -77,6 +77,102 @@ class _V3Base:
             return None
 
     @classmethod
+    def prefilter_5m(cls, frame):
+        """Fast 5m-only candidate gate; it never approves or opens a trade.
+
+        It mirrors the 5m-local clauses of V3. Higher-timeframe bias, final
+        setup selection and the authoritative trade plan remain in V3.
+        """
+        if not cls.frame_is_closed_5m(frame):
+            return {"candidate": False, "setups": [], "reason": "Closed 5m cache unavailable"}
+
+        v = cls.value
+        c, o, h, low, ema9, ema20, atr, rsi = (
+            v(frame, x) for x in ("close", "open", "high", "low", "EMA_9", "EMA_20", "ATR", "RSI")
+        )
+        hist, previous_hist = v(frame, "MACD_hist"), v(frame, "MACD_hist", -2)
+        if None in (c, o, h, low, ema9, ema20, atr, rsi, hist, previous_hist) or atr <= 0:
+            return {"candidate": False, "setups": [], "reason": "5m indicators incomplete"}
+
+        shape = cls.candle_shape(frame)
+        volume_ratio = cls.volume_ratio(frame)
+        if shape is None or volume_ratio is None:
+            return {"candidate": False, "setups": [], "reason": "5m candle/volume profile unavailable"}
+
+        try:
+            prior_high = float(frame["high"].iloc[-cls.BREAKOUT_LOOKBACK-1:-1].max())
+            prior_low = float(frame["low"].iloc[-cls.BREAKOUT_LOOKBACK-1:-1].min())
+        except (TypeError, ValueError, KeyError, IndexError):
+            return {"candidate": False, "setups": [], "reason": "5m breakout range unavailable"}
+
+        body = abs(c - o) / atr
+        location = shape["close_location"]
+        lower_wick = shape["lower_wick_range"]
+        upper_wick = shape["upper_wick_range"]
+        setups = []
+
+        if cls.MARKET == "futures":
+            if (low <= ema20 + .12 * atr and c > ema9 and c > o
+                    and 45 <= rsi <= 67 and hist >= previous_hist
+                    and location >= cls.PULLBACK_CLOSE_LOCATION
+                    and body >= cls.PULLBACK_BODY_ATR
+                    and volume_ratio >= cls.PULLBACK_VOLUME
+                    and lower_wick >= .16):
+                setups.append("PULLBACK_LONG")
+            if (h >= ema20 - .12 * atr and c < ema9 and c < o
+                    and 33 <= rsi <= 55 and hist <= previous_hist
+                    and location <= 1 - cls.PULLBACK_CLOSE_LOCATION
+                    and body >= cls.PULLBACK_BODY_ATR
+                    and volume_ratio >= cls.PULLBACK_VOLUME
+                    and upper_wick >= .16):
+                setups.append("PULLBACK_SHORT")
+            if (c > prior_high + .05 * atr and c > o
+                    and 52 <= rsi <= 74
+                    and location >= cls.BREAKOUT_CLOSE_LOCATION
+                    and body >= cls.BREAKOUT_BODY_ATR
+                    and volume_ratio >= cls.BREAKOUT_VOLUME
+                    and upper_wick <= cls.BREAKOUT_MAX_OPPOSING_WICK):
+                setups.append("BREAKOUT_LONG")
+            if (c < prior_low - .05 * atr and c < o
+                    and 26 <= rsi <= 48
+                    and location <= 1 - cls.BREAKOUT_CLOSE_LOCATION
+                    and body >= cls.BREAKOUT_BODY_ATR
+                    and volume_ratio >= cls.BREAKOUT_VOLUME
+                    and lower_wick <= cls.BREAKOUT_MAX_OPPOSING_WICK):
+                setups.append("BREAKOUT_SHORT")
+            bb_low, bb_high = v(frame, "BB_lower"), v(frame, "BB_upper")
+            if (rsi <= 30 and bb_low is not None and c <= bb_low * 1.002
+                    and c > o and location >= .72 and volume_ratio >= .80
+                    and lower_wick >= cls.REJECTION_WICK_RANGE):
+                setups.append("RANGE_REJECTION_LONG")
+            if (rsi >= 70 and bb_high is not None and c >= bb_high * .998
+                    and c < o and location <= .28 and volume_ratio >= .80
+                    and upper_wick >= cls.REJECTION_WICK_RANGE):
+                setups.append("RANGE_REJECTION_SHORT")
+        elif cls.MARKET == "spot":
+            if (low <= ema20 + .14 * atr and c > ema9 and c > o
+                    and 44 <= rsi <= 68 and hist >= previous_hist
+                    and location >= .62 and body >= .10
+                    and volume_ratio >= .82 and lower_wick >= .16):
+                setups.append("PULLBACK_LONG")
+            if (c > prior_high + .05 * atr and c > o
+                    and 52 <= rsi <= 74 and location >= .75
+                    and body >= .18 and volume_ratio >= 1.05
+                    and upper_wick <= .18):
+                setups.append("BREAKOUT_LONG")
+            bb_low = v(frame, "BB_lower")
+            if (rsi <= 30 and bb_low is not None and c <= bb_low * 1.002
+                    and c > o and location >= .72 and volume_ratio >= .80
+                    and lower_wick >= cls.REJECTION_WICK_RANGE):
+                setups.append("RANGE_BOUNCE_LONG")
+
+        return {
+            "candidate": bool(setups),
+            "setups": setups,
+            "reason": "" if setups else "No 5m-local V3 trigger",
+        }
+
+    @classmethod
     def bias(cls, five, fifteen, direction):
         c5, e21_5 = cls.value(five, "close"), cls.value(five, "EMA_21")
         c15, e21_15, e50_15 = (
@@ -149,6 +245,8 @@ class _V3Base:
 
 
 class FuturesScalpingStrategyV3(_V3Base):
+    MARKET = "futures"
+
     def analyze(self, data, costs=None):
         trigger, fifteen, hourly = (data.get(x) for x in ("5m", "15m", "1h"))
         if not self.frame_is_closed_5m(trigger):
@@ -225,6 +323,8 @@ class FuturesScalpingStrategyV3(_V3Base):
 
 
 class SpotScalpingStrategyV3(_V3Base):
+    MARKET = "spot"
+
     def analyze(self, data, costs=None):
         trigger, fifteen, hourly, four = (data.get(x) for x in ("5m", "15m", "1h", "4h"))
         if not self.frame_is_closed_5m(trigger):

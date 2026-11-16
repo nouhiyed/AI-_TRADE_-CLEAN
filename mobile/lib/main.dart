@@ -757,13 +757,45 @@ class _TradeShellState extends State<TradeShell>
     final symbol = '${scan['current_symbol'] ?? ''}'.toUpperCase();
     final total = int.tryParse('${scan['universe_total'] ?? 0}') ?? 0;
     final completed = int.tryParse('${scan['scanned_in_batch'] ?? 0}') ?? 0;
-    final active = int.tryParse('${scan['active_workers'] ?? 0}') ?? 0;
     final lastRaw = scan['last_batch'];
     final lastBatch = lastRaw is Map
         ? Map<String, dynamic>.from(lastRaw)
         : <String, dynamic>{};
     final opportunities =
         int.tryParse('${lastBatch['actionable'] ?? 0}') ?? 0;
+    final auditRootRaw = scanStatus['symbol_auditors'];
+    final auditRoot = auditRootRaw is Map
+        ? Map<String, dynamic>.from(auditRootRaw)
+        : <String, dynamic>{};
+    final auditRaw = auditRoot[market];
+    final audit = auditRaw is Map
+        ? Map<String, dynamic>.from(auditRaw)
+        : <String, dynamic>{};
+    final websocketRootRaw = scanStatus['websocket'];
+    final websocketRoot = websocketRootRaw is Map
+        ? Map<String, dynamic>.from(websocketRootRaw)
+        : <String, dynamic>{};
+    final websocketMarketRaw = websocketRoot[market];
+    final websocketMarket = websocketMarketRaw is Map
+        ? Map<String, dynamic>.from(websocketMarketRaw)
+        : <String, dynamic>{};
+    final streamSymbols = int.tryParse('${websocketMarket['symbols'] ?? total}') ?? total;
+    final monitoredTotal = streamSymbols > 0 ? streamSymbols : total;
+    final tracked = int.tryParse('${audit['symbols_tracked'] ?? completed}') ?? completed;
+    final deep = int.tryParse('${audit['deep_analysis'] ?? lastBatch['deep_analysis'] ?? 0}') ?? 0;
+    final signals = int.tryParse('${audit['actionable'] ?? opportunities}') ?? opportunities;
+    final opened = int.tryParse('${audit['opened'] ?? lastBatch['opened'] ?? 0}') ?? 0;
+    final analysisRootRaw = scanStatus['analysis'];
+    final analysisRoot = analysisRootRaw is Map
+        ? Map<String, dynamic>.from(analysisRootRaw)
+        : <String, dynamic>{};
+    final poolRaw = analysisRoot[market];
+    final pool = poolRaw is Map
+        ? Map<String, dynamic>.from(poolRaw)
+        : <String, dynamic>{};
+    final poolWorkers = int.tryParse('${pool['workers'] ?? 0}') ?? 0;
+    final queueDepth = int.tryParse('${pool['queue_depth'] ?? 0}') ?? 0;
+    final queueLimit = int.tryParse('${pool['queue_limit'] ?? 0}') ?? 0;
     final scanning = !{'idle', 'error', 'waiting'}.contains(phase);
     final phaseLabel = switch (phase) {
       'loading_universe' => tr('تحميل قائمة العملات', 'Loading coin list'),
@@ -772,6 +804,7 @@ class _TradeShellState extends State<TradeShell>
       'processing_analysis' => tr('معالجة التحليل', 'Processing analysis'),
       'analyzing' => tr('تحليل العملة', 'Analyzing coin'),
       'symbol_complete' => tr('اكتمل فحص العملة', 'Coin scan complete'),
+      'websocket_5m' => tr('تدقيق كل العملات على 5 دقائق', 'Full-universe 5m audit'),
       'idle' => tr('اكتملت دورة الفحص', 'Scan cycle complete'),
       'error' => tr('خطأ في الفحص', 'Scanner error'),
       _ => tr('بانتظار بدء الفحص', 'Waiting for scanner'),
@@ -826,7 +859,11 @@ class _TradeShellState extends State<TradeShell>
           ),
           const SizedBox(height: 6),
           LinearProgressIndicator(
-            value: scanning ? null : progress,
+            value: phase == 'websocket_5m' && monitoredTotal > 0
+                ? (tracked / monitoredTotal).clamp(0.0, 1.0).toDouble()
+                : scanning
+                    ? null
+                    : progress,
             minHeight: 3,
             backgroundColor: accent.withOpacity(.12),
             valueColor: AlwaysStoppedAnimation<Color>(accent),
@@ -836,7 +873,7 @@ class _TradeShellState extends State<TradeShell>
             children: [
               Expanded(
                 child: Text(
-                  '$phaseLabel${active > 0 ? ' · $active ${tr('عمّال تحليل', 'workers')}' : ''}',
+                  phaseLabel,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: widget.muted, fontSize: 9),
@@ -852,6 +889,42 @@ class _TradeShellState extends State<TradeShell>
               ),
             ],
           ),
+          if (audit.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${tr('الفاحصون:', 'AUDITORS:')} $tracked/$monitoredTotal · ${tr('تحليل عميق:', 'DEEP:')} $deep',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: widget.muted, fontSize: 8),
+                  ),
+                ),
+                Text(
+                  '$poolWorkers ${tr('عمّال', 'workers')}',
+                  style: TextStyle(color: accent, fontSize: 8, fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${tr('الإشارات:', 'SIGNALS:')} $signals · ${tr('المفتوحة:', 'OPENED:')} $opened',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: signals > 0 ? green : widget.muted, fontSize: 8),
+                  ),
+                ),
+                Text(
+                  'Q $queueDepth/${queueLimit > 0 ? queueLimit : '—'}',
+                  style: TextStyle(color: widget.muted, fontSize: 8),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -1422,7 +1495,7 @@ class _TradeShellState extends State<TradeShell>
                 ),
                 const SizedBox(height: 3),
                 const Text(
-                  'BUILD 141',
+                  'BUILD 142',
                   style: TextStyle(
                     color: cyan,
                     fontSize: 8,

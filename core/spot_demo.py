@@ -7,7 +7,11 @@ import time
 from decimal import Decimal, ROUND_DOWN
 
 from core.learning import setup_key as make_setup_key
-from core.trailing_stop import calculate_trailing_stop, apply_cost_aware_trailing_floor
+from core.trailing_stop import (
+    calculate_trailing_stop, apply_cost_aware_trailing_floor,
+    initialize_trailing_take_profit, is_trailing_take_profit_enabled,
+    active_fixed_take_profit,
+)
 
 SPOT_LIKE = ("spot",)
 MAX_ENTRY_DEVIATION = Decimal("0.01")
@@ -285,6 +289,7 @@ class SpotDemoMixin:
                 "last_checked_ms": int(time.time() * 1000),
                 "leverage": "1",
             }
+            initialize_trailing_take_profit(record, record.get("entry_price"))
             self.demo_positions[trade_id] = record
             self._on_demo_open(record, signal, reservation)
             self._save_demo_state()
@@ -360,11 +365,12 @@ class SpotDemoMixin:
                     domain = snapshot["domain"]
                     symbol = str(snapshot["symbol"]).upper()
                     stop = Decimal(str(snapshot["stop_loss"]))
-                    trailing_enabled = bool(snapshot.get("trailing_take_profit_enabled", True))
+                    trailing_enabled = is_trailing_take_profit_enabled(snapshot)
                     trailing_active = bool(snapshot.get(
                         "trailing_take_profit_armed", snapshot.get("trailing_stop_active", False)
                     ))
-                    target = None if trailing_enabled else Decimal(str(snapshot["take_profit"]))
+                    target_value = active_fixed_take_profit(snapshot)
+                    target = Decimal(str(target_value)) if target_value is not None else None
 
                     # Quote and candle catch-up run without the global coordinator lock.
                     price = self._spot_like_price(domain, symbol, "SELL")
