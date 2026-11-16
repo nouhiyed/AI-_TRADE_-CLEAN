@@ -817,6 +817,22 @@ class Autopilot:
             result["status"] = "ERROR"
             result["error"] = str(error)
         finally:
+            if result.get("opened"):
+                self._record_symbol_audit(
+                    domain, symbol, "opened", increment="opened",
+                    trade_ids=[item.get("trade_id") for item in result["opened"]],
+                )
+            elif result.get("error"):
+                self._record_symbol_audit(
+                    domain, symbol, "execution_error", increment="errors",
+                    reason=result.get("error"),
+                )
+            elif result.get("skipped"):
+                reasons = [str(item.get("reason", "")) for item in result["skipped"]]
+                self._record_symbol_audit(
+                    domain, symbol, "entry_skipped",
+                    reason="; ".join(reason for reason in reasons if reason)[:500],
+                )
             self.last_run = int(self.clock())
             self.last_result = result
 
