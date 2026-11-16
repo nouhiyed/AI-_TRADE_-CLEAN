@@ -148,21 +148,53 @@ def _scan_domain_worker(domain):
 
 
 def continuous_scan_worker():
-    """Start isolated Futures and Spot loops; neither market waits for the other."""
+    """Publish full-universe WebSocket auditor progress without duplicate REST sweeps."""
     with scan_status_lock:
         scan_status["running"] = True
         scan_status["updated_at"] = time.time()
-    print("[SCAN] Independent Futures + Spot scanners started (analysis only)")
-    for domain in ("futures", "spot"):
-        threading.Thread(
-            target=_scan_domain_worker,
-            args=(domain,),
-            name="continuous-%s-scanner" % domain,
-            daemon=True,
-        ).start()
-    # Keep this supervisor alive; each market owns its own loop and status.
+    print("[SCAN] Full-universe per-symbol 5m auditors started")
     while True:
-        time.sleep(3600)
+        try:
+            stream = market_stream.status() if market_stream else {}
+            runtime = autopilot.status() if autopilot else {}
+            auditors = runtime.get("symbol_auditors", {})
+            pools = runtime.get("analysis_pools", {})
+            with scan_status_lock:
+                for domain in ("futures", "spot"):
+                    audit = auditors.get(domain, {}) if isinstance(auditors, dict) else {}
+                    pool = pools.get(domain, {}) if isinstance(pools, dict) else {}
+                    market_stream_status = stream.get(domain, {}) if isinstance(stream, dict) else {}
+                    total = int(market_stream_status.get("symbols", 0) or 0)
+                    tracked = int(audit.get("symbols_tracked", 0) or 0)
+                    scan_status[domain].update({
+                        "phase": "websocket_5m",
+                        "current_symbol": audit.get("last_symbol"),
+                        "scanned_in_batch": min(tracked, total) if total > 0 else tracked,
+                        "universe_total": total or None,
+                        "started_in_batch": int(audit.get("events_received", 0) or 0),
+                        "active_workers": int(pool.get("inflight", 0) or 0),
+                        "last_batch": {
+                            "success": True,
+                            "scanned": tracked,
+                            "actionable": int(audit.get("actionable", 0) or 0),
+                            "deep_analysis": int(audit.get("deep_analysis", 0) or 0),
+                            "opened": int(audit.get("opened", 0) or 0),
+                            "queue_depth": int(pool.get("queue_depth", 0) or 0),
+                            "queue_rejected": int(audit.get("queue_rejected", 0) or 0),
+                            "errors": int(audit.get("errors", 0) or 0),
+                            "completed_at": time.time(),
+                        },
+                    })
+                scan_status["last_error"] = None
+                scan_status["updated_at"] = time.time()
+        except Exception as error:
+            with scan_status_lock:
+                scan_status["last_error"] = {
+                    "domain": "observer", "reason": str(error),
+                }
+                scan_status["updated_at"] = time.time()
+            print("[SCAN] Auditor status observer error:", error)
+        time.sleep(1)
 
 
 def initialize_runtime():
@@ -580,15 +612,23 @@ class APIHandler(BaseHTTPRequestHandler):
             if path == "/status":
                 with scan_status_lock:
                     scan_snapshot = json.loads(json.dumps(scan_status))
+                stream_snapshot = market_stream.status() if market_stream else {}
+                runtime_snapshot = autopilot.status() if autopilot else {}
+                analysis_snapshot = runtime_snapshot.get("analysis_pools", {})
+                auditor_snapshot = runtime_snapshot.get("symbol_auditors", {})
+                scan_snapshot["websocket"] = stream_snapshot
+                scan_snapshot["analysis"] = analysis_snapshot
+                scan_snapshot["symbol_auditors"] = auditor_snapshot
                 return self.send_json({
                     "api_version": API_VERSION,
                     "system": coordinator.get_system_status(),
                     "controls": coordinator.get_agent_controls(),
                     "demo": coordinator.get_demo_positions(),
                     "scan": scan_snapshot,
-                    "websocket": market_stream.status() if market_stream else {},
-                    "analysis_pools": autopilot.status().get("analysis_pools", {}),
-                    "analysis_metrics": autopilot.status().get("analysis_pools", {}),
+                    "websocket": stream_snapshot,
+                    "analysis_pools": analysis_snapshot,
+                    "analysis_metrics": analysis_snapshot,
+                    "symbol_auditors": auditor_snapshot,
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
