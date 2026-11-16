@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.16.1"
+API_VERSION = "2026.11.17.1"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -558,6 +558,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "mode": coordinator.mode, "api_version": API_VERSION,
                     "components": components, "websocket": stream,
                     "analysis": runtime.get("analysis_pools", {}),
+                    "symbol_auditors": runtime.get("symbol_auditors", {}),
                 })
             if path == "/market/stream/status":
                 return self.send_json({
@@ -569,7 +570,10 @@ class APIHandler(BaseHTTPRequestHandler):
             if path == "/scan/status":
                 with scan_status_lock:
                     snapshot = json.loads(json.dumps(scan_status))
+                runtime = autopilot.status() if autopilot else {}
                 snapshot["websocket"] = market_stream.status() if market_stream else {}
+                snapshot["analysis"] = runtime.get("analysis_pools", {})
+                snapshot["symbol_auditors"] = runtime.get("symbol_auditors", {})
                 snapshot["strategy_timeframe"] = "5m"
                 snapshot["entry_timing"] = "next_5m_candle_open"
                 return self.send_json(snapshot)
