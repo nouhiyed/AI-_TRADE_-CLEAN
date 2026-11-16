@@ -278,6 +278,7 @@ class LatestEventQueueTests(unittest.TestCase):
             self.assertEqual(stats["queue_depth"], 1)
             self.assertEqual(len(autopilot._analysis_scheduled), 1)
             autopilot._event_executor.shutdown(wait=True)
+            autopilot._event_executor.shutdown(wait=True)
             for pool in autopilot._analysis_pools.values():
                 pool.shutdown(wait=True)
 
@@ -350,20 +351,17 @@ class ParallelAnalysisPoolTests(unittest.TestCase):
 
 
 class AutopilotEntryLifecycleTests(unittest.TestCase):
-    class RecordingExecutor:
-        def __init__(self):
-            self.calls = []
-
-        def submit(self, fn, *args):
-            self.calls.append((fn, args))
-            return object()
-
     def _autopilot(self, directory):
         autopilot = Autopilot(
             FakeCoordinator(), config_path=directory + "/autopilot.json"
         )
-        autopilot._event_executor.shutdown(wait=True)
-        autopilot._event_executor = self.RecordingExecutor()
+        autopilot._submitted_entries = []
+
+        def record_submit(fn, *args):
+            autopilot._submitted_entries.append((fn, args))
+            return object()
+
+        autopilot._event_executor.submit = record_submit
         return autopilot
 
     def test_exact_next_5m_open_submits_pending_entry_and_audits_it(self):
@@ -385,7 +383,7 @@ class AutopilotEntryLifecycleTests(unittest.TestCase):
 
             autopilot.on_market_kline("futures", event)
 
-            self.assertEqual(len(autopilot._event_executor.calls), 1)
+            self.assertEqual(len(autopilot._submitted_entries), 1)
             self.assertNotIn(("futures", "BTCUSDT"), autopilot._pending_entries)
             status = autopilot.status()
             self.assertEqual(
