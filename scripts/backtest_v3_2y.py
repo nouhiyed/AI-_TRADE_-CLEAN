@@ -42,7 +42,7 @@ SLIPPAGE = {"spot": 0.0005, "futures": 0.0005}
 def fetch_5m(market: str, symbol: str, start_ms: int, end_ms: int,
              refresh: bool = False) -> pd.DataFrame:
     CACHE.mkdir(parents=True, exist_ok=True)
-    path = CACHE / f"{market}_{symbol}_5m.csv"
+    path = CACHE / f"{market}_{symbol}_5m.csv.gz"
     if path.exists() and not refresh:
         frame = pd.read_csv(path)
         frame["open_time"] = pd.to_datetime(frame["open_time"], utc=True)
@@ -91,7 +91,7 @@ def fetch_5m(market: str, symbol: str, start_ms: int, end_ms: int,
     frame = frame.dropna().drop_duplicates("open_time").sort_values("open_time")
     frame = frame[(frame["open_time"].astype("int64") // 1_000_000 >= start_ms)
                   & (frame["close_time"].astype("int64") // 1_000_000 < end_ms)]
-    frame.to_csv(path, index=False)
+    frame.to_csv(path, index=False, compression="gzip")
     return frame.reset_index(drop=True)
 
 
