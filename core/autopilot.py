@@ -699,8 +699,18 @@ class Autopilot:
                 with self._event_lock:
                     current = self._pending_entries.pop(key, None)
                 if current:
-                    self._event_executor.submit(
-                        self._execute_ws_entry, domain, symbol, current, already_open)
+                    try:
+                        self._event_executor.submit(
+                            self._execute_ws_entry, domain, symbol, current, already_open)
+                        self._record_symbol_audit(
+                            domain, symbol, "entry_submitted", increment="entry_submitted",
+                            next_open_time_ms=expected_open,
+                        )
+                    except Exception as error:
+                        self._record_symbol_audit(
+                            domain, symbol, "execution_error", increment="errors",
+                            reason="Execution writer submission failed: " + str(error),
+                        )
         except Exception as error:
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["failed"] += 1
