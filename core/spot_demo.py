@@ -7,7 +7,11 @@ import time
 from decimal import Decimal, ROUND_DOWN
 
 from core.learning import setup_key as make_setup_key
-from core.trailing_stop import (\n    calculate_trailing_stop, apply_cost_aware_trailing_floor,\n    initialize_trailing_take_profit, is_trailing_take_profit_enabled,\n    active_fixed_take_profit,\n)
+from core.trailing_stop import (
+    calculate_trailing_stop, apply_cost_aware_trailing_floor,
+    initialize_trailing_take_profit, is_trailing_take_profit_enabled,
+    active_fixed_take_profit,
+)
 
 SPOT_LIKE = ("spot",)
 MAX_ENTRY_DEVIATION = Decimal("0.01")
