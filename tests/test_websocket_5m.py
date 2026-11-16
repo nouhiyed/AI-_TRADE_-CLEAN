@@ -76,11 +76,32 @@ class ClosedCandleGuardTests(unittest.TestCase):
 class BinanceCandleCacheTests(unittest.TestCase):
     def setUp(self):
         self.events = []
-        self.stream = BinanceKlineStream(FakeFeed(), lambda market, event: self.events.append((market, event)))
+        self.stream = BinanceKlineStream(
+            FakeFeed(), lambda market, event: self.events.append((market, event)),
+            max_symbols=8,
+        )
 
-    def test_mobile_stream_symbol_count_is_bounded(self):
-        stream = BinanceKlineStream(FakeFeed(), lambda _market, _event: None, max_symbols=1024)
-        self.assertEqual(stream.max_symbols, 8)
+    def test_explicit_stream_limit_is_honored_and_zero_means_all(self):
+        limited = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=8)
+        full = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0)
+        self.assertEqual(limited.max_symbols, 8)
+        self.assertFalse(limited.full_universe)
+        self.assertEqual(full.max_symbols, 0)
+        self.assertTrue(full.full_universe)
+        self.assertEqual(full._active_intervals("futures"), ["5m"])
+        self.assertEqual(full._active_intervals("spot"), ["5m"])
+
+    def test_full_universe_snapshot_requires_only_closed_5m_history(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0)
+        frame = candle_frame("5min", rows=100)
+        frame.attrs["timeframe"] = "5m"
+        stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        snapshot = stream._snapshot("futures", "BTCUSDT")
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(set(snapshot), {"5m"})
 
     def test_futures_uses_current_binance_market_websocket_endpoint(self):
         self.assertEqual(
@@ -175,6 +196,44 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertTrue(self.stream.status()["futures"]["connected"])
 
 
+class V3PrefilterTests(unittest.TestCase):
+    def _candidate_frame(self):
+        frame = candle_frame("5min", rows=60)
+        frame.attrs["timeframe"] = "5m"
+        frame["EMA_9"] = 100.0
+        frame["EMA_20"] = 100.0
+        frame["ATR"] = 1.0
+        frame["RSI"] = 55.0
+        frame["MACD_hist"] = 0.0
+        frame.iloc[-2, frame.columns.get_loc("MACD_hist")] = -0.1
+        frame["BB_lower"] = 98.0
+        frame["BB_upper"] = 102.0
+        frame.iloc[-1, frame.columns.get_loc("open")] = 100.0
+        frame.iloc[-1, frame.columns.get_loc("high")] = 101.0
+        frame.iloc[-1, frame.columns.get_loc("low")] = 99.0
+        frame.iloc[-1, frame.columns.get_loc("close")] = 101.0
+        frame.iloc[-1, frame.columns.get_loc("volume")] = 10.0
+        return frame
+
+    def test_prefilter_passes_5m_pullback_candidate_for_both_markets(self):
+        frame = self._candidate_frame()
+        futures = FuturesScalpingStrategyV3.prefilter_5m(frame)
+        from core.scalping_v3 import SpotScalpingStrategyV3
+        spot = SpotScalpingStrategyV3.prefilter_5m(frame)
+        self.assertTrue(futures["candidate"])
+        self.assertTrue(spot["candidate"])
+        self.assertIn("PULLBACK_LONG", futures["setups"])
+        self.assertIn("PULLBACK_LONG", spot["setups"])
+
+    def test_prefilter_never_passes_unclosed_or_wrong_timeframe(self):
+        frame = self._candidate_frame()
+        frame.iloc[-1, frame.columns.get_loc("is_closed")] = False
+        self.assertFalse(FuturesScalpingStrategyV3.prefilter_5m(frame)["candidate"])
+        frame.iloc[-1, frame.columns.get_loc("is_closed")] = True
+        frame.attrs["timeframe"] = "1m"
+        self.assertFalse(FuturesScalpingStrategyV3.prefilter_5m(frame)["candidate"])
+
+
 class ManualEntryQueueTests(unittest.TestCase):
     def test_stale_agent_signal_is_rejected(self):
         now = 1_800_000_000
@@ -218,6 +277,32 @@ class LatestEventQueueTests(unittest.TestCase):
             self.assertEqual(stats["superseded"], 1)
             self.assertEqual(stats["queue_depth"], 1)
             self.assertEqual(len(autopilot._analysis_scheduled), 1)
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
+
+    def test_per_symbol_queue_keeps_more_than_eight_distinct_coins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json"
+            )
+            autopilot.submit_analysis = lambda *_args: True
+            for index in range(24):
+                symbol = "COIN%02dUSDT" % index
+                candle = {
+                    "symbol": symbol, "interval": "5m",
+                    "open_time": 300000, "close_time": 599999,
+                    "is_closed": True,
+                }
+                self.assertTrue(autopilot._queue_latest_analysis(
+                    "futures", symbol, candle))
+            stats = autopilot.status()["analysis_pools"]["futures"]
+            audit = autopilot.status()["symbol_auditors"]["futures"]
+            self.assertEqual(stats["queue_depth"], 24)
+            self.assertEqual(stats["rejected"], 0)
+            self.assertEqual(audit["symbols_tracked"], 24)
+            self.assertEqual(audit["events_received"], 24)
+            self.assertEqual(audit["queue_rejected"], 0)
             autopilot._event_executor.shutdown(wait=True)
             for pool in autopilot._analysis_pools.values():
                 pool.shutdown(wait=True)
