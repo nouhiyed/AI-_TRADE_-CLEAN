@@ -174,7 +174,8 @@ class Autopilot:
                 self._analysis_agents_created[domain] += 1
         return current
 
-    def _record_symbol_audit(self, domain, symbol, state, increment=None, **details):
+    def _record_symbol_audit(self, domain, symbol, state, increment=None,
+                             also_increment=None, **details):
         domain = str(domain).strip().lower()
         symbol = str(symbol).strip().upper()
         if domain not in self._symbol_audits or not symbol:
@@ -186,13 +187,11 @@ class Autopilot:
             record.update(details)
             record["state"] = str(state)
             record["updated_at_ms"] = int(time.time() * 1000)
-            record["events"] = int(record.get("events", 0)) + (
-                1 if increment == "events_received" else 0
-            )
-            if increment:
-                self._symbol_audit_totals[domain][increment] = (
-                    self._symbol_audit_totals[domain].get(increment, 0) + 1
-                )
+            if increment == "events_received":
+                record["events"] = int(record.get("events", 0)) + 1
+            for counter in (increment, also_increment):
+                if counter and counter in self._symbol_audit_totals[domain]:
+                    self._symbol_audit_totals[domain][counter] += 1
 
     def symbol_auditor_status(self):
         """Compact per-market counts; detailed per-symbol state stays internal."""
@@ -553,7 +552,7 @@ class Autopilot:
                     self._analysis_stats[domain]["deep_analysis"] += 1
                 self._record_symbol_audit(
                     domain, symbol, "deep_analysis",
-                    increment="prefilter_passed",
+                    increment="prefilter_passed", also_increment="deep_analysis",
                     candidate_setups=prefilter_info.get("setups", []),
                 )
                 analysis = self.c.analyze_live(
