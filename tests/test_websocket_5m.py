@@ -82,6 +82,12 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stream = BinanceKlineStream(FakeFeed(), lambda _market, _event: None, max_symbols=1024)
         self.assertEqual(stream.max_symbols, 8)
 
+    def test_futures_uses_current_binance_market_websocket_endpoint(self):
+        self.assertEqual(
+            BinanceKlineStream.BASE_URLS["futures"],
+            "wss://fstream.binance.com/market/stream",
+        )
+
     def test_snapshot_requires_all_closed_context_frames(self):
         for interval in ("5m", "15m", "1h"):
             frame = candle_frame("5min" if interval == "5m" else "15min" if interval == "15m" else "1h")
