@@ -586,6 +586,12 @@ class APIHandler(BaseHTTPRequestHandler):
                 components["analysis_spot"] = bool(
                     runtime.get("analysis_pools", {}).get("spot", {}).get("workers", 0)
                 )
+                components["scanner_futures"] = bool(
+                    scanner_threads.get("futures") and scanner_threads["futures"].is_alive()
+                )
+                components["scanner_spot"] = bool(
+                    scanner_threads.get("spot") and scanner_threads["spot"].is_alive()
+                )
                 return self.send_json({
                     "ok": True, "healthy": all(components.values()),
                     "mode": coordinator.mode, "api_version": API_VERSION,
