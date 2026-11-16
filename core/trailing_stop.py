@@ -6,6 +6,29 @@ the risk on an already-open position.
 from math import isfinite
 
 
+def initialize_trailing_take_profit(record, entry_price):
+    """Apply the shared no-fixed-target trailing policy to a new position."""
+    record["take_profit_mode"] = "TRAILING"
+    record["trailing_take_profit_enabled"] = True
+    record["trailing_no_fixed_target"] = True
+    record["trailing_take_profit_armed"] = False
+    record["trailing_stop_active"] = False
+    record["trailing_best_price"] = str(entry_price)
+    return record
+
+
+def is_trailing_take_profit_enabled(record):
+    """Legacy positions default to trailing mode; never silently restore a fixed TP."""
+    return bool((record or {}).get("trailing_take_profit_enabled", True))
+
+
+def active_fixed_take_profit(record, fallback_key="take_profit"):
+    """Return a fixed target only when the position explicitly disables trailing."""
+    if is_trailing_take_profit_enabled(record):
+        return None
+    return (record or {}).get(fallback_key)
+
+
 def calculate_trailing_stop(frame, direction, previous_stop, best_price,
                             current_price, atr_period=14,
                             atr_multiple=1.5, swing_lookback=5):
