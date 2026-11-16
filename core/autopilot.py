@@ -203,8 +203,16 @@ class Autopilot:
                 for record in records.values():
                     state = str(record.get("state", "unknown"))
                     states[state] = states.get(state, 0) + 1
+                latest = max(
+                    records.values(),
+                    key=lambda item: int(item.get("updated_at_ms") or 0),
+                    default={},
+                )
                 result[domain] = {
                     "symbols_tracked": len(records),
+                    "last_symbol": latest.get("symbol"),
+                    "last_state": latest.get("state"),
+                    "last_updated_at_ms": latest.get("updated_at_ms"),
                     "states": states,
                     **dict(self._symbol_audit_totals[domain]),
                 }
