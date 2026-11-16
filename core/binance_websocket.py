@@ -197,7 +197,8 @@ class BinanceKlineStream:
             symbol = str(item.get("symbol", "")).upper()
             if symbol not in eligible:
                 continue
-            try:                volume = float(item.get("quoteVolume", 0) or 0)
+            try:
+                volume = float(item.get("quoteVolume", 0) or 0)
                 price = float(item.get("lastPrice", 0) or 0)
             except (TypeError, ValueError):
                 continue
@@ -396,7 +397,8 @@ class BinanceKlineStream:
 
     def _recompute_connection_status(self, market):
         live = sum(1 for key, value in self._connection_live.items()
-                   if key[0] == market and value)        total = int(self._status[market]["total_chunks"])
+                   if key[0] == market and value)
+        total = int(self._status[market]["total_chunks"])
         self._status[market]["connected_chunks"] = live
         self._status[market]["connected"] = live > 0
         self._status[market]["fully_connected"] = total > 0 and live == total
