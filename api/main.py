@@ -807,11 +807,14 @@ if __name__ == "__main__":
     )
     monitor_thread.start()
     market_stream.start()
-    with scan_status_lock:
-        scan_status["running"] = True
-        scan_status["futures"]["phase"] = "websocket_5m"
-        scan_status["spot"]["phase"] = "websocket_5m"
-        scan_status["updated_at"] = time.time()
+    # Start real independent full-universe analysis loops for Futures and Spot.
+    # These scanners only analyze and report opportunities; they never execute trades.
+    scanner_thread = threading.Thread(
+        target=continuous_scan_worker,
+        name="continuous-market-scanners",
+        daemon=True,
+    )
+    scanner_thread.start()
     print("[SYSTEM] V3 entry signals are driven by closed 5m WebSocket candles")
 
     try:
