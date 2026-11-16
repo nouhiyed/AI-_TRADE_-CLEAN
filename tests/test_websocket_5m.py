@@ -348,9 +348,6 @@ class ParallelAnalysisPoolTests(unittest.TestCase):
                 pool.shutdown(wait=True)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class AutopilotEntryLifecycleTests(unittest.TestCase):
     class RecordingExecutor:
@@ -429,3 +426,7 @@ class AutopilotEntryLifecycleTests(unittest.TestCase):
             self.assertEqual(status["symbol_auditors"]["spot"]["entry_expired"], 1)
             for pool in autopilot._analysis_pools.values():
                 pool.shutdown(wait=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
