@@ -225,6 +225,30 @@ jobs:
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           archive: false
           if-no-files-found: error
+  publish-apk-release:
+    if: github.event_name == 'push' && needs.build.result == 'success'
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built APK
+        uses: actions/download-artifact@v4
+        with:
+          name: AI-Trade-Build-143.apk
+          path: release
+      - name: Publish APK as a GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-143
+          name: AI Trade Build 143
+          draft: false
+          prerelease: false
+          make_latest: false
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: release/app-release.apk
+
   publish-result:
     if: always()
     needs: [build]
@@ -243,7 +267,7 @@ jobs:
               owner, repo, run_id: context.runId
             });
             const apk = artifacts.data.artifacts.find(
-              item => item.name === 'AI-Trade-APK' && !item.expired
+              item => item.name === 'AI-Trade-Build-143.apk' && !item.expired
             );
             const build = '${{ needs.build.result }}';
             const success = build === 'success' && Boolean(apk);
