@@ -820,7 +820,6 @@ class _TradeShellState extends State<TradeShell>
                   color: accent,
                   fontSize: 9,
                   fontWeight: FontWeight.bold,
-                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
             ],
