@@ -327,7 +327,8 @@ def replay_symbol(market: str, symbol: str, raw: pd.DataFrame) -> tuple[list, di
         next_row = five.iloc[i + 1]
         raw_entry = float(next_row.open)
         entry = raw_entry * (1 + SLIPPAGE[market]) if direction == "LONG" else raw_entry * (1 - SLIPPAGE[market])
-        if not entry_is_valid(plan, direction, market, entry):
+        # DEMO validates the raw next-candle open before the execution engine applies slippage.
+        if not entry_is_valid(plan, direction, market, raw_entry):
             continue
         initial_stop = float(plan["stop_loss"])
         initial_risk = abs(entry - initial_stop)
