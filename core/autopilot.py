@@ -51,6 +51,7 @@ class Autopilot:
         self._event_seen = set()
         self._pending_entries = {}
         self._latest_open = {}
+        self._last_execution_result = {}
         # One logical audit record per symbol; work itself is dispatched to a
         # bounded pool so hundreds of symbols never create hundreds of threads.
         self._symbol_audits = {"futures": {}, "spot": {}}
@@ -60,6 +61,8 @@ class Autopilot:
                 "prefilter_rejected": 0, "deep_analysis": 0,
                 "actionable": 0, "opened": 0, "errors": 0,
                 "stale": 0, "queue_rejected": 0,
+                "entry_queued": 0, "entry_submitted": 0,
+                "entry_skipped": 0, "entry_expired": 0,
             }
             for domain in ("futures", "spot")
         }
@@ -153,8 +156,29 @@ class Autopilot:
                      and (not writer_threads or any(thread.is_alive()
                                                     for thread in writer_threads)),
         }
+        with self._event_lock:
+            pending_entries = [
+                {"domain": domain, "symbol": symbol,
+                 "next_open_time_ms": int(item.get("next_open_time") or 0),
+                 "age_seconds": max(0, round(self.clock() - float(item.get("created_at") or self.clock()), 1)),
+                 "manual": bool(item.get("manual")),
+                 "direction": (item.get("signal") or {}).get("direction")}
+                for (domain, symbol), item in self._pending_entries.items()
+            ]
+            recent_entry_audits = []
+            for domain in ("futures", "spot"):
+                for record in self._symbol_audits[domain].values():
+                    if record.get("state") in ("entry_queued", "entry_submitted",
+                                               "entry_skipped", "entry_expired",
+                                               "execution_error", "opened"):
+                        recent_entry_audits.append({"domain": domain, **dict(record)})
+            recent_entry_audits.sort(
+                key=lambda item: int(item.get("updated_at_ms") or 0), reverse=True)
         return {"config": dict(self.config), "last_run": self.last_run,
                 "last_result": self.last_result,
+                "last_execution_result": dict(self._last_execution_result),
+                "pending_entries": pending_entries,
+                "recent_entry_audits": recent_entry_audits[:30],
                 "analysis_pools": analysis,
                 "symbol_auditors": self.symbol_auditor_status(),
                 "cooldowns": {k: int(v - self.clock())
@@ -402,16 +426,34 @@ class Autopilot:
         key = (domain, symbol)
         if event.get("first_update") and not event.get("is_closed"):
             pending = None
+            expired = None
             with self._event_lock:
                 self._latest_open[key] = dict(event)
                 candidate = self._pending_entries.get(key)
                 if candidate and int(candidate.get("next_open_time", 0)) == open_time:
                     pending = self._pending_entries.pop(key, None)
                 elif candidate and open_time > int(candidate.get("next_open_time", 0)):
-                    self._pending_entries.pop(key, None)
+                    expired = self._pending_entries.pop(key, None)
+            if expired:
+                expected = int(expired.get("next_open_time") or 0)
+                self._record_symbol_audit(
+                    domain, symbol, "entry_expired", increment="entry_expired",
+                    reason="The exact next 5m opening event was missed; stale entry was discarded safely",
+                    expected_open_time_ms=expected, observed_open_time_ms=open_time,
+                )
             if pending:
-                self._event_executor.submit(self._execute_ws_entry, domain, symbol,
-                                            pending, dict(event))
+                try:
+                    self._event_executor.submit(self._execute_ws_entry, domain, symbol,
+                                                pending, dict(event))
+                    self._record_symbol_audit(
+                        domain, symbol, "entry_submitted", increment="entry_submitted",
+                        next_open_time_ms=open_time,
+                    )
+                except Exception as error:
+                    self._record_symbol_audit(
+                        domain, symbol, "execution_error", increment="errors",
+                        reason="Execution writer submission failed: " + str(error),
+                    )
         if event.get("is_closed"):
             identity = (domain, symbol, open_time)
             with self._event_lock:
@@ -647,7 +689,7 @@ class Autopilot:
                 self._pending_entries[key] = pending
                 already_open = self._latest_open.get(key)
             self._record_symbol_audit(
-                domain, symbol, "entry_queued",
+                domain, symbol, "entry_queued", increment="entry_queued",
                 next_open_time_ms=expected_open,
             )
             # If the next-candle event arrived during REST context analysis,
@@ -657,8 +699,18 @@ class Autopilot:
                 with self._event_lock:
                     current = self._pending_entries.pop(key, None)
                 if current:
-                    self._event_executor.submit(
-                        self._execute_ws_entry, domain, symbol, current, already_open)
+                    try:
+                        self._event_executor.submit(
+                            self._execute_ws_entry, domain, symbol, current, already_open)
+                        self._record_symbol_audit(
+                            domain, symbol, "entry_submitted", increment="entry_submitted",
+                            next_open_time_ms=expected_open,
+                        )
+                    except Exception as error:
+                        self._record_symbol_audit(
+                            domain, symbol, "execution_error", increment="errors",
+                            reason="Execution writer submission failed: " + str(error),
+                        )
         except Exception as error:
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["failed"] += 1
@@ -837,11 +889,18 @@ class Autopilot:
             elif result.get("skipped"):
                 reasons = [str(item.get("reason", "")) for item in result["skipped"]]
                 self._record_symbol_audit(
-                    domain, symbol, "entry_skipped",
+                    domain, symbol, "entry_skipped", increment="entry_skipped",
                     reason="; ".join(reason for reason in reasons if reason)[:500],
                 )
             self.last_run = int(self.clock())
             self.last_result = result
+            self._last_execution_result = {
+                "timestamp": self.last_run, "domain": domain, "symbol": symbol,
+                "status": result.get("status"), "phase": result.get("phase"),
+                "opened": list(result.get("opened") or []),
+                "skipped": list(result.get("skipped") or []),
+                "error": result.get("error"),
+            }
 
     def run_forever(self, stop_event=None):
         print("[AUTOPILOT] worker started")
