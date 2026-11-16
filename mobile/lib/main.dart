@@ -428,6 +428,7 @@ class _TradeShellState extends State<TradeShell>
   String _apiVersion = '';
   Map<String, dynamic> demoData = {};
   Map<String, dynamic> agentControls = {};
+  Map<String, dynamic> scanStatus = {};
   final Set<String> closingPositionIds = {};
   final TextEditingController _telegramTokenController = TextEditingController();
   final TextEditingController _telegramChatController = TextEditingController();
@@ -747,6 +748,116 @@ class _TradeShellState extends State<TradeShell>
     await _loadMarketCandles(market);
   }
 
+  Widget _scanActivityRow(String market, Color accent) {
+    final raw = scanStatus[market];
+    final scan = raw is Map
+        ? Map<String, dynamic>.from(raw)
+        : <String, dynamic>{};
+    final phase = '${scan['phase'] ?? 'waiting'}'.toLowerCase();
+    final symbol = '${scan['current_symbol'] ?? ''}'.toUpperCase();
+    final total = int.tryParse('${scan['universe_total'] ?? 0}') ?? 0;
+    final completed = int.tryParse('${scan['scanned_in_batch'] ?? 0}') ?? 0;
+    final active = int.tryParse('${scan['active_workers'] ?? 0}') ?? 0;
+    final lastRaw = scan['last_batch'];
+    final lastBatch = lastRaw is Map
+        ? Map<String, dynamic>.from(lastRaw)
+        : <String, dynamic>{};
+    final opportunities =
+        int.tryParse('${lastBatch['actionable'] ?? 0}') ?? 0;
+    final scanning = !{'idle', 'error', 'waiting'}.contains(phase);
+    final phaseLabel = switch (phase) {
+      'loading_universe' => tr('تحميل قائمة العملات', 'Loading coin list'),
+      'universe_loaded' => tr('تم تحميل السوق', 'Market loaded'),
+      'fetching_market_data' => tr('جلب بيانات العملة', 'Fetching coin data'),
+      'processing_analysis' => tr('معالجة التحليل', 'Processing analysis'),
+      'analyzing' => tr('تحليل العملة', 'Analyzing coin'),
+      'symbol_complete' => tr('اكتمل فحص العملة', 'Coin scan complete'),
+      'idle' => tr('اكتملت دورة الفحص', 'Scan cycle complete'),
+      'error' => tr('خطأ في الفحص', 'Scanner error'),
+      _ => tr('بانتظار بدء الفحص', 'Waiting for scanner'),
+    };
+    final shownSymbol = symbol.contains('USDT')
+        ? symbol
+        : tr('بانتظار العملة', 'Waiting for symbol');
+    final progress = total > 0
+        ? (completed / total).clamp(0.0, 1.0).toDouble()
+        : 0.0;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 9),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: accent.withOpacity(.07),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: accent.withOpacity(.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                scanning ? Icons.radar : Icons.check_circle_outline,
+                color: phase == 'error' ? red : accent,
+                size: 15,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '${tr('العملة:', 'SYMBOL:')} $shownSymbol',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: widget.text,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              Text(
+                total > 0 ? '$completed/$total' : '—',
+                style: TextStyle(
+                  color: accent,
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          LinearProgressIndicator(
+            value: scanning ? null : progress,
+            minHeight: 3,
+            backgroundColor: accent.withOpacity(.12),
+            valueColor: AlwaysStoppedAnimation<Color>(accent),
+          ),
+          const SizedBox(height: 5),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '$phaseLabel${active > 0 ? ' · $active ${tr('عمّال تحليل', 'workers')}' : ''}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: widget.muted, fontSize: 9),
+                ),
+              ),
+              Text(
+                '${tr('الفرص:', 'OPPORTUNITIES:')} $opportunities',
+                style: TextStyle(
+                  color: opportunities > 0 ? green : widget.muted,
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _marketPanel(String market, String title, Color accent) {
     final raw = demoData['open_positions'];
     final openPositions = raw is List
@@ -790,6 +901,8 @@ class _TradeShellState extends State<TradeShell>
             )),
           ]),
           const SizedBox(height: 7),
+          _scanActivityRow(market, accent),
+          const SizedBox(height: 2),
           Row(children: [
             CoinLogo(
               symbol: _selectedSymbols[market]?.isNotEmpty == true
@@ -942,6 +1055,10 @@ class _TradeShellState extends State<TradeShell>
     demoData['closed_positions'] = closedPositions;
     agentControls = controls is Map
         ? Map<String, dynamic>.from(controls)
+        : <String, dynamic>{};
+    final scan = data['scan'];
+    scanStatus = scan is Map
+        ? Map<String, dynamic>.from(scan)
         : <String, dynamic>{};
   }
 
