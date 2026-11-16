@@ -324,7 +324,7 @@ class _ClosedTradeDetailScreenState extends State<ClosedTradeDetailScreen> {
                   const SizedBox(height: 8),
                   Row(children: [
                     _metric('LEVERAGE', trade['leverage'] == null ? '—' : '${trade['leverage']}x', const Color(0xFF4287F5)),
-                    _metric('EXIT TYPE', trade['close_reason'] ?? 'CLOSED', widget.muted),
+                    const Spacer(),
                     const Spacer(),
                   ]),
                   const SizedBox(height: 8),
