@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.17.2"
+API_VERSION = "2026.11.17.3"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -27,6 +27,7 @@ coordinator = None
 autopilot = None
 market_stream = None
 monitor_thread = None
+scanner_threads = {}
 
 # Continuous market scanning is analysis-only. It never invokes the execution
 # engine or Autopilot. Every pass analyzes the complete eligible Binance universe.
@@ -851,15 +852,23 @@ if __name__ == "__main__":
     )
     monitor_thread.start()
     market_stream.start()
-    # Start real independent full-universe analysis loops for Futures and Spot.
-    # These scanners only analyze and report opportunities; they never execute trades.
-    scanner_thread = threading.Thread(
-        target=continuous_scan_worker,
-        name="continuous-market-scanners",
-        daemon=True,
-    )
-    scanner_thread.start()
-    print("[SYSTEM] V3 entry signals are driven by closed 5m WebSocket candles")
+    # Start independent analysis-only full-universe scanners for both markets.
+    # The 5m WebSocket event clock remains the sole authority for trade entries.
+    # Do not use continuous_scan_worker here: it only observes auditor counts and
+    # would overwrite the real REST scanner progress shown in the app.
+    with scan_status_lock:
+        scan_status["running"] = True
+        scan_status["updated_at"] = time.time()
+    for domain in ("futures", "spot"):
+        thread = threading.Thread(
+            target=_scan_domain_worker,
+            args=(domain,),
+            name="continuous-scan-" + domain,
+            daemon=True,
+        )
+        scanner_threads[domain] = thread
+        thread.start()
+    print("[SYSTEM] Independent Futures/Spot scans active; V3 entries remain 5m WebSocket-driven")
 
     try:
         server.serve_forever()
