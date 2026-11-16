@@ -392,6 +392,7 @@ class AutopilotEntryLifecycleTests(unittest.TestCase):
             self.assertEqual(
                 status["recent_entry_audits"][0]["state"], "entry_submitted"
             )
+            autopilot._event_executor.shutdown(wait=True)
             for pool in autopilot._analysis_pools.values():
                 pool.shutdown(wait=True)
 
@@ -415,13 +416,14 @@ class AutopilotEntryLifecycleTests(unittest.TestCase):
             autopilot.on_market_kline("spot", event)
 
             self.assertNotIn(("spot", "ETHUSDT"), autopilot._pending_entries)
-            self.assertEqual(len(autopilot._event_executor.calls), 0)
+            self.assertEqual(len(autopilot._submitted_entries), 0)
             status = autopilot.status()
             audit = status["recent_entry_audits"][0]
             self.assertEqual(audit["state"], "entry_expired")
             self.assertEqual(audit["expected_open_time_ms"], expected_open)
             self.assertEqual(audit["observed_open_time_ms"], observed_open)
             self.assertEqual(status["symbol_auditors"]["spot"]["entry_expired"], 1)
+            autopilot._event_executor.shutdown(wait=True)
             for pool in autopilot._analysis_pools.values():
                 pool.shutdown(wait=True)
 
