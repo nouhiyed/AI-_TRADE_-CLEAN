@@ -23,7 +23,7 @@ from core.learning import LearningEngine, setup_key as make_setup_key
 from core.notifier import Notifier
 from core.chart_image import render_trade_chart
 from core.spot_demo import SpotDemoMixin
-from core.trailing_stop import calculate_trailing_stop, apply_cost_aware_trailing_floor
+from core.trailing_stop import (\n    calculate_trailing_stop, apply_cost_aware_trailing_floor,\n    initialize_trailing_take_profit, is_trailing_take_profit_enabled,\n    active_fixed_take_profit,\n)
 
 
 class TradingCoordinator(SpotDemoMixin):
@@ -481,12 +481,7 @@ class TradingCoordinator(SpotDemoMixin):
             )
             record["timeframe"] = str(timeframe).lower()
             record["initial_stop_loss"] = record.get("stop_loss")
-            record["take_profit_mode"] = "TRAILING"
-            record["trailing_take_profit_enabled"] = True
-            record["trailing_no_fixed_target"] = True
-            record["trailing_take_profit_armed"] = False
-            record["trailing_stop_active"] = False
-            record["trailing_best_price"] = record.get("entry_price")
+            initialize_trailing_take_profit(record, record.get("entry_price"))
             context = {
                 "confidence": signal.get("confidence"),
                 "scores": signal.get("scores"),
@@ -746,14 +741,17 @@ class TradingCoordinator(SpotDemoMixin):
                 direction = str(record["direction"]).upper()
                 stop = Decimal(str(record["stop_loss"]))
                 tp1_done = bool(record.get("tp1_done"))
-                trailing_enabled = bool(record.get("trailing_take_profit_enabled", True))
+                trailing_enabled = is_trailing_take_profit_enabled(record)
                 trailing_armed = bool(record.get(
                     "trailing_take_profit_armed", record.get("trailing_stop_active", False)
                 ))
-                target = None if trailing_enabled else Decimal(str(
-                    record.get("take_profit_2") if tp1_done and record.get("take_profit_2")
-                    else record["take_profit"]
-                ))
+                target_key = (
+                    "take_profit_2"
+                    if tp1_done and record.get("take_profit_2") is not None
+                    else "take_profit"
+                )
+                target_value = active_fixed_take_profit(record, target_key)
+                target = Decimal(str(target_value)) if target_value is not None else None
                 engine_position_id = record["engine_position_id"]
                 snapshot = dict(record)
 
