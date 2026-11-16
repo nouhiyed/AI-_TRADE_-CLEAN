@@ -1420,6 +1420,16 @@ class _TradeShellState extends State<TradeShell>
                   tr('مركز القيادة الذكي', 'INTELLIGENT COMMAND'),
                   style: TextStyle(color: widget.muted, fontSize: 9),
                 ),
+                const SizedBox(height: 3),
+                const Text(
+                  'BUILD 141',
+                  style: TextStyle(
+                    color: cyan,
+                    fontSize: 8,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.2,
+                  ),
+                ),
               ],
             ),
             const Spacer(),
