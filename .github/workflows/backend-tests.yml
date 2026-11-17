@@ -5,6 +5,7 @@ on:
     paths:
       - 'core/**'
       - 'agents/**'
+      - 'api/**'
       - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/backend-tests.yml'

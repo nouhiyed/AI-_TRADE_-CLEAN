@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.17.2"
+API_VERSION = "2026.11.17.3"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -28,8 +28,8 @@ autopilot = None
 market_stream = None
 monitor_thread = None
 
-# Continuous market scanning is analysis-only. It never invokes the execution
-# engine or Autopilot. Every pass analyzes the complete eligible Binance universe.
+# Full-universe analysis is driven by closed 5m WebSocket events plus
+# cache reconciliation. The observer below only publishes scan/coverage metrics.
 scan_status = {
     "running": False,
     "futures": {
@@ -38,6 +38,7 @@ scan_status = {
         "scanned_in_batch": 0, "universe_total": None,
         "started_in_batch": 0, "active_workers": 0,
         "batch_started_at": None,
+        "coverage": {},
     },
     "spot": {
         "last_batch": None, "batches": 0, "cycles_completed": 0,
@@ -45,6 +46,7 @@ scan_status = {
         "scanned_in_batch": 0, "universe_total": None,
         "started_in_batch": 0, "active_workers": 0,
         "batch_started_at": None,
+        "coverage": {},
     },
     "last_error": None,
     "updated_at": None,
@@ -145,6 +147,141 @@ def _scan_domain_worker(domain):
                 scan_status["updated_at"] = time.time()
             print("[SCAN] %s scanner error: %s" % (domain.upper(), error))
         time.sleep(max(1.0, float(os.environ.get("SCAN_BATCH_PAUSE_SECONDS", "2"))))
+
+
+def full_universe_reconcile_worker():
+    """Audit the exact closed 5m candle for every registered symbol from cache.
+
+    WebSocket close events remain the primary trigger. This worker is a
+    cache-only reconciliation path for missed per-symbol notifications; it
+    never performs a second REST market sweep and never bypasses the V3 gate.
+    """
+    cycle_states = {}
+    print("[SCAN] Full-universe 5m cache reconciliation started")
+    while True:
+        try:
+            now_ms = int(time.time() * 1000)
+            expected_open_time_ms = ((now_ms // 300000) - 1) * 300000
+            for domain in ("futures", "spot"):
+                symbols = set(market_stream.registered_symbols(domain))
+                if not symbols:
+                    continue
+
+                state = cycle_states.get(domain)
+                if state is None or state["open_time_ms"] != expected_open_time_ms:
+                    if state and not state.get("complete"):
+                        print(
+                            "[SCAN] %s previous 5m cycle incomplete: %s/%s analyzed"
+                            % (domain.upper(), len(state.get("completed", set())),
+                               len(state.get("symbols", set())))
+                        )
+                    state = {
+                        "open_time_ms": expected_open_time_ms,
+                        "symbols": set(symbols),
+                        "pending": set(symbols),
+                        "accepted": set(),
+                        "completed": set(),
+                        "missing_cache": set(),
+                        "queue_rejected": set(),
+                        "analysis_errors": 0,
+                        "complete": False,
+                        "started_at": time.time(),
+                    }
+                    cycle_states[domain] = state
+                elif symbols != state["symbols"]:
+                    added = symbols - state["symbols"]
+                    removed = state["symbols"] - symbols
+                    state["symbols"] = set(symbols)
+                    state["pending"].update(added)
+                    state["pending"].difference_update(removed)
+                    state["accepted"].difference_update(removed)
+                    state["completed"].difference_update(removed)
+                    state["missing_cache"].difference_update(removed)
+                    state["queue_rejected"].difference_update(removed)
+
+                # If a cache-ready callback could not enqueue an event, it
+                # removes that candle's dedupe marker. Re-queue it for retry.
+                completed_before = set(autopilot.completed_symbols_for_cycle(
+                    domain, expected_open_time_ms, sorted(state["symbols"])
+                ).get("completed", []))
+                state["completed"].update(completed_before)
+                for symbol in list(state["accepted"] - state["completed"]):
+                    if not autopilot.has_seen_candle(
+                        domain, symbol, expected_open_time_ms
+                    ):
+                        state["accepted"].discard(symbol)
+                        state["pending"].add(symbol)
+
+                pending = sorted(state["pending"])
+                if pending:
+                    batch = market_stream.latest_closed_events(
+                        domain, expected_open_time_ms, symbols=pending
+                    )
+                    state["missing_cache"] = set(batch.get("missing_symbols", []))
+                    for event in batch.get("events", []):
+                        symbol = str(event.get("symbol", "")).upper()
+                        if not symbol:
+                            continue
+                        if autopilot.has_seen_candle(
+                            domain, symbol, expected_open_time_ms
+                        ):
+                            state["accepted"].add(symbol)
+                            state["pending"].discard(symbol)
+                            state["queue_rejected"].discard(symbol)
+                            continue
+                        accepted = autopilot.on_market_kline(domain, event)
+                        if accepted or autopilot.has_seen_candle(
+                            domain, symbol, expected_open_time_ms
+                        ):
+                            state["accepted"].add(symbol)
+                            state["pending"].discard(symbol)
+                            state["queue_rejected"].discard(symbol)
+                        else:
+                            state["queue_rejected"].add(symbol)
+
+                audit = autopilot.completed_symbols_for_cycle(
+                    domain, expected_open_time_ms, sorted(state["symbols"])
+                )
+                state["completed"] = set(audit.get("completed", []))
+                state["analysis_errors"] = len(audit.get("errors", []))
+                state["accepted"].update(state["completed"])
+                state["complete"] = bool(state["symbols"]) and (
+                    state["completed"] == state["symbols"]
+                    and not state["pending"]
+                    and not state["queue_rejected"]
+                    and state["analysis_errors"] == 0
+                )
+                pending_analysis = (
+                    state["symbols"] - state["completed"] - state["pending"]
+                )
+                coverage = {
+                    "cycle_open_time_ms": expected_open_time_ms,
+                    "expected_symbols": len(state["symbols"]),
+                    "accepted_symbols": len(state["accepted"]),
+                    "completed_symbols": len(state["completed"]),
+                    "pending_cache_symbols": len(state["missing_cache"]),
+                    "pending_analysis_symbols": len(pending_analysis),
+                    "queue_rejected_symbols": len(state["queue_rejected"]),
+                    "analysis_errors": state["analysis_errors"],
+                    "complete": state["complete"],
+                    "updated_at": time.time(),
+                }
+                with scan_status_lock:
+                    scan_status[domain]["coverage"] = coverage
+                    scan_status[domain]["universe_total"] = len(state["symbols"])
+                    scan_status[domain]["scanned_in_batch"] = len(state["completed"])
+                    scan_status[domain]["phase"] = (
+                        "cycle_complete" if state["complete"] else "websocket_5m_reconcile"
+                    )
+                    scan_status["updated_at"] = coverage["updated_at"]
+        except Exception as error:
+            with scan_status_lock:
+                scan_status["last_error"] = {
+                    "domain": "reconciliation", "reason": str(error),
+                }
+                scan_status["updated_at"] = time.time()
+            print("[SCAN] Full-universe reconciliation error:", error)
+        time.sleep(10)
 
 
 def continuous_scan_worker():
@@ -578,6 +715,22 @@ class APIHandler(BaseHTTPRequestHandler):
             if path == "/health":
                 stream = market_stream.status() if market_stream else {}
                 runtime = autopilot.status() if autopilot else {}
+                with scan_status_lock:
+                    coverage = {
+                        domain: dict(scan_status[domain].get("coverage") or {})
+                        for domain in ("futures", "spot")
+                    }
+                expected_cycle = ((int(time.time() * 1000) // 300000) - 1) * 300000
+                coverage_healthy = all(
+                    bool(coverage[domain].get("complete"))
+                    and int(coverage[domain].get("cycle_open_time_ms") or 0) == expected_cycle
+                    and int(coverage[domain].get("expected_symbols") or 0)
+                        == int((stream.get(domain) or {}).get("symbols") or 0)
+                    and int(coverage[domain].get("completed_symbols") or 0)
+                        == int(coverage[domain].get("expected_symbols") or 0)
+                    and time.time() - float(coverage[domain].get("updated_at") or 0) <= 30
+                    for domain in ("futures", "spot")
+                )
                 components = {
                     "api": True,
                     "spot_stream": bool((stream.get("spot") or {}).get("watchdog_healthy")),
@@ -595,10 +748,12 @@ class APIHandler(BaseHTTPRequestHandler):
                 components["analysis_spot"] = bool(
                     runtime.get("analysis_pools", {}).get("spot", {}).get("workers", 0)
                 )
+                components["full_universe_coverage"] = coverage_healthy
                 return self.send_json({
                     "ok": True, "healthy": all(components.values()),
                     "mode": coordinator.mode, "api_version": API_VERSION,
-                    "components": components, "websocket": stream,
+                    "components": components, "coverage": coverage,
+                    "websocket": stream,
                     "analysis": runtime.get("analysis_pools", {}),
                     "symbol_auditors": runtime.get("symbol_auditors", {}),
                 })
@@ -861,8 +1016,15 @@ if __name__ == "__main__":
     )
     monitor_thread.start()
     market_stream.start()
-    # Start real independent full-universe analysis loops for Futures and Spot.
-    # These scanners only analyze and report opportunities; they never execute trades.
+    # Reconcile every eligible pair against the exact closed 5m cache candle.
+    # This complements WebSocket close callbacks without issuing duplicate REST sweeps.
+    reconciliation_thread = threading.Thread(
+        target=full_universe_reconcile_worker,
+        name="full-universe-5m-reconciliation",
+        daemon=True,
+    )
+    reconciliation_thread.start()
+    # Publish live WebSocket auditor and analysis-pool metrics for the API/UI.
     scanner_thread = threading.Thread(
         target=continuous_scan_worker,
         name="continuous-market-scanners",

@@ -449,5 +449,81 @@ class AutopilotEntryLifecycleTests(unittest.TestCase):
                 pool.shutdown(wait=True)
 
 
+class FullUniverseCacheReconciliationTests(unittest.TestCase):
+    def test_cache_reconciliation_returns_only_exact_expected_closed_candle(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0
+        )
+        frame = candle_frame("5min", rows=60)
+        frame.attrs["timeframe"] = "5m"
+        stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
+        stream._market_symbols["futures"] = {"BTCUSDT", "ETHUSDT"}
+
+        batch = stream.latest_closed_events("futures", expected_open)
+
+        self.assertEqual(batch["registered"], 2)
+        self.assertEqual(batch["requested"], 2)
+        self.assertEqual(batch["available"], 1)
+        self.assertEqual(
+            [event["symbol"] for event in batch["events"]], ["BTCUSDT"]
+        )
+        event = batch["events"][0]
+        self.assertEqual(event["open_time"], expected_open)
+        self.assertTrue(event["is_closed"])
+        self.assertIn("audit_only", event)
+        self.assertEqual(event["source"], "binance_cache_reconciliation")
+        self.assertEqual(batch["missing_symbols"], ["ETHUSDT"])
+
+    def test_cache_reconciliation_rejects_a_different_candle_cycle(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0
+        )
+        frame = candle_frame("5min", rows=60)
+        frame.attrs["timeframe"] = "5m"
+        stream._merge_frame("spot", "BTCUSDT", "5m", frame)
+        stream._market_symbols["spot"] = {"BTCUSDT"}
+        actual_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
+        batch = stream.latest_closed_events("spot", actual_open + 300000)
+        self.assertEqual(batch["events"], [])
+        self.assertEqual(batch["missing_symbols"], ["BTCUSDT"])
+
+    def test_queue_rejection_can_be_retried_without_double_counting_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json"
+            )
+            attempts = {"count": 0}
+
+            def submit(_domain, _fn, *_args):
+                attempts["count"] += 1
+                return attempts["count"] > 1
+
+            autopilot.submit_analysis = submit
+            event = {
+                "symbol": "BTCUSDT", "interval": "5m",
+                "open_time": 1800000000000,
+                "close_time": 1800000299999,
+                "event_time": 1800000300000,
+                "is_closed": True, "first_update": False,
+                "market_data": {"5m": "healthy"},
+            }
+
+            self.assertFalse(autopilot.on_market_kline("futures", event))
+            self.assertFalse(autopilot.has_seen_candle(
+                "futures", "BTCUSDT", event["open_time"]
+            ))
+            self.assertTrue(autopilot.on_market_kline("futures", event))
+            self.assertTrue(autopilot.has_seen_candle(
+                "futures", "BTCUSDT", event["open_time"]
+            ))
+            audit = autopilot.status()["symbol_auditors"]["futures"]
+            self.assertEqual(audit["events_received"], 1)
+
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
+
+
 if __name__ == "__main__":
     unittest.main()
