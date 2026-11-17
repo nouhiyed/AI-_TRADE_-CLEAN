@@ -1495,7 +1495,7 @@ class _TradeShellState extends State<TradeShell>
                 ),
                 const SizedBox(height: 3),
                 const Text(
-                  'BUILD 142',
+                  'BUILD 143',
                   style: TextStyle(
                     color: cyan,
                     fontSize: 8,
