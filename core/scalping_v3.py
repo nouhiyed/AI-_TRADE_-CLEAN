@@ -229,10 +229,10 @@ class _V3Base:
                 left = values[index-2:index]
                 right = values[index+1:index+3]
                 if direction == "LONG":
-                    pivot = level >= max(left) and level >= max(right) and level > entry
+                    pivot = (level >= max(left) and level >= max(right)\n                             and (level > max(left) or level > max(right))\n                             and level > entry)
                     distance = level - entry
                 else:
-                    pivot = level <= min(left) and level <= min(right) and level < entry
+                    pivot = (level <= min(left) and level <= min(right)\n                             and (level < min(left) or level < min(right))\n                             and level < entry)
                     distance = entry - level
                 if pivot and distance > 0:
                     candidates.append((distance, level, timeframe))
