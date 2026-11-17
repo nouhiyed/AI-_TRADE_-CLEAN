@@ -152,15 +152,27 @@ class Top250UniverseTests(unittest.TestCase):
                 self.calls += 1
                 return Response()
 
-        feed = BinanceMarketData(timeout=30, total_timeout=30)
+        feed = BinanceMarketData(timeout=240, total_timeout=240)
         feed.session = Session()
-        with patch("core.binance_market_data.time.sleep") as sleep:
+        clock = [1000.0]
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        with patch.dict("core.binance_market_data._BINANCE_LAST_REQUEST_AT",
+                        {"spot": 0.0, "futures": 0.0}), \
+             patch.dict("core.binance_market_data._BINANCE_COOLDOWN_UNTIL",
+                        {"spot": 0.0, "futures": 0.0}), \
+             patch("core.binance_market_data.time.monotonic",
+                   side_effect=lambda: clock[0]), \
+             patch("core.binance_market_data.time.sleep", side_effect=advance) as sleep:
             with self.assertRaisesRegex(RuntimeError, "HTTP 429"):
                 feed._request("futures", "/fapi/v1/exchangeInfo", {})
 
-        self.assertEqual(feed.session.calls, 4)
+        self.assertEqual(feed.session.calls, 6)
         delays = [call.args[0] for call in sleep.call_args_list]
-        self.assertTrue(all(delay in delays for delay in (3.0, 6.0, 12.0)))
+        for expected in (5.0, 10.0, 20.0, 40.0, 80.0):
+            self.assertIn(expected, delays)
 
     def test_ranking_combines_24h_volume_book_liquidity_and_spread(self):
         feed = RankedMarketFeed()
