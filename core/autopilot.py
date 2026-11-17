@@ -555,10 +555,17 @@ class Autopilot:
                 if len(self._event_seen) > 20000:
                     self._event_seen = set(list(self._event_seen)[-10000:])
             frames = event.get("market_data")
-            if isinstance(frames, dict) and frames:
+            five = frames.get("5m") if isinstance(frames, dict) else None
+            history_ready = bool(
+                event.get("cache_ready") is True
+                and five is not None and len(five) >= 60
+                and "is_closed" in five.columns
+                and bool(five["is_closed"].iloc[-1])
+            )
+            if history_ready:
                 with self._event_lock:
                     self._waiting_cache_events.pop(key, None)
-            if not isinstance(frames, dict) or not frames:
+            else:
                 with self._event_lock:
                     previous = self._waiting_cache_events.get(key)
                     if previous is None or int(previous.get("close_time") or 0) < int(event.get("close_time") or 0):
@@ -566,7 +573,8 @@ class Autopilot:
                 self._record_symbol_audit(
                     domain, symbol, "waiting_cache", increment="events_received", also_increment="cache_waiting",
                     close_time_ms=int(event.get("close_time") or 0),
-                    reason="Closed 5m candle retained until its historical cache is ready",
+                    cache_rows=len(five) if five is not None else 0,
+                    reason="Closed 5m candle retained until 60 contiguous closed 5m bars are ready",
                 )
                 return
             if not self._queue_latest_analysis(domain, symbol, event):
