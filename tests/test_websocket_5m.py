@@ -212,6 +212,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         gap = candle_frame("5min")
         gap.attrs["timeframe"] = "5m"
         gap.loc[gap.index[-1], "open_time"] += pd.Timedelta(minutes=5)
+        gap.loc[gap.index[-1], "close_time"] += pd.Timedelta(minutes=5)
         self.stream._merge_frame("futures", "ETHUSDT", "5m", gap)
         self.assertIsNone(self.stream._snapshot("futures", "ETHUSDT"))
         cached_gap = self.stream._cache[("futures", "ETHUSDT", "5m")]
