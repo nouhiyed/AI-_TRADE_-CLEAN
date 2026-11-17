@@ -210,21 +210,24 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertNotIn("4h", snapshot)
 
     def test_sparse_historical_candles_are_valid_but_not_current_cycle_events(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0
+        )
         gap = candle_frame("5min", rows=61)
         gap.attrs["timeframe"] = "5m"
         # Binance can omit no-trade intervals. Keep only actual returned bars;
         # no synthetic rows are inserted to fill the time gap.
         gap = gap.drop(gap.index[-2]).reset_index(drop=True)
-        self.stream._cache[("futures", "ETHUSDT", "5m")] = gap
+        stream._cache[("futures", "ETHUSDT", "5m")] = gap
         self.assertIsNone(
-            self.stream._frame_health_reason("futures", "5m", gap)
+            stream._frame_health_reason("futures", "5m", gap)
         )
-        self.assertIsNotNone(self.stream._snapshot("futures", "ETHUSDT"))
+        self.assertIsNotNone(stream._snapshot("futures", "ETHUSDT"))
 
         short = candle_frame("5min", rows=20)
         short.attrs["timeframe"] = "5m"
         self.assertEqual(
-            self.stream._frame_health_reason("futures", "5m", short),
+            stream._frame_health_reason("futures", "5m", short),
             "insufficient_rows",
         )
 
@@ -232,14 +235,14 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stale.attrs["timeframe"] = "5m"
         stale["open_time"] -= pd.Timedelta(hours=1)
         stale["close_time"] -= pd.Timedelta(hours=1)
-        self.stream._cache[("futures", "ETHUSDT", "5m")] = stale
-        self.assertIsNotNone(self.stream._snapshot("futures", "ETHUSDT"))
-        self.stream._market_symbols["futures"] = {"ETHUSDT"}
+        stream._cache[("futures", "ETHUSDT", "5m")] = stale
+        self.assertIsNotNone(stream._snapshot("futures", "ETHUSDT"))
+        stream._market_symbols["futures"] = {"ETHUSDT"}
         expected_open = int(
             (pd.Timestamp.now(tz="UTC").floor("5min") - pd.Timedelta(minutes=5))
             .timestamp() * 1000
         )
-        batch = self.stream.latest_closed_events("futures", expected_open)
+        batch = stream.latest_closed_events("futures", expected_open)
         self.assertEqual(batch["events"], [])
         self.assertEqual(batch["missing_symbols"], ["ETHUSDT"])
 
