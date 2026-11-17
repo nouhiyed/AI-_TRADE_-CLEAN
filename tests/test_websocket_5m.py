@@ -754,6 +754,53 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(feed.calls, 2)
 
+    def test_full_250_symbol_cycle_reaches_the_analysis_queue(self):
+        frame = candle_frame("5min", rows=100)
+        frame.attrs["timeframe"] = "5m"
+        expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
+        symbols = ["COIN%03dUSDT" % index for index in range(250)]
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=250
+        )
+        stream._market_symbols["futures"] = set(symbols)
+        for symbol in symbols:
+            stream._merge_frame("futures", symbol, "5m", frame)
+
+        batch = stream.latest_closed_events(
+            "futures", expected_open, symbols=symbols
+        )
+        self.assertEqual(batch["requested"], 250)
+        self.assertEqual(batch["available"], 250)
+        self.assertEqual(batch["missing_symbols"], [])
+
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json"
+            )
+            try:
+                autopilot.register_symbol_universe("futures", symbols)
+                # Hold worker submissions so this test can assert the exact
+                # 250 distinct cycle events accepted by the bounded queue.
+                autopilot.submit_analysis = lambda *_args: True
+                for event in batch["events"]:
+                    self.assertTrue(autopilot.on_market_kline("futures", event))
+                self.assertEqual(
+                    sum(autopilot.has_seen_candle(
+                        "futures", symbol, expected_open
+                    ) for symbol in symbols),
+                    250,
+                )
+                self.assertEqual(
+                    len(autopilot._analysis_pending), 250
+                )
+                self.assertEqual(
+                    autopilot.status()["analysis_pools"]["futures"]["rejected"], 0
+                )
+            finally:
+                autopilot._event_executor.shutdown(wait=True)
+                for pool in autopilot._analysis_pools.values():
+                    pool.shutdown(wait=True)
+
     def test_cache_reconciliation_rejects_a_different_candle_cycle(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
