@@ -52,7 +52,7 @@ class CacheWarmupReplayTests(unittest.TestCase):
         self.assertNotIn(("futures", "BTCUSDT"), self.autopilot._analysis_pending)
         status = self.autopilot.symbol_auditor_status()["futures"]
         self.assertEqual(status["events_received"], 1)
-        self.assertEqual(status["waiting_cache"], 0) if "waiting_cache" in status else None
+        self.assertEqual(status["symbols_waiting_for_cache"], 1)
 
     def test_cache_ready_replays_retained_close_once_without_double_count(self):
         now = int(time.time() * 1000)
