@@ -742,8 +742,8 @@ class DemoEngine:
                 (
                     uuid4().hex, position_id,
                     reason if reason in (
-                        "CLOSE", "PARTIAL_CLOSE", "STOP_LOSS",
-                        "TAKE_PROFIT", "LIQUIDATION"
+                        "CLOSE", "MANUAL", "PARTIAL_CLOSE", "STOP_LOSS",
+                        "TAKE_PROFIT", "TRAILING_STOP", "LIQUIDATION"
                     ) else ("CLOSE" if new_remaining == 0 else "PARTIAL_CLOSE"),
                     str(close_qty), str(fill_price), str(pnl),
                     str(fee), uuid4().hex,
