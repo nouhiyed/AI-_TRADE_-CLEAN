@@ -50,6 +50,9 @@ class BinanceKlineStream:
         except (TypeError, ValueError):
             self.max_symbols = 250
         self.full_universe = self.max_symbols == 0
+        # Large top-N lists use only 5m trigger streams; higher-timeframe
+        # context is fetched on demand after the local 5m prefilter passes.
+        self.fast_scan_mode = self.full_universe or self.max_symbols >= 100
         try:
             warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "6"))
         except (TypeError, ValueError):
@@ -98,6 +101,8 @@ class BinanceKlineStream:
                 for market in ("spot", "futures")
             }
             snapshot["symbol_mode"] = "full_universe" if self.full_universe else "top_n"
+            snapshot["selection_limit"] = self.max_symbols or None
+            snapshot["fast_scan_mode"] = self.fast_scan_mode
             snapshot["active_intervals"] = {
                 market: self._active_intervals(market)
                 for market in ("spot", "futures")
@@ -263,10 +268,10 @@ class BinanceKlineStream:
         }
 
     def _active_intervals(self, market):
-        # Full-universe mode streams only the fast trigger timeframe for every
+        # Large universes stream only the fast trigger timeframe for every
         # symbol. Higher-timeframe context is fetched only after a 5m candidate
         # passes the V3 local prefilter, avoiding thousands of idle candle streams.
-        if self.full_universe:
+        if self.fast_scan_mode:
             return ["5m"]
         return list(self.CACHE_LIMITS[market])
 
@@ -500,7 +505,7 @@ class BinanceKlineStream:
     def _snapshot(self, market, symbol):
         required = (
             {"5m": self.REQUIRED_ROWS[market]["5m"]}
-            if self.full_universe else self.REQUIRED_ROWS[market]
+            if self.fast_scan_mode else self.REQUIRED_ROWS[market]
         )
         frames = {}
         with self._cache_lock:
@@ -515,7 +520,7 @@ class BinanceKlineStream:
                     "source": "binance_websocket_cache",
                 })
                 frames[interval] = copied
-            if market == "spot" and not self.full_universe:
+            if market == "spot" and not self.fast_scan_mode:
                 optional_four_hour = self._cache.get((market, symbol, "4h"))
                 if self._frame_healthy(market, "4h", optional_four_hour):
                     copied = optional_four_hour.copy()
