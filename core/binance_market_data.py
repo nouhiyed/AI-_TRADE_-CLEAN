@@ -20,6 +20,7 @@ _BINANCE_REQUEST_LOCKS = {
 }
 _BINANCE_LAST_REQUEST_AT = {"spot": 0.0, "futures": 0.0}
 _BINANCE_MIN_REQUEST_INTERVAL = 0.12
+_BINANCE_DEFAULT_429_RETRY_SECONDS = 3.0
 
 
 class _BinanceRateLimitError(RuntimeError):
@@ -125,7 +126,10 @@ class BinanceMarketData:
                                     (retry_at - datetime.now(timezone.utc)).total_seconds(),
                                 )
                             except (TypeError, ValueError, OverflowError):
-                                wait_seconds = 1.0
+                                # Shared public egress IPs can receive a short
+                                # 429 window without Retry-After. Back off once
+                                # before declaring the endpoint unavailable.
+                                wait_seconds = _BINANCE_DEFAULT_429_RETRY_SECONDS
 
                         remaining = deadline - time.monotonic()
                         if attempt == 0 and wait_seconds < remaining:
