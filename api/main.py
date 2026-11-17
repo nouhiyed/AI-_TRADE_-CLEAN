@@ -187,6 +187,9 @@ def _scan_domain_worker(domain):
         time.sleep(max(1.0, float(os.environ.get("SCAN_BATCH_PAUSE_SECONDS", "2"))))
 
 
+reconciliation_ready = threading.Event()
+
+
 def full_universe_reconcile_worker():
     """Reconcile the exact closed 5m candle in small fair cache-only batches.
 
@@ -194,6 +197,7 @@ def full_universe_reconcile_worker():
     a large universe cannot monopolize this thread or publish an old cycle after
     crossing a 5m boundary.
     """
+    reconciliation_ready.set()
     cycle_states = {}
     batch_size = max(16, min(256, int(os.environ.get(
         "AI_TRADER_RECONCILE_BATCH_SIZE", "96"
@@ -1134,15 +1138,19 @@ if __name__ == "__main__":
         daemon=True,
     )
     monitor_thread.start()
-    market_stream.start()
-    # Reconcile every eligible pair against the exact closed 5m cache candle.
-    # This complements WebSocket close callbacks without issuing duplicate REST sweeps.
+    # Start the reconciliation loop before opening WebSocket subscriptions.
+    # This prevents early close callbacks from completing before the per-cycle
+    # coverage state exists. The ready handshake makes the order deterministic.
+    reconciliation_ready.clear()
     reconciliation_thread = threading.Thread(
         target=full_universe_reconcile_worker,
         name="full-universe-5m-reconciliation",
         daemon=True,
     )
     reconciliation_thread.start()
+    if not reconciliation_ready.wait(timeout=5):
+        raise RuntimeError("5m reconciliation worker did not become ready")
+    market_stream.start()
     # Publish live WebSocket auditor and analysis-pool metrics for the API/UI.
     scanner_thread = threading.Thread(
         target=continuous_scan_worker,
