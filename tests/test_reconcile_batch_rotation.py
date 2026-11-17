@@ -26,7 +26,7 @@ class ReconcileBatchRotationTests(unittest.TestCase):
     def test_symbols_without_cache_are_retried_after_full_rotation(self):
         universe = {"PAIR%03dUSDT" % index for index in range(250)}
         pending = set(universe)
-        unavailable = {"PAIR000USDT", "PAIR111USDT"}
+        unavailable = set(sorted(universe)[62:])
         cursor = 0
         first_pass = set()
 
