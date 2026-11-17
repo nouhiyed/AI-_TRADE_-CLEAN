@@ -218,12 +218,11 @@ jobs:
           echo "ERROR: APK build failed after 3 attempts"
           exit 1
 
-      - name: Upload APK as a direct-download artifact
-        uses: actions/upload-artifact@v7
+      - name: Upload APK artifact for release publishing
+        uses: actions/upload-artifact@v4
         with:
-          name: AI-Trade-Build-143.apk
+          name: AI-Trade-Build-143
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
-          archive: false
           if-no-files-found: error
   publish-apk-release:
     if: github.event_name == 'push' && needs.build.result == 'success'
@@ -235,7 +234,7 @@ jobs:
       - name: Download built APK
         uses: actions/download-artifact@v4
         with:
-          name: AI-Trade-Build-143.apk
+          name: AI-Trade-Build-143
           path: release
       - name: Publish APK as a GitHub Release asset
         uses: softprops/action-gh-release@v2
@@ -267,7 +266,7 @@ jobs:
               owner, repo, run_id: context.runId
             });
             const apk = artifacts.data.artifacts.find(
-              item => item.name === 'AI-Trade-Build-143.apk' && !item.expired
+              item => item.name === 'AI-Trade-Build-143' && !item.expired
             );
             const build = '${{ needs.build.result }}';
             const success = build === 'success' && Boolean(apk);
