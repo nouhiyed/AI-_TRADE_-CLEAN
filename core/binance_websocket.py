@@ -33,10 +33,12 @@ class BinanceKlineStream:
     INTERVAL_MS = {"5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000}
 
     def __init__(self, market_feed, on_kline, max_symbols=None,
-                 refresh_seconds=1800, reconnect_seconds=3, on_universe=None):
+                 refresh_seconds=1800, reconnect_seconds=3, on_universe=None,
+                 on_cache_ready=None):
         self.feed = market_feed
         self.on_kline = on_kline
         self.on_universe = on_universe
+        self.on_cache_ready = on_cache_ready
         # Default to every eligible symbol. A positive limit preserves an
         # explicit top-N deployment mode; zero means the full market universe.
         raw_limit = (
@@ -49,10 +51,10 @@ class BinanceKlineStream:
             self.max_symbols = 0
         self.full_universe = self.max_symbols == 0
         try:
-            warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "4"))
+            warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "6"))
         except (TypeError, ValueError):
             warmup_workers = 4
-        self.warmup_workers = min(6, max(1, warmup_workers))
+        self.warmup_workers = min(8, max(1, warmup_workers))
         self.refresh_seconds = max(300, int(refresh_seconds))
         self.reconnect_seconds = max(1, int(reconnect_seconds))
         self._stop = threading.Event()
@@ -386,7 +388,8 @@ class BinanceKlineStream:
             else:
                 with self._lock:
                     self._warm_errors.pop((market, symbol, interval), None)
-        ready = self._snapshot(market, symbol) is not None
+        frames = self._snapshot(market, symbol)
+        ready = frames is not None
         with self._lock:
             if ready:
                 self._cache_ready.add((market, symbol))
@@ -398,6 +401,12 @@ class BinanceKlineStream:
             state["cache_ready_symbols"] = state["cache_warmup_completed"]
             state["cache_warmup_errors"] = sum(
                 1 for key in self._warm_errors if key[0] == market)
+        if ready and callable(self.on_cache_ready):
+            try:
+                self.on_cache_ready(market, symbol, frames)
+            except Exception as error:
+                with self._lock:
+                    self._status[market]["last_error"] = "cache-ready callback: " + str(error)
         return ready
 
     def _warm_market(self, market, symbols):
