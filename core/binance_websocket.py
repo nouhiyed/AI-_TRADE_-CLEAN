@@ -48,7 +48,7 @@ class BinanceKlineStream:
         try:
             self.max_symbols = max(0, int(raw_limit))
         except (TypeError, ValueError):
-            self.max_symbols = 0
+            self.max_symbols = 250
         self.full_universe = self.max_symbols == 0
         try:
             warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "6"))
@@ -679,7 +679,10 @@ class BinanceKlineStream:
                         if key[0] == market:
                             self._connection_live.pop(key, None)
                 self._ensure_warmup_worker(market)
-                universe_day = datetime.now(timezone.utc).date().isoformat()
+                with self._lock:
+                    universe_day = self._status[market].get("ranking_day") or (
+                        datetime.now(timezone.utc).date().isoformat()
+                    )
                 threads = []
                 for index, streams in enumerate(chunks):
                     thread = threading.Thread(
@@ -705,6 +708,15 @@ class BinanceKlineStream:
                                 app.close()
                             except Exception:
                                 pass
+                        # Do not subscribe to today's ranking until every
+                        # connection using yesterday's symbol list has exited.
+                        for thread in threads:
+                            thread.join(timeout=10)
+                        while (
+                            any(thread.is_alive() for thread in threads)
+                            and not self._stop.wait(1)
+                        ):
+                            pass
                         break
                     if not any(thread.is_alive() for thread in threads):
                         break
