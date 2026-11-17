@@ -209,7 +209,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
             self.stream._merge_frame("futures", "ETHUSDT", interval, frame)
         self.assertIsNotNone(self.stream._snapshot("futures", "ETHUSDT"))
 
-        gap = candle_frame("5min")
+        gap = candle_frame("5min", rows=61)
         gap.attrs["timeframe"] = "5m"
         # Replace the cached frame directly: merge is intentionally gap-healing
         # when REST warmup supplies a complete replacement history.
