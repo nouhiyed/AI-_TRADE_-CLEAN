@@ -83,6 +83,56 @@ class Top250UniverseTests(unittest.TestCase):
         self.assertIn(3.0, [call.args[0] for call in sleep.call_args_list])
 
 
+    def test_geographic_restriction_stops_fallback_requests(self):
+        class Response:
+            status_code = 451
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {}
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response()
+
+        feed = BinanceMarketData(timeout=2, total_timeout=2)
+        feed.session = Session()
+        with self.assertRaisesRegex(RuntimeError, "HTTP 451"):
+            feed._request("futures", "/fapi/v1/exchangeInfo", {})
+        self.assertEqual(feed.session.calls, 1)
+
+    def test_waf_restriction_stops_fallback_requests(self):
+        class Response:
+            status_code = 403
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {}
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response()
+
+        feed = BinanceMarketData(timeout=2, total_timeout=2)
+        feed.session = Session()
+        with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+            feed._request("futures", "/fapi/v1/exchangeInfo", {})
+        self.assertEqual(feed.session.calls, 1)
+
     def test_repeated_429_uses_bounded_backoff_without_fallback_burst(self):
         class Response:
             status_code = 429
