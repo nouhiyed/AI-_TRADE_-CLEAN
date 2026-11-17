@@ -35,6 +35,17 @@ class RankedMarketFeed(BinanceMarketData):
 
 
 class Top250UniverseTests(unittest.TestCase):
+    def test_spot_market_data_uses_official_market_data_only_rest_endpoint(self):
+        self.assertEqual(
+            BinanceMarketData.BASE_URLS["spot"],
+            "https://data-api.binance.vision",
+        )
+        self.assertEqual(
+            BinanceMarketData.FALLBACK_URLS["spot"][0],
+            "https://data-api.binance.vision",
+        )
+
+
     def test_ranking_combines_24h_volume_book_liquidity_and_spread(self):
         feed = RankedMarketFeed()
 
