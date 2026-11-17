@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.17.4"
+API_VERSION = "2026.11.17.5"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -150,19 +150,24 @@ def _scan_domain_worker(domain):
 
 
 def full_universe_reconcile_worker():
-    """Audit the exact closed 5m candle for every registered symbol from cache.
+    """Reconcile the exact closed 5m candle in small fair cache-only batches.
 
-    WebSocket close events remain the primary trigger. This worker is a
-    cache-only reconciliation path for missed per-symbol notifications; it
-    never performs a second REST market sweep and never bypasses the V3 gate.
+    WebSocket callbacks remain primary. The fallback rotates through symbols so
+    a large universe cannot monopolize this thread or publish an old cycle after
+    crossing a 5m boundary.
     """
     cycle_states = {}
+    batch_size = max(16, min(256, int(os.environ.get(
+        "AI_TRADER_RECONCILE_BATCH_SIZE", "96"
+    ))))
     print("[SCAN] Full-universe 5m cache reconciliation started")
     while True:
         try:
-            now_ms = int(time.time() * 1000)
-            expected_open_time_ms = ((now_ms // 300000) - 1) * 300000
             for domain in ("futures", "spot"):
+                # Calculate separately per market: processing Futures must not
+                # make the Spot report use an obsolete 5m cycle timestamp.
+                now_ms = int(time.time() * 1000)
+                expected_open_time_ms = ((now_ms // 300000) - 1) * 300000
                 symbols = set(market_stream.registered_symbols(domain))
                 if not symbols:
                     continue
@@ -184,6 +189,7 @@ def full_universe_reconcile_worker():
                         "missing_cache": set(),
                         "queue_rejected": set(),
                         "analysis_errors": 0,
+                        "cursor": 0,
                         "complete": False,
                         "started_at": time.time(),
                     }
@@ -199,12 +205,11 @@ def full_universe_reconcile_worker():
                     state["missing_cache"].difference_update(removed)
                     state["queue_rejected"].difference_update(removed)
 
-                # If a cache-ready callback could not enqueue an event, it
-                # removes that candle's dedupe marker. Re-queue it for retry.
                 completed_before = set(autopilot.completed_symbols_for_cycle(
                     domain, expected_open_time_ms, sorted(state["symbols"])
                 ).get("completed", []))
                 state["completed"].update(completed_before)
+
                 for symbol in list(state["accepted"] - state["completed"]):
                     if not autopilot.has_seen_candle(
                         domain, symbol, expected_open_time_ms
@@ -212,12 +217,29 @@ def full_universe_reconcile_worker():
                         state["accepted"].discard(symbol)
                         state["pending"].add(symbol)
 
+                # WebSocket events are primary; account for them immediately
+                # without waiting for the cache fallback to visit each symbol.
+                for symbol in list(state["pending"]):
+                    if autopilot.has_seen_candle(
+                        domain, symbol, expected_open_time_ms
+                    ):
+                        state["accepted"].add(symbol)
+                        state["pending"].discard(symbol)
+                        state["missing_cache"].discard(symbol)
+
                 pending = sorted(state["pending"])
                 if pending:
+                    cursor = int(state.get("cursor", 0)) % len(pending)
+                    batch_symbols = pending[cursor:cursor + batch_size]
+                    if len(batch_symbols) < batch_size:
+                        batch_symbols.extend(pending[:batch_size - len(batch_symbols)])
+                    state["cursor"] = (cursor + len(batch_symbols)) % max(1, len(pending))
+
                     batch = market_stream.latest_closed_events(
-                        domain, expected_open_time_ms, symbols=pending
+                        domain, expected_open_time_ms, symbols=batch_symbols
                     )
-                    state["missing_cache"] = set(batch.get("missing_symbols", []))
+                    state["missing_cache"].difference_update(batch_symbols)
+                    state["missing_cache"].update(batch.get("missing_symbols", []))
                     for event in batch.get("events", []):
                         symbol = str(event.get("symbol", "")).upper()
                         if not symbol:
@@ -228,6 +250,7 @@ def full_universe_reconcile_worker():
                             state["accepted"].add(symbol)
                             state["pending"].discard(symbol)
                             state["queue_rejected"].discard(symbol)
+                            state["missing_cache"].discard(symbol)
                             continue
                         accepted = autopilot.on_market_kline(domain, event)
                         if accepted or autopilot.has_seen_candle(
@@ -236,6 +259,7 @@ def full_universe_reconcile_worker():
                             state["accepted"].add(symbol)
                             state["pending"].discard(symbol)
                             state["queue_rejected"].discard(symbol)
+                            state["missing_cache"].discard(symbol)
                         else:
                             state["queue_rejected"].add(symbol)
 
@@ -251,6 +275,15 @@ def full_universe_reconcile_worker():
                     and not state["queue_rejected"]
                     and state["analysis_errors"] == 0
                 )
+
+                # Never publish a coverage snapshot for a cycle that became
+                # obsolete while its cache batch was being reconciled.
+                latest_open_time_ms = (
+                    (int(time.time() * 1000) // 300000) - 1
+                ) * 300000
+                if latest_open_time_ms != expected_open_time_ms:
+                    continue
+
                 pending_analysis = (
                     state["symbols"] - state["completed"] - state["pending"]
                 )
@@ -261,6 +294,7 @@ def full_universe_reconcile_worker():
                     "completed_symbols": len(state["completed"]),
                     "pending_cache_symbols": len(state["missing_cache"]),
                     "pending_analysis_symbols": len(pending_analysis),
+                    "pending_reconcile_symbols": len(state["pending"]),
                     "queue_rejected_symbols": len(state["queue_rejected"]),
                     "analysis_errors": state["analysis_errors"],
                     "complete": state["complete"],
@@ -281,7 +315,7 @@ def full_universe_reconcile_worker():
                 }
                 scan_status["updated_at"] = time.time()
             print("[SCAN] Full-universe reconciliation error:", error)
-        time.sleep(10)
+        time.sleep(1)
 
 
 def continuous_scan_worker():
