@@ -253,10 +253,16 @@ class _V3Base:
         entry = float(plan["entry"])
         structure = cls.nearest_opposing_structure(frames, direction, entry)
         if structure is None:
-            # Missing structure data must fail closed: do not open a trade
-            # without knowing whether a nearby opposing zone blocks its path.
-            return {"success": False,
-                    "reason": "V3 structure guard: opposing support/resistance unavailable"}
+            # No confirmed opposing swing means there is no identified nearby
+            # wall in the supplied closed context. The required 5m/15m/1h
+            # frames were already validated by analyze(); keep the trade
+            # eligible and expose that no overhead/underfoot pivot was found.
+            plan["structure_guard"] = {
+                "blocked": False, "direction": direction, "level": None,
+                "timeframe": None, "distance": None,
+                "reason": "No confirmed opposing swing level in closed context",
+            }
+            return plan
         level = float(structure["level"])
         buffer = max(0.65 * atr, entry * 0.0008)
         target = float(plan["take_profit"])
