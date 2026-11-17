@@ -103,6 +103,27 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m"})
 
+    def test_cache_becoming_ready_after_warmup_replays_retained_close(self):
+        callbacks = []
+        self.stream.on_cache_ready = (
+            lambda market, symbol, frames: callbacks.append((market, symbol, frames))
+        )
+        self.stream._snapshot = lambda _market, _symbol: {"5m": "healthy-frame"}
+
+        class StopAfterOnePass:
+            def is_set(self):
+                return False
+
+            def wait(self, _seconds):
+                return True
+
+        self.stream._stop = StopAfterOnePass()
+        self.stream._warm_market("futures", ["BTCUSDT"])
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(callbacks[0][0:2], ("futures", "BTCUSDT"))
+        self.assertEqual(callbacks[0][2], {"5m": "healthy-frame"})
+
     def test_futures_uses_current_binance_market_websocket_endpoint(self):
         self.assertEqual(
             BinanceKlineStream.BASE_URLS["futures"],
