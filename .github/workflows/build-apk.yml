@@ -15,6 +15,7 @@ on:
       - 'agents/**'
       - 'core/**'
       - 'api/**'
+      - 'scripts/**'
       - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/build-apk.yml'
@@ -32,7 +33,28 @@ permissions:
   contents: read
 
 jobs:
+  live-market-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AI_TRADER_WS_MAX_SYMBOLS: '250'
+      AI_TRADER_WS_WARMUP_WORKERS: '8'
+      AI_TRADER_ANALYSIS_WORKERS_PER_MARKET: '4'
+      AI_TRADER_RECONCILE_BATCH_SIZE: '96'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile live backend
+        run: python -m compileall -q core agents api scripts
+      - name: Verify both Binance markets complete all 500 exact-cycle analyses
+        run: python -u scripts/live_binance_cycle_smoke.py
   build:
+    needs: live-market-verification
     runs-on: ubuntu-latest
 
     steps:
