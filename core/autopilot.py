@@ -336,10 +336,16 @@ class Autopilot:
         received_at_ms = int(time.time() * 1000)
         event = dict(candle)
         event["received_at_ms"] = received_at_ms
+        close_time_ms = int(event.get("close_time") or 0)
+        if count_event:
+            with self._event_lock:
+                previous_record = self._symbol_audits[domain].get(symbol) or {}
+                if int(previous_record.get("last_close_time_ms") or 0) == close_time_ms:
+                    count_event = False
         self._record_symbol_audit(
             domain, symbol, "queued",
             increment="events_received" if count_event else None,
-            close_time_ms=int(event.get("close_time") or 0),
+            close_time_ms=close_time_ms,
         )
         with self._event_lock:
             previous = self._analysis_pending.get(key)
