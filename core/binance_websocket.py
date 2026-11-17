@@ -82,6 +82,8 @@ class BinanceKlineStream:
         self._closed_seen = set()
         self._latest_candles = {}
         self._warm_errors = {}
+        # One bounded REST refresh per stale symbol and 5m cycle.
+        self._last_rest_refresh_cycle = set()
         self._status = {
             market: {
                 "connected": False, "fully_connected": False, "state": "stopped",
@@ -631,6 +633,67 @@ class BinanceKlineStream:
             worker.start()
             return True
 
+    def _refresh_stale_5m(self, market, symbols, now_ms=None):
+        """Refresh stale 5m caches once per symbol and closed-candle cycle.
+
+        Historical cache readiness must not prevent refreshing a healthy but
+        stale cache after missed WebSocket close events.
+        """
+        fetch = getattr(self.feed, "fetch_candles", None)
+        if not callable(fetch):
+            return []
+        now_ms = int(now_ms or time.time() * 1000)
+        interval_ms = self.INTERVAL_MS["5m"]
+        expected_open = ((now_ms // interval_ms) - 1) * interval_ms
+        stale = []
+        for symbol in symbols:
+            symbol = str(symbol).upper()
+            with self._cache_lock:
+                frame = self._cache.get((market, symbol, "5m"))
+                latest_open = (
+                    self._row_key(frame.iloc[-1]["open_time"])
+                    if frame is not None and not frame.empty else None
+                )
+            if latest_open is None or latest_open >= expected_open:
+                continue
+            refresh_key = (market, symbol, expected_open)
+            with self._lock:
+                if refresh_key in self._last_rest_refresh_cycle:
+                    continue
+                self._last_rest_refresh_cycle.add(refresh_key)
+            stale.append(symbol)
+
+        if not stale:
+            return []
+
+        refreshed = []
+        def refresh(symbol):
+            frame = fetch(
+                market, symbol, "5m",
+                limit=self.CACHE_LIMITS[market]["5m"],
+                closed_only=True,
+            )
+            self._merge_frame(market, symbol, "5m", frame)
+            return symbol
+
+        # Keep REST concurrency bounded; Binance requests retain the existing
+        # per-market pacing and only stale symbols are refreshed.
+        with ThreadPoolExecutor(
+            max_workers=self.warmup_workers,
+            thread_name_prefix="candle-refresh-" + market,
+        ) as pool:
+            futures = {pool.submit(refresh, symbol): symbol for symbol in stale}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    refreshed.append(future.result())
+                except Exception as error:
+                    with self._lock:
+                        self._status[market]["cache_warmup_last_error"] = (
+                            symbol + " 5m refresh: " + str(error)
+                        )
+        return refreshed
+
     def _warm_market(self, market, symbols=None):
         """Keep one cache warmup loop aligned with the live registered universe."""
         fixed_symbols = None if symbols is None else set(symbols)
@@ -648,6 +711,7 @@ class BinanceKlineStream:
                     return
                 continue
 
+            self._refresh_stale_5m(market, current_symbols)
             ready = {
                 symbol for symbol in current_symbols
                 if self._snapshot(market, symbol) is not None
