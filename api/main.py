@@ -230,10 +230,12 @@ def full_universe_reconcile_worker():
                 pending = sorted(state["pending"])
                 if pending:
                     cursor = int(state.get("cursor", 0)) % len(pending)
-                    batch_symbols = pending[cursor:cursor + batch_size]
-                    if len(batch_symbols) < batch_size:
-                        batch_symbols.extend(pending[:batch_size - len(batch_symbols)])
-                    state["cursor"] = (cursor + len(batch_symbols)) % max(1, len(pending))
+                    take = min(batch_size, len(pending))
+                    batch_symbols = [
+                        pending[(cursor + offset) % len(pending)]
+                        for offset in range(take)
+                    ]
+                    state["cursor"] = (cursor + take) % len(pending)
 
                     batch = market_stream.latest_closed_events(
                         domain, expected_open_time_ms, symbols=batch_symbols
