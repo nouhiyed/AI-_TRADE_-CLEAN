@@ -551,15 +551,61 @@ class Autopilot:
                     return
                 self._event_seen.add(identity)
                 if len(self._event_seen) > 20000:
-                    # Bounded memory: retain only recent candle identities.
                     self._event_seen = set(list(self._event_seen)[-10000:])
+            frames = event.get("market_data")
+            if not isinstance(frames, dict) or not frames:
+                with self._event_lock:
+                    previous = self._waiting_cache_events.get(key)
+                    if previous is None or int(previous.get("close_time") or 0) < int(event.get("close_time") or 0):
+                        self._waiting_cache_events[key] = dict(event)
+                self._record_symbol_audit(
+                    domain, symbol, "waiting_cache", increment="events_received",
+                    close_time_ms=int(event.get("close_time") or 0),
+                    reason="Closed 5m candle retained until its historical cache is ready",
+                )
+                return
             if not self._queue_latest_analysis(domain, symbol, event):
                 self.last_result = {
                     "status": "ANALYSIS_QUEUE_FULL", "phase": "websocket_analysis",
                     "domain": domain, "symbol": symbol,
-                    "reason": "Bounded latest-event analysis queue is full; stale work was not replayed",
+                    "reason": "Analysis queue full; latest event retained for retry",
                 }
+                with self._event_lock:
+                    self._waiting_cache_events[key] = dict(event)
 
+
+    def on_symbol_cache_ready(self, domain, symbol, frames):
+        """Replay the newest retained close when the 5m history becomes healthy."""
+        domain = str(domain).strip().lower()
+        symbol = str(symbol).strip().upper()
+        if domain not in ("spot", "futures") or not symbol or not isinstance(frames, dict) or not frames:
+            return False
+        key = (domain, symbol)
+        with self._event_lock:
+            event = self._waiting_cache_events.pop(key, None)
+        if not event:
+            return False
+        replay = dict(event)
+        replay["market_data"] = frames
+        replay["cache_ready"] = True
+        age_ms = int(time.time() * 1000) - int(replay.get("event_time") or 0)
+        if age_ms > 10 * 60 * 1000:
+            self._record_symbol_audit(
+                domain, symbol, "stale", increment="stale",
+                reason="Cache became ready after the 10-minute audit retention window",
+            )
+            return False
+        replay["audit_only"] = age_ms > 30000
+        accepted = self._queue_latest_analysis(domain, symbol, replay, count_event=False)
+        if accepted:
+            self._record_symbol_audit(
+                domain, symbol, "cache_replayed",
+                reason="Retained closed candle replayed after cache warmup",
+            )
+        else:
+            with self._event_lock:
+                self._waiting_cache_events[key] = replay
+        return accepted
 
     def queue_manual_signal(self, domain, symbol, signal):
         """Queue an agent-approved chart submission for the next 5m open."""
@@ -640,9 +686,10 @@ class Autopilot:
             close_time = int(candle.get("close_time") or 0)
             close_event_time = int(candle.get("event_time") or 0)
             local_now_ms = int(time.time() * 1000)
+            audit_only = bool(candle.get("audit_only"))
             if (close_time <= 0 or close_event_time < close_time
                     or close_event_time - close_time > 10000
-                    or abs(local_now_ms - close_event_time) > 30000):
+                    or (not audit_only and abs(local_now_ms - close_event_time) > 30000)):
                 self._record_symbol_audit(
                     domain, symbol, "stale",
                     increment="stale",
@@ -766,6 +813,13 @@ class Autopilot:
             with self._event_lock:
                 self.c.last_signals[domain] = signal
                 cfg = dict(self.config)
+                if audit_only:
+                    self._record_symbol_audit(
+                        domain, symbol, "audit_only_candidate",
+                        reason="Delayed cache/worker replay is audited but cannot open a late trade",
+                        direction=direction, setup=plan.get("setup"),
+                    )
+                    return
                 if not cfg.get("enabled") or not cfg.get("trade_" + domain):
                     return
                 key = (domain, symbol)
