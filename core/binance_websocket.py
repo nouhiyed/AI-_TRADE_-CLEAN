@@ -88,6 +88,9 @@ class BinanceKlineStream:
                 "cache_ready_symbols": 0, "cache_warmup_total": 0,
                 "cache_warmup_completed": 0, "cache_warmup_errors": 0,
                 "cache_warmup_worker_starts": 0,
+                "cache_warmup_last_error": None,
+                "last_close_code": None, "last_close_reason": None,
+                "last_disconnect_at": None, "reconnect_delay_seconds": 3,
                 "ranking_day": None,
             }
             for market in ("spot", "futures")
@@ -559,6 +562,9 @@ class BinanceKlineStream:
             if last_error:
                 with self._lock:
                     self._warm_errors[(market, symbol, interval)] = last_error
+                    self._status[market]["cache_warmup_last_error"] = (
+                        symbol + " " + interval + ": " + last_error
+                    )
             else:
                 with self._lock:
                     self._warm_errors.pop((market, symbol, interval), None)
@@ -787,7 +793,9 @@ class BinanceKlineStream:
     def _run_connection(self, market, index, streams, universe_day=None):
         conn_key = (market, index)
         ack_id = index + 1
+        retry_delay = float(self.reconnect_seconds)
         while not self._stop.is_set():
+            attempt_started = time.monotonic()
             if (
                 universe_day
                 and datetime.now(timezone.utc).date().isoformat() != universe_day
@@ -816,6 +824,11 @@ class BinanceKlineStream:
                 def on_close(_app, code, reason):
                     with self._lock:
                         self._connection_live[conn_key] = False
+                        self._status[market]["last_close_code"] = code
+                        self._status[market]["last_close_reason"] = str(reason or "")[:500]
+                        self._status[market]["last_disconnect_at"] = (
+                            datetime.now(timezone.utc).isoformat()
+                        )
                         self._recompute_connection_status(market)
 
                 app = WebSocketApp(
@@ -836,12 +849,20 @@ class BinanceKlineStream:
                     self._recompute_connection_status(market)
                     self._status[market]["reconnects"] += 1
                     self._apps.pop(conn_key, None)
+                    attempt_duration = time.monotonic() - attempt_started
+                    if attempt_duration >= 120:
+                        retry_delay = float(self.reconnect_seconds)
+                    else:
+                        retry_delay = min(60.0, max(
+                            float(self.reconnect_seconds), retry_delay * 2.0
+                        ))
+                    self._status[market]["reconnect_delay_seconds"] = retry_delay
             if (
                 universe_day
                 and datetime.now(timezone.utc).date().isoformat() != universe_day
             ):
                 return
-            if not self._stop.wait(self.reconnect_seconds):
+            if not self._stop.wait(retry_delay):
                 continue
 
     def _handle_message(self, market, index, ack_id, app, message):
