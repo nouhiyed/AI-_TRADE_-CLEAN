@@ -414,7 +414,13 @@ class BinanceKlineStream:
             now_ms = int(now_ms or time.time() * 1000)
             if last_close > now_ms + 30000:
                 return False
-            if now_ms - last_close > (2 * interval_ms + 30000):
+            # A cache can be structurally healthy yet one full candle behind.
+            # Full-universe reconciliation requires the exact latest closed bar,
+            # so freshness is anchored to the current interval boundary.
+            expected_latest_close = (
+                (now_ms // interval_ms) * interval_ms
+            ) - 1
+            if last_close < expected_latest_close - 30000:
                 return False
             return True
         except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
@@ -590,7 +596,7 @@ class BinanceKlineStream:
                             return
             # Re-read the registered universe after each pass. This worker is
             # intentionally retained across WebSocket reconnects.
-            if self._stop.wait(60):
+            if self._stop.wait(10):
                 return
 
     def _recompute_connection_status(self, market):
