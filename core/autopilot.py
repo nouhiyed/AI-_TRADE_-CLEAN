@@ -56,6 +56,7 @@ class Autopilot:
         # bounded pool so hundreds of symbols never create hundreds of threads.
         self._symbol_audits = {"futures": {}, "spot": {}}
         self._symbol_universes = {"futures": set(), "spot": set()}
+        self._universe_initialized = {"futures": False, "spot": False}
         self._symbol_audit_totals = {
             domain: {
                 "events_received": 0, "prefilter_passed": 0,
@@ -201,6 +202,7 @@ class Autopilot:
         with self._event_lock:
             previous = self._symbol_universes[domain]
             self._symbol_universes[domain] = normalized
+            self._universe_initialized[domain] = True
             records = self._symbol_audits[domain]
             for symbol in normalized:
                 record = records.setdefault(symbol, {
@@ -245,12 +247,18 @@ class Autopilot:
         if domain not in self._symbol_audits or not symbol:
             return
         with self._event_lock:
+            # Standalone/test callers without a universe callback still get
+            # an auditor record for every observed symbol. In the production
+            # WebSocket path the complete universe is registered first.
+            if not self._universe_initialized[domain]:
+                self._symbol_universes[domain].add(symbol)
             record = self._symbol_audits[domain].setdefault(symbol, {
                 "symbol": symbol, "state": "waiting", "events": 0,
+                "prefilter_events": 0,
             })
             record.update(details)
             record["state"] = str(state)
-            record["updated_at_ms"] = int(time.time() * 1000)
+            record["updated_at_ms"] = int(self.clock() * 1000)
             if increment == "events_received":
                 record["events"] = int(record.get("events", 0)) + 1
                 record["last_event_at_ms"] = record["updated_at_ms"]
