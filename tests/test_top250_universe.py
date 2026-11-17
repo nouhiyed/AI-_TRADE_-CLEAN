@@ -91,6 +91,8 @@ class Top250UniverseTests(unittest.TestCase):
         self.assertEqual(len(set(symbols)), 250)
         self.assertEqual(feed.requested, [("spot", 250)])
         self.assertEqual(stream.status()["spot"]["ranking_day"], "2026-11-17")
+        self.assertTrue(stream.status()["fast_scan_mode"])
+        self.assertEqual(stream._active_intervals("spot"), ["5m"])
         stream.stop()
 
     def test_websocket_rejects_a_partial_top_n_selection(self):
