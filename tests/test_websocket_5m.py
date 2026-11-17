@@ -666,6 +666,59 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
             },
         )
 
+    def test_successful_but_incomplete_rest_response_is_retried_with_backoff(self):
+        class IncompleteThenFreshFeed:
+            def __init__(self, incomplete, fresh):
+                self.incomplete = incomplete
+                self.fresh = fresh
+                self.calls = 0
+                self.kwargs = []
+
+            def fetch_candles(self, market, symbol, interval, **kwargs):
+                self.calls += 1
+                self.kwargs.append(kwargs)
+                return (self.incomplete if self.calls == 1 else self.fresh).copy()
+
+        now_ms = int(time.time() * 1000)
+        expected_open = ((now_ms // 300000) - 1) * 300000
+        fresh = candle_frame("5min", rows=100)
+        fresh.attrs["timeframe"] = "5m"
+        incomplete = fresh.loc[
+            fresh["open_time"].map(
+                lambda value: int(value.timestamp() * 1000)
+            ) != expected_open
+        ].copy()
+        incomplete.attrs["timeframe"] = "5m"
+        feed = IncompleteThenFreshFeed(incomplete, fresh)
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=0
+        )
+        stream._merge_frame("futures", "BTCUSDT", "5m", incomplete)
+
+        self.assertEqual(
+            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
+            [],
+        )
+        self.assertEqual(feed.calls, 1)
+        # A valid HTTP response without the exact candle is not marked done;
+        # it is retried after the bounded 30-second cooldown.
+        key = ("futures", "BTCUSDT", expected_open)
+        self.assertIn(key, stream._last_rest_refresh_cycle)
+        self.assertEqual(
+            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
+            [],
+        )
+        self.assertEqual(feed.calls, 1)
+        stream._last_rest_refresh_attempt_at[key] -= 31.0
+
+        self.assertEqual(
+            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
+            ["BTCUSDT"],
+        )
+        self.assertEqual(feed.calls, 2)
+        self.assertEqual(feed.kwargs[-1]["start_time"], expected_open - 300000)
+        self.assertEqual(feed.kwargs[-1]["end_time"], expected_open + 299999)
+
     def test_failed_stale_refresh_can_retry_in_same_cycle(self):
         class RetryFeed:
             def __init__(self, frame):
