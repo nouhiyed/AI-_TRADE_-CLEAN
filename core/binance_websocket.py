@@ -84,6 +84,10 @@ class BinanceKlineStream:
         self._warm_errors = {}
         # One bounded REST refresh per stale symbol and 5m cycle.
         self._last_rest_refresh_cycle = set()
+        # A successful HTTP response may still omit the exact requested candle.
+        # Keep per-symbol retry timestamps so missing-cycle responses are retried
+        # with bounded backoff instead of being mistaken for reconciliation.
+        self._last_rest_refresh_attempt_at = {}
         self._status = {
             market: {
                 "connected": False, "fully_connected": False, "state": "stopped",
@@ -651,6 +655,10 @@ class BinanceKlineStream:
                 item for item in self._last_rest_refresh_cycle
                 if item[2] >= expected_open - interval_ms
             }
+            self._last_rest_refresh_attempt_at = {
+                key: stamp for key, stamp in self._last_rest_refresh_attempt_at.items()
+                if key[2] >= expected_open - interval_ms
+            }
         stale = []
         for symbol in symbols:
             symbol = str(symbol).upper()
@@ -667,16 +675,21 @@ class BinanceKlineStream:
                         not exact_rows.empty
                         and exact_rows.iloc[-1].get("is_closed", False)
                     )
-            # A newer in-progress WebSocket row does not prove that the
-            # previous closed cycle exists. Refresh whenever that exact cycle
-            # is absent, even if the cache's final row is newer.
-            if has_expected_closed:
-                continue
             refresh_key = (market, symbol, expected_open)
+            if has_expected_closed:
+                with self._lock:
+                    self._last_rest_refresh_cycle.add(refresh_key)
+                continue
             with self._lock:
-                if refresh_key in self._last_rest_refresh_cycle:
+                last_attempt = self._last_rest_refresh_attempt_at.get(refresh_key)
+                # A valid HTTP response is not enough: it must contain this
+                # exact candle. Retry missing-cycle responses every 30 seconds.
+                if (refresh_key in self._last_rest_refresh_cycle
+                        and last_attempt is not None
+                        and time.monotonic() - last_attempt < 30.0):
                     continue
                 self._last_rest_refresh_cycle.add(refresh_key)
+                self._last_rest_refresh_attempt_at[refresh_key] = time.monotonic()
             stale.append(symbol)
 
         if not stale:
@@ -684,13 +697,27 @@ class BinanceKlineStream:
 
         refreshed = []
         def refresh(symbol):
+            # Request the expected interval and its predecessor explicitly;
+            # do not trust a latest-page response to prove exact-cycle coverage.
             frame = fetch(
                 market, symbol, "5m",
                 limit=self.CACHE_LIMITS[market]["5m"],
                 closed_only=True,
+                start_time=max(0, expected_open - interval_ms),
+                end_time=expected_open + interval_ms - 1,
             )
             self._merge_frame(market, symbol, "5m", frame)
-            return symbol
+            with self._cache_lock:
+                merged = self._cache.get((market, symbol, "5m"))
+                if merged is None or merged.empty:
+                    return False
+                opens = pd.to_datetime(merged["open_time"], utc=True)
+                exact = merged.loc[
+                    opens.map(lambda value: self._row_key(value)) == expected_open
+                ]
+                return bool(
+                    not exact.empty and bool(exact.iloc[-1].get("is_closed", False))
+                )
 
         # Keep REST concurrency bounded; Binance requests retain the existing
         # per-market pacing and only stale symbols are refreshed.
@@ -702,14 +729,22 @@ class BinanceKlineStream:
             for future in as_completed(futures):
                 symbol = futures[future]
                 try:
-                    refreshed.append(future.result())
+                    if future.result():
+                        refreshed.append(symbol)
+                    else:
+                        with self._lock:
+                            self._status[market]["cache_warmup_last_error"] = (
+                                symbol + " 5m refresh: Binance response did not contain "
+                                "the exact closed cycle " + str(expected_open)
+                            )
                 except Exception as error:
-                    # Failed requests must be retryable in this same candle
-                    # cycle; otherwise one transient timeout leaves the pair
-                    # unreconciled until the next 5m interval.
+                    # Transport failures remain immediately retryable.
                     with self._lock:
                         self._last_rest_refresh_cycle.discard(
                             (market, symbol, expected_open)
+                        )
+                        self._last_rest_refresh_attempt_at.pop(
+                            (market, symbol, expected_open), None
                         )
                         self._status[market]["cache_warmup_last_error"] = (
                             symbol + " 5m refresh: " + str(error)
@@ -805,6 +840,41 @@ class BinanceKlineStream:
                                 )
                         if self._stop.is_set():
                             return
+                # Recompute health after warmup so published cache counters
+                # describe the current cache, not the pre-warmup snapshot.
+                ready_after = {
+                    symbol for symbol in current_symbols
+                    if self._snapshot(market, symbol) is not None
+                }
+                reasons_after = {}
+                samples_after = []
+                for symbol in current_symbols:
+                    if symbol in ready_after:
+                        continue
+                    for interval in self._active_intervals(market):
+                        with self._cache_lock:
+                            frame = self._cache.get((market, symbol, interval))
+                        reason = self._frame_health_reason(market, interval, frame)
+                        if reason:
+                            reasons_after[reason] = reasons_after.get(reason, 0) + 1
+                            if len(samples_after) < 12:
+                                samples_after.append({
+                                    "symbol": symbol, "interval": interval,
+                                    "reason": reason,
+                                    "rows": 0 if frame is None else int(len(frame)),
+                                    "required_rows": int(self.REQUIRED_ROWS[market].get(
+                                        interval, self.CACHE_LIMITS[market][interval])),
+                                })
+                            break
+                with self._lock:
+                    self._cache_ready = {
+                        key for key in self._cache_ready
+                        if key[0] != market or key[1] not in current_symbols
+                    } | {(market, symbol) for symbol in ready_after}
+                    self._status[market]["cache_ready_symbols"] = len(ready_after)
+                    self._status[market]["cache_warmup_completed"] = len(ready_after)
+                    self._status[market]["cache_not_ready_reasons"] = reasons_after
+                    self._status[market]["cache_not_ready_samples"] = samples_after
             # Re-read the registered universe after each pass. This worker is
             # intentionally retained across WebSocket reconnects.
             if self._stop.wait(10):
