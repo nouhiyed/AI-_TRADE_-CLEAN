@@ -130,7 +130,7 @@ class BinanceMarketData:
                                 # Shared public egress IPs can receive a short
                                 # 429 window without Retry-After. Back off once
                                 # before declaring the endpoint unavailable.
-                                wait_seconds = _BINANCE_DEFAULT_429_RETRY_SECONDS
+                                wait_seconds = _BINANCE_DEFAULT_429_RETRY_SECONDS * (2 ** attempt)
 
                         remaining = deadline - time.monotonic()
                         if attempt < _BINANCE_MAX_429_RETRIES and wait_seconds < remaining:
