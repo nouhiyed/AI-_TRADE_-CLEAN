@@ -208,7 +208,8 @@ def initialize_runtime():
     coordinator.market_context = market_context
     autopilot = Autopilot(coordinator, context=market_context)
     market_stream = BinanceKlineStream(
-        coordinator.market_feed, autopilot.on_market_kline
+        coordinator.market_feed, autopilot.on_market_kline,
+        on_universe=autopilot.register_symbol_universe,
     )
 
 
