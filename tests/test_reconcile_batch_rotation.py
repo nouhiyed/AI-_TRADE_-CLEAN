@@ -1,6 +1,6 @@
 import unittest
 
-from api.main import select_reconcile_batch
+from api.main import reconcile_completed_symbols, select_reconcile_batch
 
 
 class ReconcileBatchRotationTests(unittest.TestCase):
@@ -22,6 +22,38 @@ class ReconcileBatchRotationTests(unittest.TestCase):
 
         self.assertFalse(pending)
         self.assertEqual(visited, universe)
+
+    def test_precompleted_symbols_are_removed_from_all_pending_sets(self):
+        universe = {"PAIR%03dUSDT" % index for index in range(250)}
+        precompleted = set(sorted(universe)[:62])
+        state = {
+            "symbols": set(universe),
+            "pending": set(universe),
+            "accepted": set(),
+            "completed": set(),
+            "missing_cache": set(precompleted),
+            "queue_rejected": set(precompleted),
+        }
+
+        reconcile_completed_symbols(state, precompleted)
+
+        self.assertEqual(state["completed"], precompleted)
+        self.assertEqual(state["accepted"], precompleted)
+        self.assertEqual(state["pending"], universe - precompleted)
+        self.assertFalse(state["pending"].intersection(state["completed"]))
+        self.assertFalse(state["missing_cache"])
+        self.assertFalse(state["queue_rejected"])
+
+        # A later audit completion must also clear symbols that were pending
+        # when the reconciliation worker first started.
+        remaining = universe - precompleted
+        reconcile_completed_symbols(state, remaining)
+        self.assertEqual(state["completed"], universe)
+        self.assertEqual(state["accepted"], universe)
+        self.assertFalse(state["pending"])
+        self.assertFalse(state["missing_cache"])
+        self.assertFalse(state["queue_rejected"])
+
 
     def test_symbols_without_cache_are_retried_after_full_rotation(self):
         universe = {"PAIR%03dUSDT" % index for index in range(250)}
