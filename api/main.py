@@ -28,8 +28,8 @@ autopilot = None
 market_stream = None
 monitor_thread = None
 
-# Continuous market scanning is analysis-only. It never invokes the execution
-# engine or Autopilot. Every pass analyzes the complete eligible Binance universe.
+# Full-universe analysis is driven by closed 5m WebSocket events plus
+# cache reconciliation. The observer below only publishes scan/coverage metrics.
 scan_status = {
     "running": False,
     "futures": {
@@ -198,6 +198,19 @@ def full_universe_reconcile_worker():
                     state["completed"].difference_update(removed)
                     state["missing_cache"].difference_update(removed)
                     state["queue_rejected"].difference_update(removed)
+
+                # If a cache-ready callback could not enqueue an event, it
+                # removes that candle's dedupe marker. Re-queue it for retry.
+                completed_before = set(autopilot.completed_symbols_for_cycle(
+                    domain, expected_open_time_ms, sorted(state["symbols"])
+                ).get("completed", []))
+                state["completed"].update(completed_before)
+                for symbol in list(state["accepted"] - state["completed"]):
+                    if not autopilot.has_seen_candle(
+                        domain, symbol, expected_open_time_ms
+                    ):
+                        state["accepted"].discard(symbol)
+                        state["pending"].add(symbol)
 
                 pending = sorted(state["pending"])
                 if pending:
