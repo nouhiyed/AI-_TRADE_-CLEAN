@@ -179,6 +179,12 @@ class BinanceCandleCacheTests(unittest.TestCase):
     def test_client_ping_timer_is_disabled_to_avoid_false_pong_timeouts(self):
         self.assertEqual(BinanceKlineStream.CLIENT_PING_INTERVAL_SECONDS, 0)
 
+    def test_spot_uses_official_market_data_only_websocket_endpoint(self):
+        self.assertEqual(
+            BinanceKlineStream.BASE_URLS["spot"],
+            "wss://data-stream.binance.vision:443/ws",
+        )
+
     def test_futures_uses_current_binance_market_websocket_endpoint(self):
         self.assertEqual(
             BinanceKlineStream.BASE_URLS["futures"],
