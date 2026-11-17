@@ -75,6 +75,23 @@ def select_reconcile_batch(universe_symbols, pending_symbols, cursor, batch_size
     return selected, (start + size) % len(ordered)
 
 
+def reconcile_completed_symbols(state, completed_symbols):
+    """Synchronize pre-completed analysis with the reconciliation work queue.
+
+    WebSocket analysis can finish before the reconciliation worker creates its
+    per-cycle state. Such symbols must be removed from pending/retry sets as
+    soon as the worker discovers their completion; otherwise one symbol is
+    simultaneously counted as completed and pending.
+    """
+    completed = set(completed_symbols or [])
+    state.setdefault("completed", set()).update(completed)
+    state.setdefault("accepted", set()).update(completed)
+    state.setdefault("pending", set()).difference_update(completed)
+    state.setdefault("queue_rejected", set()).difference_update(completed)
+    state.setdefault("missing_cache", set()).difference_update(completed)
+    return completed
+
+
 def record_scan_progress(domain, details):
     details = details if isinstance(details, dict) else {}
     with scan_status_lock:
@@ -229,7 +246,7 @@ def full_universe_reconcile_worker():
                 completed_before = set(autopilot.completed_symbols_for_cycle(
                     domain, expected_open_time_ms, sorted(state["symbols"])
                 ).get("completed", []))
-                state["completed"].update(completed_before)
+                reconcile_completed_symbols(state, completed_before)
 
                 for symbol in list(state["accepted"] - state["completed"]):
                     if not autopilot.has_seen_candle(
@@ -286,7 +303,7 @@ def full_universe_reconcile_worker():
                 )
                 state["completed"] = set(audit.get("completed", []))
                 state["analysis_errors"] = len(audit.get("errors", []))
-                state["accepted"].update(state["completed"])
+                reconcile_completed_symbols(state, state["completed"])
                 state["complete"] = bool(state["symbols"]) and (
                     state["completed"] == state["symbols"]
                     and not state["pending"]
