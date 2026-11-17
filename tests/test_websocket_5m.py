@@ -214,6 +214,18 @@ class BinanceCandleCacheTests(unittest.TestCase):
         gap.loc[gap.index[-1], "open_time"] += pd.Timedelta(minutes=5)
         self.stream._merge_frame("futures", "ETHUSDT", "5m", gap)
         self.assertIsNone(self.stream._snapshot("futures", "ETHUSDT"))
+        cached_gap = self.stream._cache[("futures", "ETHUSDT", "5m")]
+        self.assertEqual(
+            self.stream._frame_health_reason("futures", "5m", cached_gap),
+            "non_contiguous_candles",
+        )
+
+        short = candle_frame("5min", rows=20)
+        short.attrs["timeframe"] = "5m"
+        self.assertEqual(
+            self.stream._frame_health_reason("futures", "5m", short),
+            "insufficient_rows",
+        )
 
         stale = candle_frame("5min")
         stale.attrs["timeframe"] = "5m"
