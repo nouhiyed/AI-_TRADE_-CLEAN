@@ -17,7 +17,9 @@ from websocket import WebSocketApp
 
 class BinanceKlineStream:
     BASE_URLS = {
-        "spot": "wss://stream.binance.com:9443/ws",
+        # Spot market-data-only endpoint is the official public stream mirror;
+        # no user-data streams are consumed by this application.
+        "spot": "wss://data-stream.binance.vision:443/ws",
         "futures": "wss://fstream.binance.com/market/stream",
     }
     CACHE_LIMITS = {
