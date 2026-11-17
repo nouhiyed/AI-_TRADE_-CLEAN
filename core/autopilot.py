@@ -61,8 +61,9 @@ class Autopilot:
         self._universe_initialized = {"futures": False, "spot": False}
         self._symbol_audit_totals = {
             domain: {
-                "events_received": 0, "prefilter_passed": 0,
-                "prefilter_rejected": 0, "deep_analysis": 0,
+                "events_received": 0, "cache_waiting": 0,
+                "cache_replayed": 0, "audit_only": 0,
+                "prefilter_passed": 0, "prefilter_rejected": 0, "deep_analysis": 0,
                 "actionable": 0, "opened": 0, "errors": 0,
                 "stale": 0, "queue_rejected": 0,
                 "entry_queued": 0, "entry_submitted": 0,
@@ -320,6 +321,7 @@ class Autopilot:
                     "symbols_seen_recently": symbols_seen_recently,
                     "symbols_audited_recently": symbols_audited_recently,
                     "symbols_waiting_for_first_event": max(0, len(active_symbols) - symbols_seen),
+                    "symbols_waiting_for_cache": states.get("waiting_cache", 0),
                     "last_symbol": latest.get("symbol"),
                     "last_state": latest.get("state"),
                     "last_updated_at_ms": latest.get("updated_at_ms"),
@@ -553,13 +555,16 @@ class Autopilot:
                 if len(self._event_seen) > 20000:
                     self._event_seen = set(list(self._event_seen)[-10000:])
             frames = event.get("market_data")
+            if isinstance(frames, dict) and frames:
+                with self._event_lock:
+                    self._waiting_cache_events.pop(key, None)
             if not isinstance(frames, dict) or not frames:
                 with self._event_lock:
                     previous = self._waiting_cache_events.get(key)
                     if previous is None or int(previous.get("close_time") or 0) < int(event.get("close_time") or 0):
                         self._waiting_cache_events[key] = dict(event)
                 self._record_symbol_audit(
-                    domain, symbol, "waiting_cache", increment="events_received",
+                    domain, symbol, "waiting_cache", increment="events_received", also_increment="cache_waiting",
                     close_time_ms=int(event.get("close_time") or 0),
                     reason="Closed 5m candle retained until its historical cache is ready",
                 )
@@ -599,7 +604,7 @@ class Autopilot:
         accepted = self._queue_latest_analysis(domain, symbol, replay, count_event=False)
         if accepted:
             self._record_symbol_audit(
-                domain, symbol, "cache_replayed",
+                domain, symbol, "cache_replayed", increment="cache_replayed",
                 reason="Retained closed candle replayed after cache warmup",
             )
         else:
@@ -815,7 +820,7 @@ class Autopilot:
                 cfg = dict(self.config)
                 if audit_only:
                     self._record_symbol_audit(
-                        domain, symbol, "audit_only_candidate",
+                        domain, symbol, "audit_only_candidate", increment="audit_only",
                         reason="Delayed cache/worker replay is audited but cannot open a late trade",
                         direction=direction, setup=plan.get("setup"),
                     )
