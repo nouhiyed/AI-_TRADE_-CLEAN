@@ -136,6 +136,17 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m"})
 
+    def test_snapshot_rejects_cache_one_closed_candle_behind(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0
+        )
+        frame = candle_frame("5min", rows=100)
+        frame.attrs["timeframe"] = "5m"
+        frame["open_time"] -= pd.Timedelta(minutes=5)
+        frame["close_time"] -= pd.Timedelta(minutes=5)
+        stream._merge_frame("futures", "STALEUSDT", "5m", frame)
+        self.assertIsNone(stream._snapshot("futures", "STALEUSDT"))
+
     def test_cache_becoming_ready_after_warmup_replays_retained_close(self):
         callbacks = []
         self.stream.on_cache_ready = (
