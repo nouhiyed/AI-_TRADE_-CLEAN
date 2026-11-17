@@ -168,6 +168,9 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertEqual(callbacks[0][0:2], ("futures", "BTCUSDT"))
         self.assertEqual(callbacks[0][2], {"5m": "healthy-frame"})
 
+    def test_client_ping_timer_is_disabled_to_avoid_false_pong_timeouts(self):
+        self.assertEqual(BinanceKlineStream.CLIENT_PING_INTERVAL_SECONDS, 0)
+
     def test_futures_uses_current_binance_market_websocket_endpoint(self):
         self.assertEqual(
             BinanceKlineStream.BASE_URLS["futures"],
