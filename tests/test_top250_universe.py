@@ -83,6 +83,35 @@ class Top250UniverseTests(unittest.TestCase):
         self.assertIn(3.0, [call.args[0] for call in sleep.call_args_list])
 
 
+    def test_repeated_429_uses_bounded_backoff_without_fallback_burst(self):
+        class Response:
+            status_code = 429
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"code": -1003, "msg": "Too many requests"}
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response()
+
+        feed = BinanceMarketData(timeout=30, total_timeout=30)
+        feed.session = Session()
+        with patch("core.binance_market_data.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 429"):
+                feed._request("futures", "/fapi/v1/exchangeInfo", {})
+
+        self.assertEqual(feed.session.calls, 4)
+        delays = [call.args[0] for call in sleep.call_args_list]
+        self.assertTrue(all(delay in delays for delay in (3.0, 6.0, 12.0)))
+
     def test_ranking_combines_24h_volume_book_liquidity_and_spread(self):
         feed = RankedMarketFeed()
 
