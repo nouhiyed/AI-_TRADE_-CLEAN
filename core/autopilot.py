@@ -8,6 +8,7 @@ import math
 import os
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -48,7 +49,7 @@ class Autopilot:
         self._cooldown = {}          # symbol -> unix time when it may trade again
         self._lock = threading.Lock()
         self._event_lock = threading.RLock()
-        self._event_seen = set()
+        self._event_seen = OrderedDict()
         self._pending_entries = {}
         # One retained closed candle per symbol while its cache warms.
         self._waiting_cache_events = {}
@@ -560,9 +561,9 @@ class Autopilot:
         with self._event_lock:
             if identity in self._event_seen:
                 return False
-            self._event_seen.add(identity)
+            self._event_seen[identity] = None
             if len(self._event_seen) > 20000:
-                self._event_seen = set(list(self._event_seen)[-10000:])
+                self._event_seen.popitem(last=False)
 
         frames = event.get("market_data")
         if isinstance(frames, dict) and frames:
@@ -592,7 +593,7 @@ class Autopilot:
             # A rejected submission must be eligible for the next reconciliation
             # pass; otherwise the dedupe marker would turn a temporary full queue
             # into a permanent lost candle.
-            self._event_seen.discard(identity)
+            self._event_seen.pop(identity, None)
             self._waiting_cache_events[key] = dict(event)
         return False
 
@@ -627,9 +628,9 @@ class Autopilot:
             )
         else:
             with self._event_lock:
-                self._event_seen.discard((
+                self._event_seen.pop((
                     domain, symbol, int(replay.get("open_time") or 0)
-                ))
+                ), None)
                 self._waiting_cache_events[key] = replay
         return accepted
 
