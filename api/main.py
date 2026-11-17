@@ -520,16 +520,13 @@ class APIHandler(BaseHTTPRequestHandler):
                 market = params.get("market", ["spot"])[0].lower()
                 if market not in {"spot", "futures"}:
                     return self.send_json({"error": "Unsupported market"}, 400)
-                symbols = (
-                    market_stream.registered_symbols(market)
-                    if market_stream else []
+                # The market-data feed owns the UTC-day ranking cache;
+                # return its ranked order rather than alphabetically sorting
+                # the stream's internal symbol set.
+                ranked = coordinator.market_feed.fetch_top_symbols(
+                    market, limit=250
                 )
-                ranked = []
-                if len(symbols) != 250:
-                    ranked = coordinator.market_feed.fetch_top_symbols(
-                        market, limit=250
-                    )
-                    symbols = [item["symbol"] for item in ranked]
+                symbols = [item["symbol"] for item in ranked]
                 stream_state = (
                     market_stream.status().get(market, {})
                     if market_stream else {}
