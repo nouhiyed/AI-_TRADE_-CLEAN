@@ -482,6 +482,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         frame = candle_frame("5min", rows=60)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("spot", "BTCUSDT", "5m", frame)
+        stream._market_symbols["spot"] = {"BTCUSDT"}
         actual_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
         batch = stream.latest_closed_events("spot", actual_open + 300000)
         self.assertEqual(batch["events"], [])
