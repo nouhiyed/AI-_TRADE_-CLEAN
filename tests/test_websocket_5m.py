@@ -562,6 +562,49 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         self.assertEqual(batch["events"][0]["open_time"], expected_open)
         self.assertEqual(batch["missing_symbols"], [])
 
+    def test_stale_healthy_cache_is_refreshed_once_per_5m_cycle(self):
+        class RefreshFeed:
+            def __init__(self, frame):
+                self.frame = frame
+                self.calls = []
+
+            def fetch_candles(self, market, symbol, interval, **kwargs):
+                self.calls.append((market, symbol, interval, kwargs))
+                return self.frame.copy()
+
+        now_ms = int(time.time() * 1000)
+        expected_open = ((now_ms // 300000) - 1) * 300000
+        stale = candle_frame("5min", rows=100)
+        stale.attrs["timeframe"] = "5m"
+        stale["open_time"] -= pd.Timedelta(minutes=5)
+        stale["close_time"] -= pd.Timedelta(minutes=5)
+        fresh = candle_frame("5min", rows=100)
+        fresh.attrs["timeframe"] = "5m"
+        feed = RefreshFeed(fresh)
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=0
+        )
+        stream._merge_frame("futures", "BTCUSDT", "5m", stale)
+
+        refreshed = stream._refresh_stale_5m(
+            "futures", ["BTCUSDT"], now_ms=now_ms
+        )
+        self.assertEqual(refreshed, ["BTCUSDT"])
+        self.assertEqual(len(feed.calls), 1)
+        self.assertEqual(
+            stream._row_key(
+                stream._cache[("futures", "BTCUSDT", "5m")].iloc[-1]["open_time"]
+            ),
+            expected_open,
+        )
+
+        # Repeated warmup passes in the same cycle must not repeat REST calls.
+        self.assertEqual(
+            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
+            [],
+        )
+        self.assertEqual(len(feed.calls), 1)
+
     def test_cache_reconciliation_rejects_a_different_candle_cycle(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
