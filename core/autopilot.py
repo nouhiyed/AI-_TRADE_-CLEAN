@@ -75,7 +75,9 @@ class Autopilot:
         # of spawning one operating-system thread per coin.
         workers = min(8, max(1, int(os.environ.get(
             "AI_TRADER_ANALYSIS_WORKERS_PER_MARKET", "4"))))
-        queue_limit = min(2048, max(64, int(os.environ.get(
+        # Reserve at least one scheduled slot for every symbol in a
+        # Binance full-universe market (up to the current 1020-stream chunk).
+        queue_limit = min(2048, max(1024, int(os.environ.get(
             "AI_TRADER_ANALYSIS_QUEUE_LIMIT", "1024"))))
         self._analysis_pools = {
             domain: ThreadPoolExecutor(
