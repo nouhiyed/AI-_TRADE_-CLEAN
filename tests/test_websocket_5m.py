@@ -750,6 +750,13 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(
             stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
+            [],
+        )
+        self.assertEqual(feed.calls, 1)
+        key = ("futures", "BTCUSDT", ((now_ms // 300000) - 1) * 300000)
+        stream._last_rest_refresh_attempt_at[key] -= 31.0
+        self.assertEqual(
+            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
             ["BTCUSDT"],
         )
         self.assertEqual(feed.calls, 2)
