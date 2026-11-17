@@ -2,16 +2,6 @@ name: Live Binance top-250 cycle verification
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - 'core/**'
-      - 'agents/**'
-      - 'api/**'
-      - 'scripts/live_binance_cycle_smoke.py'
-      - '.github/workflows/live-binance-cycle-smoke.yml'
-      - 'requirements.txt'
 
 permissions:
   contents: read
