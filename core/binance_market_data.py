@@ -19,9 +19,10 @@ _BINANCE_REQUEST_LOCKS = {
     "futures": threading.Lock(),
 }
 _BINANCE_LAST_REQUEST_AT = {"spot": 0.0, "futures": 0.0}
-_BINANCE_MIN_REQUEST_INTERVAL = 0.12
-_BINANCE_DEFAULT_429_RETRY_SECONDS = 3.0
-_BINANCE_MAX_429_RETRIES = 3
+_BINANCE_COOLDOWN_UNTIL = {"spot": 0.0, "futures": 0.0}
+_BINANCE_MIN_REQUEST_INTERVAL = 0.25
+_BINANCE_DEFAULT_429_RETRY_SECONDS = 5.0
+_BINANCE_MAX_429_RETRIES = 5
 
 
 class _BinanceRateLimitError(RuntimeError):
@@ -63,7 +64,7 @@ class BinanceMarketData:
         "taker_buy_base", "taker_buy_quote", "ignore",
     ]
 
-    def __init__(self, timeout=30, total_timeout=30):
+    def __init__(self, timeout=240, total_timeout=240):
         self.timeout = max(0.1, float(timeout))
         self.total_timeout = max(0.1, float(total_timeout))
         self.session = requests.Session()
@@ -82,7 +83,7 @@ class BinanceMarketData:
             raise ValueError("Market must be spot or futures")
 
         failures = []
-        deadline = time.monotonic() + min(self.timeout, self.total_timeout)
+        deadline = time.monotonic() + max(self.timeout, self.total_timeout)
 
         for base_url in self.FALLBACK_URLS[market]:
             attempt = 0
@@ -92,17 +93,27 @@ class BinanceMarketData:
                     failures.append("overall request time budget exhausted")
                     break
 
-                # Per-market pacing: Futures and Spot progress independently.
+                # Serialize request dispatch per market. A 429 establishes a
+                # shared cooldown so parallel workers cannot retry in a burst.
                 with _BINANCE_REQUEST_LOCKS[market]:
-                    wait = _BINANCE_MIN_REQUEST_INTERVAL - (
-                        time.monotonic() - _BINANCE_LAST_REQUEST_AT[market]
-                    )
-                    if wait > 0:
+                    while True:
+                        now = time.monotonic()
+                        pacing_wait = _BINANCE_MIN_REQUEST_INTERVAL - (
+                            now - _BINANCE_LAST_REQUEST_AT[market]
+                        )
+                        cooldown_wait = _BINANCE_COOLDOWN_UNTIL[market] - now
+                        wait = max(0.0, pacing_wait, cooldown_wait)
+                        remaining = deadline - now
+                        if remaining <= 0:
+                            failures.append("overall request time budget exhausted")
+                            break
+                        if wait <= 0:
+                            _BINANCE_LAST_REQUEST_AT[market] = now
+                            break
                         time.sleep(min(wait, remaining))
                     if time.monotonic() >= deadline:
                         failures.append("overall request time budget exhausted")
                         break
-                    _BINANCE_LAST_REQUEST_AT[market] = time.monotonic()
 
                 try:
                     response = self.session.get(
@@ -141,14 +152,19 @@ class BinanceMarketData:
                                     (retry_at - datetime.now(timezone.utc)).total_seconds(),
                                 )
                             except (TypeError, ValueError, OverflowError):
-                                # Shared public egress IPs can receive a short
-                                # 429 window without Retry-After. Back off once
-                                # before declaring the endpoint unavailable.
+                                # Public/shared egress can receive temporary
+                                # rate limits without a Retry-After header.
                                 wait_seconds = _BINANCE_DEFAULT_429_RETRY_SECONDS * (2 ** attempt)
 
+                        # Publish the cooldown to every worker before releasing
+                        # the request lock. All subsequent requests observe it.
+                        with _BINANCE_REQUEST_LOCKS[market]:
+                            _BINANCE_COOLDOWN_UNTIL[market] = max(
+                                _BINANCE_COOLDOWN_UNTIL[market],
+                                time.monotonic() + wait_seconds,
+                            )
                         remaining = deadline - time.monotonic()
                         if attempt < _BINANCE_MAX_429_RETRIES and wait_seconds < remaining:
-                            time.sleep(wait_seconds)
                             attempt += 1
                             continue
 
