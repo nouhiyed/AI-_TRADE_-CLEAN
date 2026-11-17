@@ -65,6 +65,7 @@ class BinanceKlineStream:
         self._connection_threads = []
         self._connection_live = {}
         self._symbol_connection = {}
+        self._market_symbols = {"spot": set(), "futures": set()}
         self._cache = {}
         self._cache_ready = set()
         self._last_open = {}
@@ -121,6 +122,88 @@ class BinanceKlineStream:
             index = self._symbol_connection.get(key)
             return index is not None and bool(
                 self._connection_live.get((key[0], index), False))
+
+    def registered_symbols(self, market):
+        """Return the current eligible 5m universe for one market."""
+        market = str(market).strip().lower()
+        if market not in self._market_symbols:
+            return []
+        with self._lock:
+            return sorted(self._market_symbols[market])
+
+    def latest_closed_events(self, market, expected_open_time_ms, symbols=None):
+        """Build cache-backed audit events for the exact latest closed 5m candle.
+
+        This is a bounded fallback for symbols whose close notification was
+        missed. It reads the already-warmed Binance cache only (no REST calls),
+        and marks delayed candles audit-only so an old cache snapshot cannot
+        create a late entry.
+        """
+        market = str(market).strip().lower()
+        if market not in self._market_symbols:
+            return {"registered": 0, "requested": 0, "events": [],
+                    "missing_symbols": []}
+        expected_open_time_ms = int(expected_open_time_ms or 0)
+        with self._lock:
+            registered = set(self._market_symbols[market])
+        requested = registered if symbols is None else (
+            registered.intersection(
+                str(symbol).strip().upper() for symbol in symbols
+                if str(symbol).strip()
+            )
+        )
+        events = []
+        missing = []
+        now_ms = int(time.time() * 1000)
+        for symbol in sorted(requested):
+            try:
+                frames = self._snapshot(market, symbol)
+                frame = (frames or {}).get("5m")
+                if frame is None or frame.empty:
+                    missing.append(symbol)
+                    continue
+                row = frame.iloc[-1]
+                if not bool(row.get("is_closed", False)):
+                    missing.append(symbol)
+                    continue
+                open_ms = self._row_key(row["open_time"])
+                close_ms = self._row_key(row["close_time"])
+                if open_ms != expected_open_time_ms or close_ms > now_ms + 10000:
+                    missing.append(symbol)
+                    continue
+                age_ms = max(0, now_ms - close_ms)
+                if age_ms > 2 * self.INTERVAL_MS["5m"] + 30000:
+                    missing.append(symbol)
+                    continue
+                events.append({
+                    "symbol": symbol,
+                    "interval": "5m",
+                    "open_time": open_ms,
+                    "close_time": close_ms,
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                    # A cache reconciliation event is anchored to the candle
+                    # close, not to the time this fallback happened to run.
+                    "event_time": close_ms + 1,
+                    "is_closed": True,
+                    "first_update": False,
+                    "source": "binance_cache_reconciliation",
+                    "market_data": frames,
+                    "cache_ready": True,
+                    "audit_only": age_ms > 30000,
+                })
+            except Exception:
+                missing.append(symbol)
+        return {
+            "registered": len(registered),
+            "requested": len(requested),
+            "available": len(events),
+            "events": events,
+            "missing_symbols": missing,
+        }
 
     def _active_intervals(self, market):
         # Full-universe mode streams only the fast trigger timeframe for every
@@ -502,6 +585,11 @@ class BinanceKlineStream:
                                 market, stream_name.split("@", 1)[0].upper()
                             )] = chunk_index
                 with self._lock:
+                    self._market_symbols[market] = set(symbols)
+                    self._symbol_connection = {
+                        key: value for key, value in self._symbol_connection.items()
+                        if key[0] != market
+                    }
                     self._symbol_connection.update(symbol_connections)
                     self._status[market].update({
                         "symbols": len(symbols), "universe_registered": len(symbols),
