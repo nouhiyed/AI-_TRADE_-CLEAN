@@ -51,9 +51,9 @@ class BinanceKlineStream:
             self.max_symbols = 0
         self.full_universe = self.max_symbols == 0
         try:
-            warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "6"))
+            warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "8"))
         except (TypeError, ValueError):
-            warmup_workers = 4
+            warmup_workers = 8
         self.warmup_workers = min(8, max(1, warmup_workers))
         self.refresh_seconds = max(300, int(refresh_seconds))
         self.reconnect_seconds = max(1, int(reconnect_seconds))
@@ -71,6 +71,11 @@ class BinanceKlineStream:
         self._closed_seen = set()
         self._latest_candles = {}
         self._warm_errors = {}
+        self._symbols_by_market = {"spot": [], "futures": []}
+        self._last_audit_cycle_open = {"spot": None, "futures": None}
+        self._audit_cycle_grace_ms = max(
+            1000, int(os.environ.get("AI_TRADER_5M_AUDIT_GRACE_MS", "5000"))
+        )
         self._status = {
             market: {
                 "connected": False, "fully_connected": False, "state": "stopped",
@@ -79,6 +84,8 @@ class BinanceKlineStream:
                 "reconnects": 0, "watchdog_restarts": 0, "last_error": None,
                 "cache_ready_symbols": 0, "cache_warmup_total": 0,
                 "cache_warmup_completed": 0, "cache_warmup_errors": 0,
+                "audit_cycles_completed": 0, "audit_cycle_last_open_time_ms": None,
+                "audit_cycle_last_symbols": 0, "audit_cycle_synthetic_symbols": 0,
             }
             for market in ("spot", "futures")
         }
@@ -151,6 +158,12 @@ class BinanceKlineStream:
         )
         self._threads["watchdog"] = watchdog
         watchdog.start()
+        audit_clock = threading.Thread(
+            target=self._audit_cycle_loop, name="binance-5m-audit-clock",
+            daemon=True,
+        )
+        self._threads["audit_clock"] = audit_clock
+        audit_clock.start()
         return self.status()
 
     def stop(self):
@@ -300,9 +313,12 @@ class BinanceKlineStream:
             with self._lock:
                 self._status[market]["last_error"] = "cache candle: " + str(error)
 
-    def _frame_healthy(self, market, interval, frame, now_ms=None):
-        minimum = self.REQUIRED_ROWS[market].get(
-            interval, self.CACHE_LIMITS[market][interval])
+    def _frame_healthy(self, market, interval, frame, now_ms=None, minimum_rows=None):
+        minimum = (
+            int(minimum_rows) if minimum_rows is not None
+            else self.REQUIRED_ROWS[market].get(
+                interval, self.CACHE_LIMITS[market][interval])
+        )
         if frame is None or len(frame) < minimum:
             return False
         if "is_closed" not in frame.columns or not bool(frame["is_closed"].iloc[-1]):
@@ -328,7 +344,7 @@ class BinanceKlineStream:
         except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
             return False
 
-    def _snapshot(self, market, symbol):
+    def _snapshot(self, market, symbol, minimum_5m_rows=None):
         required = (
             {"5m": self.REQUIRED_ROWS[market]["5m"]}
             if self.full_universe else self.REQUIRED_ROWS[market]
@@ -337,7 +353,9 @@ class BinanceKlineStream:
         with self._cache_lock:
             for interval, minimum in required.items():
                 frame = self._cache.get((market, symbol, interval))
-                if not self._frame_healthy(market, interval, frame):
+                if interval == "5m" and minimum_5m_rows is not None:
+                    minimum = max(2, int(minimum_5m_rows))
+                if not self._frame_healthy(market, interval, frame, minimum_rows=minimum):
                     return None
                 copied = frame.copy()
                 copied.attrs.update({
@@ -463,6 +481,8 @@ class BinanceKlineStream:
         while not self._stop.is_set():
             try:
                 symbols = self._load_symbols(market)
+                with self._lock:
+                    self._symbols_by_market[market] = list(symbols)
                 # Provision one logical auditor record for every eligible pair
                 # before websocket events start arriving; status can distinguish
                 # registered coverage from symbols that actually emitted candles.
@@ -522,6 +542,161 @@ class BinanceKlineStream:
                     self._status[market]["last_error"] = str(error)
             if not self._stop.wait(self.reconnect_seconds):
                 continue
+
+    def _audit_cycle_loop(self):
+        """Run one logical 5m audit for every eligible symbol, including quiet pairs."""
+        interval_ms = self.INTERVAL_MS["5m"]
+        while not self._stop.is_set():
+            now_ms = int(time.time() * 1000)
+            target_open = (now_ms // interval_ms) * interval_ms - interval_ms
+            close_time = target_open + interval_ms - 1
+            if now_ms >= close_time + self._audit_cycle_grace_ms:
+                for market in ("spot", "futures"):
+                    with self._lock:
+                        symbols = list(self._symbols_by_market[market])
+                        previous = self._last_audit_cycle_open[market]
+                        if not symbols or previous == target_open:
+                            continue
+                        self._last_audit_cycle_open[market] = target_open
+                    completed = 0
+                    synthetic = 0
+                    for symbol in symbols:
+                        if self._stop.is_set():
+                            return
+                        result = self._emit_universe_close(
+                            market, symbol, target_open, now_ms
+                        )
+                        if result in ("emitted", "synthetic"):
+                            completed += 1
+                        if result == "synthetic":
+                            synthetic += 1
+                    with self._lock:
+                        state = self._status[market]
+                        state["audit_cycles_completed"] += 1
+                        state["audit_cycle_last_open_time_ms"] = target_open
+                        state["audit_cycle_last_symbols"] = completed
+                        state["audit_cycle_synthetic_symbols"] = synthetic
+            self._stop.wait(0.5)
+
+    def _emit_universe_close(self, market, symbol, open_time_ms, now_ms=None):
+        """Finalize a real partial kline or create a zero-volume flat candle for a quiet symbol."""
+        now_ms = int(now_ms or time.time() * 1000)
+        interval_ms = self.INTERVAL_MS["5m"]
+        close_time_ms = open_time_ms + interval_ms - 1
+        identity = (market, symbol, open_time_ms)
+        key = (market, symbol)
+        with self._lock:
+            if identity in self._closed_seen:
+                return "already_seen"
+            latest = dict(self._latest_candles.get(key) or {})
+
+        chosen = None
+        source = "binance_5m_audit_clock"
+        if int(latest.get("open_time") or 0) == open_time_ms:
+            chosen = {
+                "open": float(latest.get("open") or 0),
+                "high": float(latest.get("high") or 0),
+                "low": float(latest.get("low") or 0),
+                "close": float(latest.get("close") or 0),
+                "volume": float(latest.get("volume") or 0),
+                "quote_volume": 0.0, "trades": 0,
+                "taker_buy_base": 0.0, "taker_buy_quote": 0.0,
+                "ignore": 0.0, "is_closed": True,
+            }
+            source = "binance_5m_finalized_partial"
+        else:
+            with self._cache_lock:
+                frame = self._cache.get((market, symbol, "5m"))
+                if frame is not None and not frame.empty:
+                    opens = pd.to_datetime(frame["open_time"], utc=True)
+                    target = frame.loc[opens == pd.to_datetime(
+                        open_time_ms, unit="ms", utc=True)]
+                    if not target.empty:
+                        item = target.iloc[-1]
+                        chosen = {
+                            "open": float(item["open"]), "high": float(item["high"]),
+                            "low": float(item["low"]), "close": float(item["close"]),
+                            "volume": float(item["volume"]),
+                            "quote_volume": float(item.get("quote_volume", 0) or 0),
+                            "trades": int(item.get("trades", 0) or 0),
+                            "taker_buy_base": float(item.get("taker_buy_base", 0) or 0),
+                            "taker_buy_quote": float(item.get("taker_buy_quote", 0) or 0),
+                            "ignore": 0.0, "is_closed": True,
+                        }
+                        source = "binance_5m_history"
+                    else:
+                        previous_rows = frame.loc[opens < pd.to_datetime(
+                            open_time_ms, unit="ms", utc=True)]
+                        if not previous_rows.empty:
+                            price = float(previous_rows.iloc[-1]["close"])
+                            chosen = {
+                                "open": price, "high": price, "low": price,
+                                "close": price, "volume": 0.0,
+                                "quote_volume": 0.0, "trades": 0,
+                                "taker_buy_base": 0.0, "taker_buy_quote": 0.0,
+                                "ignore": 0.0, "is_closed": True,
+                            }
+                elif float(latest.get("close") or 0) > 0:
+                    price = float(latest["close"])
+                    chosen = {
+                        "open": price, "high": price, "low": price,
+                        "close": price, "volume": 0.0,
+                        "quote_volume": 0.0, "trades": 0,
+                        "taker_buy_base": 0.0, "taker_buy_quote": 0.0,
+                        "ignore": 0.0, "is_closed": True,
+                    }
+
+        if chosen is not None:
+            row = {
+                "open_time": pd.to_datetime(open_time_ms, unit="ms", utc=True),
+                **chosen,
+                "close_time": pd.to_datetime(close_time_ms, unit="ms", utc=True),
+            }
+            self._merge_frame(market, symbol, "5m", pd.DataFrame([row]))
+        with self._lock:
+            if identity in self._closed_seen:
+                return "already_seen"
+            self._closed_seen.add(identity)
+            if len(self._closed_seen) > 20000:
+                self._closed_seen = set(list(self._closed_seen)[-10000:])
+            self._latest_candles[key] = {
+                "symbol": symbol, "interval": "5m",
+                "time": open_time_ms // 1000, "open_time": open_time_ms,
+                "open": (chosen or {}).get("open", 0.0),
+                "high": (chosen or {}).get("high", 0.0),
+                "low": (chosen or {}).get("low", 0.0),
+                "close": (chosen or {}).get("close", 0.0),
+                "volume": (chosen or {}).get("volume", 0.0),
+                "is_closed": True, "event_time": close_time_ms + 1,
+                "source": source,
+            }
+
+        frames = self._snapshot(market, symbol, minimum_5m_rows=2)
+        event_time = close_time_ms + 1
+        age_ms = max(0, now_ms - event_time)
+        event = {
+            "symbol": symbol, "interval": "5m",
+            "open_time": open_time_ms, "close_time": close_time_ms,
+            "open": (chosen or {}).get("open", 0.0),
+            "high": (chosen or {}).get("high", 0.0),
+            "low": (chosen or {}).get("low", 0.0),
+            "close": (chosen or {}).get("close", 0.0),
+            "volume": (chosen or {}).get("volume", 0.0),
+            "event_time": event_time, "is_closed": True,
+            "first_update": False, "source": source,
+            "market_data": frames,
+            "cache_ready": bool(
+                frames and len(frames.get("5m", []))
+                >= self.REQUIRED_ROWS[market]["5m"]),
+            "audit_only": age_ms > 30000,
+        }
+        try:
+            self.on_kline(market, event)
+        except Exception as error:
+            with self._lock:
+                self._status[market]["last_error"] = "5m audit cycle callback: " + str(error)
+            return "error"
+        return "synthetic" if source == "binance_5m_audit_clock" else "emitted"
 
     def _run_connection(self, market, index, streams):
         conn_key = (market, index)
@@ -652,7 +827,7 @@ class BinanceKlineStream:
                     self._closed_seen.add(identity)
                     if len(self._closed_seen) > 20000:
                         self._closed_seen = set(list(self._closed_seen)[-10000:])
-                frames = self._snapshot(market, symbol)
+                frames = self._snapshot(market, symbol, minimum_5m_rows=2)
                 self.on_kline(market, {
                     "symbol": symbol, "interval": "5m",
                     "open_time": open_time, "close_time": int(kline.get("T", 0)),
@@ -664,7 +839,9 @@ class BinanceKlineStream:
                     "event_time": event_time, "is_closed": True,
                     "first_update": False, "source": "binance_websocket",
                     "market_data": frames,
-                    "cache_ready": frames is not None,
+                    "cache_ready": bool(
+                        frames and len(frames.get("5m", []))
+                        >= self.REQUIRED_ROWS[market]["5m"]),
                 })
             elif opening_event:
                 self.on_kline(market, {
