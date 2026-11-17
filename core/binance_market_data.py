@@ -271,8 +271,8 @@ class BinanceMarketData:
         if limit < 1:
             raise ValueError("limit must be a positive integer")
 
-        ranking_day = datetime.now(timezone.utc).date().isoformat()
         with self._universe_cache_locks[market]:
+            ranking_day = datetime.now(timezone.utc).date().isoformat()
             cached = self._universe_cache.get(market)
             if (
                 not force_refresh and cached
