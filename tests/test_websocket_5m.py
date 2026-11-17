@@ -605,6 +605,41 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(len(feed.calls), 1)
 
+    def test_missing_exact_cycle_refreshes_even_if_cache_has_newer_row(self):
+        class RefreshFeed:
+            def __init__(self, frame):
+                self.frame = frame
+                self.calls = 0
+
+            def fetch_candles(self, market, symbol, interval, **kwargs):
+                self.calls += 1
+                return self.frame.copy()
+
+        now_ms = int(time.time() * 1000)
+        expected_open = ((now_ms // 300000) - 1) * 300000
+        newer = candle_frame("5min", rows=100)
+        newer.attrs["timeframe"] = "5m"
+        newer["open_time"] += pd.Timedelta(minutes=5)
+        newer["close_time"] += pd.Timedelta(minutes=5)
+        fresh = candle_frame("5min", rows=100)
+        fresh.attrs["timeframe"] = "5m"
+        feed = RefreshFeed(fresh)
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=0
+        )
+        stream._merge_frame("spot", "BTCUSDT", "5m", newer)
+
+        self.assertEqual(
+            stream._refresh_stale_5m("spot", ["BTCUSDT"], now_ms=now_ms),
+            ["BTCUSDT"],
+        )
+        self.assertEqual(feed.calls, 1)
+        batch = stream.latest_closed_events(
+            "spot", expected_open, symbols=["BTCUSDT"]
+        )
+        self.assertEqual(batch["available"], 1)
+        self.assertEqual(batch["events"][0]["open_time"], expected_open)
+
     def test_failed_stale_refresh_can_retry_in_same_cycle(self):
         class RetryFeed:
             def __init__(self, frame):
