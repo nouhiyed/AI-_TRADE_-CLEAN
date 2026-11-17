@@ -140,6 +140,11 @@ class _V3Base:
                     and volume_ratio >= cls.BREAKOUT_VOLUME
                     and lower_wick <= cls.BREAKOUT_MAX_OPPOSING_WICK):
                 setups.append("BREAKOUT_SHORT")
+            if (low <= prior_low + .12 * atr and c > o and c > ema9
+                    and c <= ema9 + .45 * atr and location >= .66
+                    and lower_wick >= .28 and 35 <= rsi <= 62
+                    and hist >= previous_hist and volume_ratio >= .82):
+                setups.append("SUPPORT_RECLAIM_LONG")
             bb_low, bb_high = v(frame, "BB_lower"), v(frame, "BB_upper")
             if (rsi <= 30 and bb_low is not None and c <= bb_low * 1.002
                     and c > o and location >= .72 and volume_ratio >= .80
@@ -160,6 +165,11 @@ class _V3Base:
                     and body >= .18 and volume_ratio >= 1.05
                     and upper_wick <= .18):
                 setups.append("BREAKOUT_LONG")
+            if (low <= prior_low + .14 * atr and c > o and c > ema9
+                    and c <= ema9 + .45 * atr and location >= .66
+                    and lower_wick >= .28 and 35 <= rsi <= 62
+                    and hist >= previous_hist and volume_ratio >= .82):
+                setups.append("SUPPORT_RECLAIM_LONG")
             bb_low = v(frame, "BB_lower")
             if (rsi <= 30 and bb_low is not None and c <= bb_low * 1.002
                     and c > o and location >= .72 and volume_ratio >= .80
@@ -246,6 +256,16 @@ class _V3Base:
         return {"level": level, "distance": distance, "timeframe": timeframe}
 
     @classmethod
+    def entry_extension_atr(cls, five, direction, entry):
+        """Measure late entry distance from EMA9 in ATR units."""
+        ema9 = cls.value(five, "EMA_9")
+        atr = cls.value(five, "ATR")
+        if ema9 is None or atr is None or atr <= 0:
+            return None
+        return ((float(entry) - ema9) if direction == "LONG"
+                else (ema9 - float(entry))) / atr
+
+    @classmethod
     def plan_with_structure(cls, market, direction, five, frames, setup,
                              regime, base_target_r, current_price):
         """Build a V3 plan and veto entries with inadequate room to S/R."""
@@ -255,6 +275,17 @@ class _V3Base:
             return plan
         atr = float(plan["atr"])
         entry = float(plan["entry"])
+        extension = cls.entry_extension_atr(five, direction, entry)
+        if extension is not None and extension > 0.90:
+            return {
+                "success": False,
+                "reason": ("V3 late-entry veto: %s is %.3f ATR beyond EMA9; "
+                           "entry window expired" % (direction, extension)),
+                "entry_timing_guard": {
+                    "blocked": True, "extension_atr": round(extension, 4),
+                    "max_extension_atr": 0.90,
+                },
+            }
         structure = cls.nearest_opposing_structure(frames, direction, entry)
         if structure is None:
             # No confirmed opposing swing means there is no identified nearby
@@ -368,6 +399,12 @@ class FuturesScalpingStrategyV3(_V3Base):
         prior_low = float(trigger["low"].iloc[-self.BREAKOUT_LOOKBACK-1:-1].min())
         bull, bear = self.bias(fifteen, hourly, "LONG"), self.bias(fifteen, hourly, "SHORT")
 
+        support_reclaim_long = (
+            bull and low <= prior_low + .12*atr and c > o and c > ema9
+            and c <= ema9 + .45*atr and loc >= .66
+            and shape["lower_wick_range"] >= .28
+            and 35 <= rsi <= 62 and hist >= prev and vr >= .82
+        )
         pull_long = (
             bull and low <= ema20 + .12*atr and c > ema9 and c > o
             and 45 <= rsi <= 67 and hist >= prev
@@ -395,6 +432,7 @@ class FuturesScalpingStrategyV3(_V3Base):
             and shape["lower_wick_range"] <= self.BREAKOUT_MAX_OPPOSING_WICK
         )
         setups = (
+            (support_reclaim_long, "LONG", "SUPPORT_RECLAIM_5M", "BULL_TREND", 1.60),
             (pull_long, "LONG", "PULLBACK_5M", "BULL_TREND", 1.60),
             (pull_short, "SHORT", "PULLBACK_5M", "BEAR_TREND", 1.60),
             (breakout_long, "LONG", "BREAKOUT_5M", "BULL_TREND", 1.80),
@@ -454,6 +492,13 @@ class SpotScalpingStrategyV3(_V3Base):
         bullish = self.bias(fifteen, hourly, "LONG") or (
             c1 > e200 and c15 is not None and e21_15 is not None and c15 >= e21_15
         )
+        prior_low = float(trigger["low"].iloc[-self.BREAKOUT_LOOKBACK-1:-1].min())
+        support_reclaim = (
+            bullish and low <= prior_low + .14*atr and c > o and c > ema9
+            and c <= ema9 + .45*atr and loc >= .66
+            and shape["lower_wick_range"] >= .28
+            and 35 <= rsi <= 62 and hist >= prev and vr >= .82
+        )
         pull = (
             bullish and low <= ema20+.14*atr and c > ema9 and c > o
             and 44 <= rsi <= 68 and hist >= prev
@@ -466,6 +511,8 @@ class SpotScalpingStrategyV3(_V3Base):
             and body >= .18 and vr >= 1.05
             and shape["upper_wick_range"] <= .18
         )
+        if support_reclaim:
+            return self.plan_with_structure("spot", "LONG", trigger, data, "SUPPORT_RECLAIM_5M", "BULL_TREND", 1.60, c)
         if pull:
             return self.plan_with_structure("spot", "LONG", trigger, data, "PULLBACK_5M", "BULL_TREND", 1.65, c)
         if breakout:
