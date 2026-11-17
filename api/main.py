@@ -166,16 +166,24 @@ def continuous_scan_worker():
                     market_stream_status = stream.get(domain, {}) if isinstance(stream, dict) else {}
                     total = int(market_stream_status.get("symbols", 0) or 0)
                     tracked = int(audit.get("symbols_tracked", 0) or 0)
+                    registered = int(audit.get("symbols_registered", total) or 0)
+                    seen_recently = int(audit.get("symbols_seen_recently", 0) or 0)
+                    audited_recently = int(audit.get("symbols_audited_recently", 0) or 0)
                     scan_status[domain].update({
                         "phase": "websocket_5m",
                         "current_symbol": audit.get("last_symbol"),
-                        "scanned_in_batch": min(tracked, total) if total > 0 else tracked,
+                        # Progress reflects symbols with a 5m event in the
+                        # recent monitoring window, not merely registered symbols.
+                        "scanned_in_batch": min(seen_recently, total) if total > 0 else seen_recently,
                         "universe_total": total or None,
                         "started_in_batch": int(audit.get("events_received", 0) or 0),
                         "active_workers": int(pool.get("inflight", 0) or 0),
                         "last_batch": {
                             "success": True,
-                            "scanned": tracked,
+                            "scanned": seen_recently,
+                            "symbols_registered": registered,
+                            "symbols_seen_ever": tracked,
+                            "symbols_audited_recently": audited_recently,
                             "actionable": int(audit.get("actionable", 0) or 0),
                             "deep_analysis": int(audit.get("deep_analysis", 0) or 0),
                             "opened": int(audit.get("opened", 0) or 0),
