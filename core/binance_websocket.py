@@ -493,17 +493,20 @@ class BinanceKlineStream:
             opens = pd.to_datetime(frame["open_time"], utc=True)
             closes = pd.to_datetime(frame["close_time"], utc=True)
             expected_delta = pd.Timedelta(milliseconds=interval_ms)
-            if len(opens) > 1 and not bool((opens.diff().dropna() == expected_delta).all()):
-                return "non_contiguous_candles"
+            # Binance may omit intervals with no trades. Such gaps are valid
+            # historical market data, not a broken candle series. Preserve the
+            # real observations; never fabricate zero-volume candles.
+            if len(opens) > 1 and not bool((opens.diff().dropna() > pd.Timedelta(0)).all()):
+                return "non_increasing_candle_times"
             if not bool(((closes - opens) == expected_delta - pd.Timedelta(milliseconds=1)).all()):
                 return "invalid_candle_duration"
             last_close = int(pd.Timestamp(closes.iloc[-1]).timestamp() * 1000)
             now_ms = int(now_ms or time.time() * 1000)
             if last_close > now_ms + 30000:
                 return "future_candle"
-            expected_latest_close = ((now_ms // interval_ms) * interval_ms) - 1
-            if last_close < expected_latest_close - 30000:
-                return "stale_latest_candle"
+            # Historical cache readiness is independent of whether this market
+            # traded in the latest interval. Exact-cycle freshness is enforced
+            # by latest_closed_events() and by the incoming closed WS candle.
             return None
         except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
             return "invalid_candle_data"
