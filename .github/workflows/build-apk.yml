@@ -73,6 +73,39 @@ jobs:
           cp android_templates/MainActivity.kt android/app/src/main/kotlin/com/example/ai_trade/MainActivity.kt
           cp android_templates/TradingKeepAliveService.kt android/app/src/main/kotlin/com/example/ai_trade/TradingKeepAliveService.kt
 
+      - name: Configure Maven Central mirror and Gradle dependency cache
+        working-directory: mobile
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          settings = Path("android/settings.gradle.kts")
+          source = settings.read_text()
+          mirror = 'maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }'
+          if mirror not in source:
+              match = re.search(r"(?m)^(\\s*)repositories\\s*\\{", source)
+              if not match:
+                  raise SystemExit("ERROR: pluginManagement repositories block not found")
+              insert_at = match.end()
+              source = source[:insert_at] + "\\n" + match.group(1) + "    " + mirror + source[insert_at:]
+              settings.write_text(source)
+          print("Maven Central mirror added before plugin repositories")
+
+          build = Path("android/build.gradle.kts")
+          if build.exists():
+              source = build.read_text()
+              if mirror not in source:
+                  match = re.search(r"(?m)^(\\s*)repositories\\s*\\{", source)
+                  if match:
+                      insert_at = match.end()
+                      source = source[:insert_at] + "\\n" + match.group(1) + "    " + mirror + source[insert_at:]
+                      build.write_text(source)
+          PYTHON
+
+      - name: Setup Gradle dependency cache
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Install Soulaymen AI Trading launcher branding
         working-directory: mobile
         run: |
