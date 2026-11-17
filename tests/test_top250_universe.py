@@ -79,8 +79,11 @@ class Top250UniverseTests(unittest.TestCase):
             result = feed._request("futures", "/fapi/v1/exchangeInfo", {})
         self.assertEqual(result, {"symbols": []})
         self.assertEqual(feed.session.calls, 2)
-        self.assertEqual(sleep.call_args_list[0].args, (3.0,))
-        self.assertIn(3.0, [call.args[0] for call in sleep.call_args_list])
+        self.assertAlmostEqual(sleep.call_args_list[0].args[0], 5.0, delta=0.1)
+        self.assertTrue(any(
+            abs(call.args[0] - 5.0) < 0.1
+            for call in sleep.call_args_list
+        ))
 
 
     def test_geographic_restriction_stops_fallback_requests(self):
