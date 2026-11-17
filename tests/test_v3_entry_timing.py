@@ -32,7 +32,7 @@ def closed_5m_frame():
     data["high"][-1] = 101.0
     data["low"][-1] = 98.0
     data["close"][-1] = 100.8
-    data["EMA_9"][-1] = 100.2
+    data["EMA_9"][-1] = 100.4
     frame = pd.DataFrame(data)
     frame.attrs["timeframe"] = "5m"
     return frame
