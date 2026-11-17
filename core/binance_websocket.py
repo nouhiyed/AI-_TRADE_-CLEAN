@@ -645,6 +645,12 @@ class BinanceKlineStream:
         now_ms = int(now_ms or time.time() * 1000)
         interval_ms = self.INTERVAL_MS["5m"]
         expected_open = ((now_ms // interval_ms) - 1) * interval_ms
+        # Bound bookkeeping to the current and immediately previous 5m cycle.
+        with self._lock:
+            self._last_rest_refresh_cycle = {
+                item for item in self._last_rest_refresh_cycle
+                if item[2] >= expected_open - interval_ms
+            }
         stale = []
         for symbol in symbols:
             symbol = str(symbol).upper()
@@ -688,7 +694,13 @@ class BinanceKlineStream:
                 try:
                     refreshed.append(future.result())
                 except Exception as error:
+                    # Failed requests must be retryable in this same candle
+                    # cycle; otherwise one transient timeout leaves the pair
+                    # unreconciled until the next 5m interval.
                     with self._lock:
+                        self._last_rest_refresh_cycle.discard(
+                            (market, symbol, expected_open)
+                        )
                         self._status[market]["cache_warmup_last_error"] = (
                             symbol + " 5m refresh: " + str(error)
                         )
