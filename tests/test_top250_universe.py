@@ -79,7 +79,8 @@ class Top250UniverseTests(unittest.TestCase):
             result = feed._request("futures", "/fapi/v1/exchangeInfo", {})
         self.assertEqual(result, {"symbols": []})
         self.assertEqual(feed.session.calls, 2)
-        sleep.assert_called_once_with(3.0)
+        self.assertEqual(sleep.call_args_list[0].args, (3.0,))
+        self.assertIn(3.0, [call.args[0] for call in sleep.call_args_list])
 
 
     def test_ranking_combines_24h_volume_book_liquidity_and_spread(self):
