@@ -656,11 +656,21 @@ class BinanceKlineStream:
             symbol = str(symbol).upper()
             with self._cache_lock:
                 frame = self._cache.get((market, symbol, "5m"))
-                latest_open = (
-                    self._row_key(frame.iloc[-1]["open_time"])
-                    if frame is not None and not frame.empty else None
-                )
-            if latest_open is None or latest_open >= expected_open:
+                has_expected_closed = False
+                if frame is not None and not frame.empty:
+                    opens = pd.to_datetime(frame["open_time"], utc=True)
+                    exact_rows = frame.loc[
+                        opens.map(lambda value: self._row_key(value))
+                        == expected_open
+                    ]
+                    has_expected_closed = bool(
+                        not exact_rows.empty
+                        and exact_rows.iloc[-1].get("is_closed", False)
+                    )
+            # A newer in-progress WebSocket row does not prove that the
+            # previous closed cycle exists. Refresh whenever that exact cycle
+            # is absent, even if the cache's final row is newer.
+            if has_expected_closed:
                 continue
             refresh_key = (market, symbol, expected_open)
             with self._lock:
