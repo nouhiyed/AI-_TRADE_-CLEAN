@@ -83,7 +83,7 @@ class BinanceMarketData:
             raise ValueError("Market must be spot or futures")
 
         failures = []
-        deadline = time.monotonic() + max(self.timeout, self.total_timeout)
+        deadline = time.monotonic() + self.total_timeout
 
         for base_url in self.FALLBACK_URLS[market]:
             attempt = 0
