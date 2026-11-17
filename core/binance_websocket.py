@@ -241,6 +241,12 @@ class BinanceKlineStream:
             raise RuntimeError("Binance returned no eligible liquid symbols for " + market)
         return symbols
 
+    def _register_universe(self, market, symbols):
+        """Notify the strategy runtime of the complete eligible market universe."""
+        if callable(self.on_universe):
+            return self.on_universe(market, list(symbols))
+        return None
+
     @staticmethod
     def _row_key(value):
         stamp = value
@@ -451,8 +457,7 @@ class BinanceKlineStream:
                 # Provision one logical auditor record for every eligible pair
                 # before websocket events start arriving; status can distinguish
                 # registered coverage from symbols that actually emitted candles.
-                if callable(self.on_universe):
-                    self.on_universe(market, symbols)
+                self._register_universe(market, symbols)
                 intervals = self._active_intervals(market)
                 stream_names = [
                     symbol.lower() + "@kline_" + interval
