@@ -136,7 +136,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m"})
 
-    def test_snapshot_rejects_cache_one_closed_candle_behind(self):
+    def test_historical_cache_can_be_ready_when_latest_trade_is_old(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
@@ -145,7 +145,15 @@ class BinanceCandleCacheTests(unittest.TestCase):
         frame["open_time"] -= pd.Timedelta(minutes=5)
         frame["close_time"] -= pd.Timedelta(minutes=5)
         stream._merge_frame("futures", "STALEUSDT", "5m", frame)
-        self.assertIsNone(stream._snapshot("futures", "STALEUSDT"))
+        self.assertIsNotNone(stream._snapshot("futures", "STALEUSDT"))
+        stream._market_symbols["futures"] = {"STALEUSDT"}
+        expected_open = int(
+            (pd.Timestamp.now(tz="UTC").floor("5min") - pd.Timedelta(minutes=5))
+            .timestamp() * 1000
+        )
+        batch = stream.latest_closed_events("futures", expected_open)
+        self.assertEqual(batch["events"], [])
+        self.assertEqual(batch["missing_symbols"], ["STALEUSDT"])
 
     def test_cache_becoming_ready_after_warmup_replays_retained_close(self):
         callbacks = []
@@ -201,26 +209,17 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertNotIn("4h", snapshot)
 
-    def test_snapshot_rejects_gaps_and_stale_candles(self):
-        for interval in ("5m", "15m", "1h"):
-            freq = {"5m": "5min", "15m": "15min", "1h": "1h"}[interval]
-            frame = candle_frame(freq)
-            frame.attrs["timeframe"] = interval
-            self.stream._merge_frame("futures", "ETHUSDT", interval, frame)
-        self.assertIsNotNone(self.stream._snapshot("futures", "ETHUSDT"))
-
+    def test_sparse_historical_candles_are_valid_but_not_current_cycle_events(self):
         gap = candle_frame("5min", rows=61)
         gap.attrs["timeframe"] = "5m"
-        # Replace the cached frame directly: merge is intentionally gap-healing
-        # when REST warmup supplies a complete replacement history.
+        # Binance can omit no-trade intervals. Keep only actual returned bars;
+        # no synthetic rows are inserted to fill the time gap.
         gap = gap.drop(gap.index[-2]).reset_index(drop=True)
         self.stream._cache[("futures", "ETHUSDT", "5m")] = gap
-        self.assertIsNone(self.stream._snapshot("futures", "ETHUSDT"))
-        cached_gap = self.stream._cache[("futures", "ETHUSDT", "5m")]
-        self.assertEqual(
-            self.stream._frame_health_reason("futures", "5m", cached_gap),
-            "non_contiguous_candles",
+        self.assertIsNone(
+            self.stream._frame_health_reason("futures", "5m", gap)
         )
+        self.assertIsNotNone(self.stream._snapshot("futures", "ETHUSDT"))
 
         short = candle_frame("5min", rows=20)
         short.attrs["timeframe"] = "5m"
@@ -233,8 +232,16 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stale.attrs["timeframe"] = "5m"
         stale["open_time"] -= pd.Timedelta(hours=1)
         stale["close_time"] -= pd.Timedelta(hours=1)
-        self.stream._merge_frame("futures", "ETHUSDT", "5m", stale)
-        self.assertIsNone(self.stream._snapshot("futures", "ETHUSDT"))
+        self.stream._cache[("futures", "ETHUSDT", "5m")] = stale
+        self.assertIsNotNone(self.stream._snapshot("futures", "ETHUSDT"))
+        self.stream._market_symbols["futures"] = {"ETHUSDT"}
+        expected_open = int(
+            (pd.Timestamp.now(tz="UTC").floor("5min") - pd.Timedelta(minutes=5))
+            .timestamp() * 1000
+        )
+        batch = self.stream.latest_closed_events("futures", expected_open)
+        self.assertEqual(batch["events"], [])
+        self.assertEqual(batch["missing_symbols"], ["ETHUSDT"])
 
     def test_first_update_only_counts_near_real_candle_open(self):
         opening = 1_800_000_000_000
