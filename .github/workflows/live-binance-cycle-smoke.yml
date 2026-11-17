@@ -1,0 +1,52 @@
+name: Live Binance top-250 cycle verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'core/**'
+      - 'agents/**'
+      - 'api/**'
+      - 'scripts/live_binance_cycle_smoke.py'
+      - '.github/workflows/live-binance-cycle-smoke.yml'
+      - 'requirements.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-binance-top250
+  cancel-in-progress: true
+
+jobs:
+  live-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AI_TRADER_WS_MAX_SYMBOLS: '250'
+      AI_TRADER_WS_WARMUP_WORKERS: '8'
+      AI_TRADER_ANALYSIS_WORKERS_PER_MARKET: '4'
+      AI_TRADER_RECONCILE_BATCH_SIZE: '96'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile live backend
+        run: python -m compileall -q core agents api scripts
+      - name: Verify live Binance WebSocket, exact 5m cache, and 500 analyses
+        run: |
+          set -o pipefail
+          python -u scripts/live_binance_cycle_smoke.py | tee live-binance-smoke.json
+      - name: Preserve live verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-binance-top250-report
+          path: live-binance-smoke.json
+          if-no-files-found: ignore
