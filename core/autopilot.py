@@ -746,15 +746,32 @@ class Autopilot:
             close_event_time = int(candle.get("event_time") or 0)
             local_now_ms = int(time.time() * 1000)
             audit_only = bool(candle.get("audit_only"))
+
+            # A reconnect can deliver a valid closed kline long after its
+            # Binance event timestamp. It is still useful for cycle coverage,
+            # but must never be allowed to create a late entry. Keep recent
+            # delayed events as audit-only instead of incorrectly marking the
+            # symbol as an analysis error. Truly expired (>10m), malformed, or
+            # future-dated events remain stale and fail the coverage check.
+            event_age_ms = local_now_ms - close_event_time
             if (close_time <= 0 or close_event_time < close_time
                     or close_event_time - close_time > 10000
-                    or (not audit_only and abs(local_now_ms - close_event_time) > 30000)):
+                    or event_age_ms < -30000):
                 self._record_symbol_audit(
                     domain, symbol, "stale",
                     increment="stale",
-                    reason="Closed-candle event is outside the live freshness window",
+                    reason="Closed-candle event has invalid close/event timestamps",
                 )
                 return
+            if event_age_ms > 10 * 60 * 1000:
+                self._record_symbol_audit(
+                    domain, symbol, "stale",
+                    increment="stale",
+                    reason="Closed-candle event exceeded the 10-minute audit retention window",
+                )
+                return
+            if event_age_ms > 30000:
+                audit_only = True
 
             frames = candle.get("market_data")
             if not isinstance(frames, dict) or not frames:
