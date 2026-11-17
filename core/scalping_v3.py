@@ -203,6 +203,93 @@ class _V3Base:
         }
 
     @classmethod
+    def nearest_opposing_structure(cls, frames, direction, entry):
+        """Find the nearest confirmed swing level opposing a proposed entry.
+
+        Only confirmed pivots (two closed candles on each side) are considered.
+        Higher-timeframe levels are included because a 5m trigger must not buy
+        directly into 15m/1h supply or sell directly into 15m/1h demand.
+        """
+        candidates = []
+        windows = (("5m", 72), ("15m", 64), ("1h", 48))
+        for timeframe, lookback in windows:
+            frame = (frames or {}).get(timeframe)
+            if frame is None or len(frame) < 8:
+                continue
+            if not cls.frame_is_closed(frame, timeframe):
+                continue
+            column = "high" if direction == "LONG" else "low"
+            try:
+                values = [float(value) for value in frame[column].tail(lookback)]
+            except (KeyError, TypeError, ValueError):
+                continue
+            start = max(2, len(values) - lookback)
+            for index in range(start, len(values) - 2):
+                level = values[index]
+                left = values[index-2:index]
+                right = values[index+1:index+3]
+                if direction == "LONG":
+                    pivot = level >= max(left) and level >= max(right) and level > entry
+                    distance = level - entry
+                else:
+                    pivot = level <= min(left) and level <= min(right) and level < entry
+                    distance = entry - level
+                if pivot and distance > 0:
+                    candidates.append((distance, level, timeframe))
+        if not candidates:
+            return None
+        distance, level, timeframe = min(candidates, key=lambda item: item[0])
+        return {"level": level, "distance": distance, "timeframe": timeframe}
+
+    @classmethod
+    def plan_with_structure(cls, market, direction, five, frames, setup,
+                             regime, base_target_r, current_price):
+        """Build a V3 plan and veto entries with inadequate room to S/R."""
+        plan = cls.plan(market, direction, five, setup, regime,
+                        base_target_r, current_price)
+        if not plan.get("success"):
+            return plan
+        atr = float(plan["atr"])
+        entry = float(plan["entry"])
+        structure = cls.nearest_opposing_structure(frames, direction, entry)
+        if structure is None:
+            # Missing structure data must fail closed: do not open a trade
+            # without knowing whether a nearby opposing zone blocks its path.
+            return {"success": False,
+                    "reason": "V3 structure guard: opposing support/resistance unavailable"}
+        level = float(structure["level"])
+        buffer = max(0.65 * atr, entry * 0.0008)
+        target = float(plan["take_profit"])
+        if direction == "LONG":
+            clearance = level - entry
+            target_blocked = target >= level - 0.20 * atr
+        else:
+            clearance = entry - level
+            target_blocked = target <= level + 0.20 * atr
+        if clearance <= buffer or target_blocked:
+            return {
+                "success": False,
+                "reason": (
+                    "V3 structure veto: %s entry blocked by %s resistance/support "
+                    "at %.10g (clearance %.3f ATR; target lacks free space)"
+                    % (direction, structure["timeframe"], level, clearance / atr)
+                ),
+                "structure_guard": {
+                    "blocked": True, "direction": direction, "level": level,
+                    "timeframe": structure["timeframe"],
+                    "distance": clearance, "distance_atr": round(clearance / atr, 4),
+                    "buffer": buffer, "planned_target": target,
+                },
+            }
+        plan["structure_guard"] = {
+            "blocked": False, "direction": direction, "level": level,
+            "timeframe": structure["timeframe"],
+            "distance": clearance, "distance_atr": round(clearance / atr, 4),
+            "buffer": buffer,
+        }
+        return plan
+
+    @classmethod
     def plan(cls, market, direction, five, setup, regime, base_target_r, current_price):
         atr = cls.value(five, "ATR")
         entry = current_price
@@ -305,7 +392,7 @@ class FuturesScalpingStrategyV3(_V3Base):
         )
         for valid, direction, setup, regime, target_r in setups:
             if valid:
-                return self.plan("futures", direction, trigger, setup, regime, target_r, c)
+                return self.plan_with_structure("futures", direction, trigger, data, setup, regime, target_r, c)
 
         bb_low, bb_high = v(trigger, "BB_lower"), v(trigger, "BB_upper")
         range_market = v(fifteen, "ADX")
@@ -313,12 +400,12 @@ class FuturesScalpingStrategyV3(_V3Base):
                 and loc >= .72 and c > o and rsi <= 30 and vr >= .80
                 and shape["lower_wick_range"] >= self.REJECTION_WICK_RANGE
                 and bb_low is not None and c <= bb_low*1.002):
-            return self.plan("futures", "LONG", trigger, "RANGE_REJECTION_5M", "RANGE", 1.55, c)
+            return self.plan_with_structure("futures", "LONG", trigger, data, "RANGE_REJECTION_5M", "RANGE", 1.55, c)
         if (range_market is not None and range_market <= 18
                 and loc <= .28 and c < o and rsi >= 70 and vr >= .80
                 and shape["upper_wick_range"] >= self.REJECTION_WICK_RANGE
                 and bb_high is not None and c >= bb_high*.998):
-            return self.plan("futures", "SHORT", trigger, "RANGE_REJECTION_5M", "RANGE", 1.55, c)
+            return self.plan_with_structure("futures", "SHORT", trigger, data, "RANGE_REJECTION_5M", "RANGE", 1.55, c)
         return {"success": False, "reason": "No qualifying V3 Futures 5m setup"}
 
 
@@ -370,13 +457,13 @@ class SpotScalpingStrategyV3(_V3Base):
             and shape["upper_wick_range"] <= .18
         )
         if pull:
-            return self.plan("spot", "LONG", trigger, "PULLBACK_5M", "BULL_TREND", 1.65, c)
+            return self.plan_with_structure("spot", "LONG", trigger, data, "PULLBACK_5M", "BULL_TREND", 1.65, c)
         if breakout:
-            return self.plan("spot", "LONG", trigger, "BREAKOUT_5M", "BULL_TREND", 1.85, c)
+            return self.plan_with_structure("spot", "LONG", trigger, data, "BREAKOUT_5M", "BULL_TREND", 1.85, c)
         adx15, bb = v(fifteen, "ADX"), v(trigger, "BB_lower")
         if (adx15 is not None and adx15 <= 18 and bb is not None
                 and rsi <= 30 and c <= bb*1.002 and c > o
                 and loc >= .72 and vr >= .80
                 and shape["lower_wick_range"] >= self.REJECTION_WICK_RANGE):
-            return self.plan("spot", "LONG", trigger, "RANGE_BOUNCE_5M", "RANGE", 1.55, c)
+            return self.plan_with_structure("spot", "LONG", trigger, data, "RANGE_BOUNCE_5M", "RANGE", 1.55, c)
         return {"success": False, "reason": "No qualifying V3 Spot 5m setup"}
