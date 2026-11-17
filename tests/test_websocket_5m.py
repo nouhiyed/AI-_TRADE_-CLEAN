@@ -74,6 +74,38 @@ class ClosedCandleGuardTests(unittest.TestCase):
         self.assertFalse(FuturesScalpingStrategyV3.frame_is_closed(frame, "15m"))
 
 
+
+class CacheWarmupWorkerTests(unittest.TestCase):
+    def test_reconnect_does_not_start_duplicate_warmup_worker(self):
+        class FakeThread:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.started = False
+
+            def is_alive(self):
+                return self.started
+
+            def start(self):
+                self.started = True
+
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=8
+        )
+        stream._thread_factory = FakeThread
+        try:
+            self.assertTrue(stream._ensure_warmup_worker("spot"))
+            first = stream._warmup_threads["spot"]
+            self.assertFalse(stream._ensure_warmup_worker("spot"))
+            self.assertIs(stream._warmup_threads["spot"], first)
+            self.assertEqual(
+                stream.status()["spot"]["cache_warmup_worker_starts"], 1
+            )
+            self.assertTrue(
+                stream.status()["spot"]["cache_warmup_worker_alive"]
+            )
+        finally:
+            stream.stop()
+
 class BinanceCandleCacheTests(unittest.TestCase):
     def setUp(self):
         self.events = []
