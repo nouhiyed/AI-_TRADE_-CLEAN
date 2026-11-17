@@ -39,11 +39,11 @@ class BinanceKlineStream:
         self.on_kline = on_kline
         self.on_universe = on_universe
         self.on_cache_ready = on_cache_ready
-        # Default to every eligible symbol. A positive limit preserves an
-        # explicit top-N deployment mode; zero means the full market universe.
+        # Production defaults to the daily top-250 universe. Zero remains
+        # an explicit full-market setting for isolated cache tests only.
         raw_limit = (
             max_symbols if max_symbols is not None
-            else os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "0")
+            else os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "250")
         )
         try:
             self.max_symbols = max(0, int(raw_limit))
@@ -85,6 +85,7 @@ class BinanceKlineStream:
                 "cache_ready_symbols": 0, "cache_warmup_total": 0,
                 "cache_warmup_completed": 0, "cache_warmup_errors": 0,
                 "cache_warmup_worker_starts": 0,
+                "ranking_day": None,
             }
             for market in ("spot", "futures")
         }
@@ -307,6 +308,29 @@ class BinanceKlineStream:
                     pass
 
     def _load_symbols(self, market):
+        top_selector = getattr(self.feed, "fetch_top_symbols", None)
+        if self.max_symbols > 0 and callable(top_selector):
+            ranked = top_selector(market, limit=self.max_symbols)
+            symbols = [
+                str(item.get("symbol", "")).strip().upper()
+                for item in ranked if isinstance(item, dict)
+            ]
+            symbols = [symbol for symbol in symbols if symbol]
+            if len(symbols) != self.max_symbols:
+                raise RuntimeError(
+                    "Daily %s universe must contain exactly %s symbols; received %s"
+                    % (market, self.max_symbols, len(symbols))
+                )
+            ranking_day = (
+                str(ranked[0].get("ranking_day") or "")
+                if ranked else ""
+            )
+            with self._lock:
+                self._status[market]["ranking_day"] = ranking_day or (
+                    datetime.now(timezone.utc).date().isoformat()
+                )
+            return symbols
+
         if market == "futures":
             eligible = set(self.feed.fetch_symbols("futures"))
             tickers = self.feed._request("futures", "/fapi/v1/ticker/24hr", {})
@@ -655,11 +679,12 @@ class BinanceKlineStream:
                         if key[0] == market:
                             self._connection_live.pop(key, None)
                 self._ensure_warmup_worker(market)
+                universe_day = datetime.now(timezone.utc).date().isoformat()
                 threads = []
                 for index, streams in enumerate(chunks):
                     thread = threading.Thread(
                         target=self._run_connection,
-                        args=(market, index, streams),
+                        args=(market, index, streams, universe_day),
                         name="binance-ws-%s-%s" % (market, index),
                         daemon=True,
                     )
@@ -667,6 +692,20 @@ class BinanceKlineStream:
                     thread.start()
                 self._connection_threads.extend(threads)
                 while not self._stop.wait(1):
+                    if datetime.now(timezone.utc).date().isoformat() != universe_day:
+                        # Rebuild subscriptions from the new daily ranking at
+                        # the UTC day boundary; never keep yesterday's list.
+                        with self._lock:
+                            apps = [
+                                app for (app_market, _), app in self._apps.items()
+                                if app_market == market
+                            ]
+                        for app in apps:
+                            try:
+                                app.close()
+                            except Exception:
+                                pass
+                        break
                     if not any(thread.is_alive() for thread in threads):
                         break
                 if self._stop.is_set():
@@ -679,10 +718,15 @@ class BinanceKlineStream:
             if not self._stop.wait(self.reconnect_seconds):
                 continue
 
-    def _run_connection(self, market, index, streams):
+    def _run_connection(self, market, index, streams, universe_day=None):
         conn_key = (market, index)
         ack_id = index + 1
         while not self._stop.is_set():
+            if (
+                universe_day
+                and datetime.now(timezone.utc).date().isoformat() != universe_day
+            ):
+                return
             try:
                 def on_open(app):
                     app.send(json.dumps({
@@ -726,6 +770,11 @@ class BinanceKlineStream:
                     self._recompute_connection_status(market)
                     self._status[market]["reconnects"] += 1
                     self._apps.pop(conn_key, None)
+            if (
+                universe_day
+                and datetime.now(timezone.utc).date().isoformat() != universe_day
+            ):
+                return
             if not self._stop.wait(self.reconnect_seconds):
                 continue
 
