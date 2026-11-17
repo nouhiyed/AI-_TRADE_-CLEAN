@@ -378,6 +378,15 @@ def continuous_scan_worker():
         time.sleep(1)
 
 
+def selected_market_symbols(market):
+    """Return the current daily top-250 symbols for one Binance market."""
+    market = str(market).strip().lower()
+    if market not in {"spot", "futures"}:
+        raise ValueError("Unsupported market")
+    ranked = coordinator.market_feed.fetch_top_symbols(market, limit=250)
+    return {str(item["symbol"]).strip().upper() for item in ranked}
+
+
 def initialize_runtime():
     global coordinator, autopilot, market_stream
     initial_balance = float(os.environ.get("DEMO_INITIAL_BALANCE", "1000"))
@@ -576,6 +585,13 @@ class APIHandler(BaseHTTPRequestHandler):
                 limit = int(params.get("limit", ["200"])[0])
                 if interval not in {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"}:
                     return self.send_json({"error": "Unsupported interval"}, 400)
+                if market not in {"spot", "futures"}:
+                    return self.send_json({"error": "Unsupported market"}, 400)
+                if symbol not in selected_market_symbols(market):
+                    return self.send_json({
+                        "success": False, "market": market, "symbol": symbol,
+                        "reason": "Symbol is outside the current daily top-250 universe",
+                    }, 403)
                 live = params.get("live", ["0"])[0] == "1"
                 start_time = params.get("startTime", [None])[0]
                 end_time = params.get("endTime", [None])[0]
@@ -890,10 +906,30 @@ class APIHandler(BaseHTTPRequestHandler):
                 )
 
             if path == "/analyze":
-                symbol = data.get("symbol", "BTCUSDT")
+                symbol = str(data.get("symbol", "BTCUSDT")).strip().upper()
+                selected = (
+                    selected_market_symbols("spot")
+                    | selected_market_symbols("futures")
+                )
+                if symbol not in selected:
+                    return self.send_json({
+                        "success": False, "symbol": symbol,
+                        "reason": "Symbol is outside the current daily top-250 Spot/Futures universes",
+                    }, 403)
                 return self.send_json(coordinator.analyze_live(symbol))
 
             if path == "/agent/submit":
+                domain = str(data.get("domain", "")).strip().lower()
+                symbol = str(data.get("symbol", "")).strip().upper()
+                if domain not in {"spot", "futures"}:
+                    return self.send_json({
+                        "success": False, "reason": "Unsupported market domain",
+                    }, 400)
+                if symbol not in selected_market_symbols(domain):
+                    return self.send_json({
+                        "success": False, "domain": domain, "symbol": symbol,
+                        "reason": "Symbol is outside the current daily top-250 universe",
+                    }, 403)
                 request_id = uuid4().hex
                 now = time.time()
                 with submission_jobs_lock:
