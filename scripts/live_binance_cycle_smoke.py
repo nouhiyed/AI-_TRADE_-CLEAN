@@ -21,7 +21,7 @@ from core.binance_websocket import BinanceKlineStream
 from core.coordinator import TradingCoordinator
 
 
-def wait_for_stream(stream, timeout_seconds=180):
+def wait_for_stream(stream, timeout_seconds=360):
     deadline = time.monotonic() + timeout_seconds
     last = {}
     ready = set()
