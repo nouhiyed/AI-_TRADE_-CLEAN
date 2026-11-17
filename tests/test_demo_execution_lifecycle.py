@@ -20,7 +20,7 @@ class DemoExecutionLifecycleTests(unittest.TestCase):
         self.database.close()
         self.temp.cleanup()
 
-    def test_manual_futures_close_is_archived_with_manual_reason(self):
+    def test_manual_futures_close_removes_position_and_persists_close_events(self):
         opened = self.engine.open_futures_position(
             "test", agent_id="futures", symbol="BTCUSDT",
             direction="LONG", quantity=Decimal("0.01"),
@@ -51,7 +51,7 @@ class DemoExecutionLifecycleTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(
             [row["event_type"] for row in events],
-            ["OPEN", "MANUAL", "MANUAL"],
+            ["OPEN", "PARTIAL_CLOSE", "CLOSE"],
         )
 
     def test_alpha_execution_fails_closed(self):
