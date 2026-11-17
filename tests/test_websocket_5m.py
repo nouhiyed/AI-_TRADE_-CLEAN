@@ -605,6 +605,41 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(len(feed.calls), 1)
 
+    def test_failed_stale_refresh_can_retry_in_same_cycle(self):
+        class RetryFeed:
+            def __init__(self, frame):
+                self.frame = frame
+                self.calls = 0
+
+            def fetch_candles(self, market, symbol, interval, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary Binance timeout")
+                return self.frame.copy()
+
+        now_ms = int(time.time() * 1000)
+        stale = candle_frame("5min", rows=100)
+        stale.attrs["timeframe"] = "5m"
+        stale["open_time"] -= pd.Timedelta(minutes=5)
+        stale["close_time"] -= pd.Timedelta(minutes=5)
+        fresh = candle_frame("5min", rows=100)
+        fresh.attrs["timeframe"] = "5m"
+        feed = RetryFeed(fresh)
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=0
+        )
+        stream._merge_frame("futures", "BTCUSDT", "5m", stale)
+
+        self.assertEqual(
+            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
+            [],
+        )
+        self.assertEqual(
+            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
+            ["BTCUSDT"],
+        )
+        self.assertEqual(feed.calls, 2)
+
     def test_cache_reconciliation_rejects_a_different_candle_cycle(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
