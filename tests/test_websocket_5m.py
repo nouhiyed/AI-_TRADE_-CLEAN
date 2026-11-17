@@ -471,7 +471,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         event = batch["events"][0]
         self.assertEqual(event["open_time"], expected_open)
         self.assertTrue(event["is_closed"])
-        self.assertTrue(event["audit_only"] or not event["audit_only"])
+        self.assertIn("audit_only", event)
         self.assertEqual(event["source"], "binance_cache_reconciliation")
         self.assertEqual(batch["missing_symbols"], ["ETHUSDT"])
 
