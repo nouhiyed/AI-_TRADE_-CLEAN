@@ -978,32 +978,11 @@ class TradingCoordinator(SpotDemoMixin):
 
     @staticmethod
     def select_futures_leverage(signal, plan):
-        """Choose conservative leverage from signal strength and ATR volatility."""
-        try:
-            confidence = float(signal.get("confidence_adjusted",
-                                          signal.get("confidence", 0)) or 0)
-            entry = float(plan.get("entry") or 0)
-            atr = float(plan.get("atr") or 0)
-            if entry <= 0 or atr <= 0:
-                return 1
-            volatility_pct = atr / entry * 100
-            if confidence >= 80:
-                leverage = 5
-            elif confidence >= 70:
-                leverage = 3
-            elif confidence >= 60:
-                leverage = 2
-            else:
-                leverage = 1
-            if volatility_pct >= 2.5:
-                leverage = min(leverage, 1)
-            elif volatility_pct >= 1.5:
-                leverage = min(leverage, 2)
-            elif volatility_pct >= 0.8:
-                leverage = min(leverage, 3)
-            return max(1, min(5, int(leverage)))
-        except (TypeError, ValueError, AttributeError):
-            return 1
+        """Use the configured Futures floor; this engine's hard cap is also 5x."""
+        # The user-selected minimum is 5x and the risk engine caps Futures at
+        # 5x, therefore every approved Futures position must use exactly 5x.
+        # Caller-provided leverage is ignored again at the execution boundary.
+        return 5
 
     def request_demo_futures_trade(self, symbol, direction, risk_pct=0.5, leverage=1,
                                    signal_override=None, entry_reference_price=None):
