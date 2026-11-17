@@ -50,6 +50,8 @@ class Autopilot:
         self._event_lock = threading.RLock()
         self._event_seen = set()
         self._pending_entries = {}
+        # One retained closed candle per symbol while its cache warms.
+        self._waiting_cache_events = {}
         self._latest_open = {}
         self._last_execution_result = {}
         # One logical audit record per symbol; work itself is dispatched to a
@@ -326,14 +328,15 @@ class Autopilot:
                 }
         return result
 
-    def _queue_latest_analysis(self, domain, symbol, candle):
+    def _queue_latest_analysis(self, domain, symbol, candle, count_event=True):
         """Coalesce pending closes per market/symbol; only the newest may wait."""
         key = (domain, symbol)
         received_at_ms = int(time.time() * 1000)
         event = dict(candle)
         event["received_at_ms"] = received_at_ms
         self._record_symbol_audit(
-            domain, symbol, "queued", increment="events_received",
+            domain, symbol, "queued",
+            increment="events_received" if count_event else None,
             close_time_ms=int(event.get("close_time") or 0),
         )
         with self._event_lock:
@@ -405,14 +408,17 @@ class Autopilot:
                         if pending_domain == domain
                     )
             received_at_ms = int(candle.get("received_at_ms") or 0)
-            if received_at_ms <= 0 or int(time.time() * 1000) - received_at_ms > 30000:
+            age_ms = int(time.time() * 1000) - received_at_ms if received_at_ms > 0 else 10**12
+            if age_ms > 10 * 60 * 1000:
                 with self._analysis_stats_lock:
                     self._analysis_stats[domain]["dropped_stale"] += 1
                 self._record_symbol_audit(
                     domain, symbol, "stale", increment="stale",
-                    reason="Analysis event exceeded the 30-second entry freshness window",
+                    reason="Closed candle exceeded the 10-minute audit retention window",
                 )
                 continue
+            if age_ms > 30000:
+                candle["audit_only"] = True
             self._analyze_ws_close(domain, symbol, candle, received_at_ms)
 
     def submit_analysis(self, domain, fn, *args):
