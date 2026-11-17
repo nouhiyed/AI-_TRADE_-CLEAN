@@ -38,7 +38,7 @@ class CacheWarmupReplayTests(unittest.TestCase):
 
     def test_closed_candle_is_retained_when_cache_is_not_ready(self):
         now = int(time.time() * 1000)
-        open_time = (now // 300000) * 300000 - 300000
+        open_time = (now // 300000) * 300000 - 600000
         event = {
             "symbol": "BTCUSDT", "interval": "5m",
             "open_time": open_time, "close_time": open_time + 299999,
@@ -76,8 +76,7 @@ class CacheWarmupReplayTests(unittest.TestCase):
         )
 
     def test_delayed_cache_replay_is_audit_only_and_cannot_be_traded(self):
-        old_open = int(time.time() * 1000) - 120000
-        old_open = (old_open // 300000) * 300000
+        old_open = (int(time.time() * 1000) // 300000) * 300000 - 600000
         event = {
             "symbol": "SOLUSDT", "interval": "5m",
             "open_time": old_open, "close_time": old_open + 299999,
