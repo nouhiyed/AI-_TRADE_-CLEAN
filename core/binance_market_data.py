@@ -28,6 +28,10 @@ class _BinanceRateLimitError(RuntimeError):
     """Do not retry a Binance rate-limit or IP-ban response on fallback hosts."""
 
 
+class _BinanceAccessRestrictedError(RuntimeError):
+    """Stop fallback requests when Binance explicitly blocks this network."""
+
+
 class BinanceMarketData:
     BASE_URLS = {
         # Official public market-data-only REST endpoint. The app does not
@@ -108,6 +112,16 @@ class BinanceMarketData:
                     )
                     status = int(getattr(response, "status_code", 200))
 
+                    if status in (403, 451):
+                        reason = (
+                            "WAF/security restriction"
+                            if status == 403 else "legal/geographic restriction"
+                        )
+                        raise _BinanceAccessRestrictedError(
+                            "Binance access restricted (HTTP %s: %s); stopped all fallback requests"
+                            % (status, reason)
+                        )
+
                     if status == 418:
                         raise _BinanceRateLimitError(
                             "Binance IP ban (HTTP 418); stopped all fallback requests"
@@ -158,7 +172,7 @@ class BinanceMarketData:
                         )
                     return payload
 
-                except _BinanceRateLimitError:
+                except (_BinanceRateLimitError, _BinanceAccessRestrictedError):
                     raise
                 except (requests.RequestException, ValueError, RuntimeError) as error:
                     failures.append(
