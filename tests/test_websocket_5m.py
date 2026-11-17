@@ -605,6 +605,67 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(len(feed.calls), 1)
 
+    def test_missing_exact_cycle_refreshes_even_with_newer_open_cache_row(self):
+        class RefreshFeed:
+            def __init__(self, frame):
+                self.frame = frame
+                self.calls = 0
+
+            def fetch_candles(self, market, symbol, interval, **kwargs):
+                self.calls += 1
+                return self.frame.copy()
+
+        now_ms = int(time.time() * 1000)
+        expected_open = ((now_ms // 300000) - 1) * 300000
+        cached = candle_frame("5min", rows=100)
+        cached.attrs["timeframe"] = "5m"
+        cached = cached.loc[
+            cached["open_time"].map(
+                lambda value: int(value.timestamp() * 1000)
+            ) != expected_open
+        ].copy()
+        forming = cached.iloc[-1].copy()
+        forming["open_time"] = pd.Timestamp(expected_open + 300000, unit="ms", tz="UTC")
+        forming["close_time"] = (
+            forming["open_time"] + pd.Timedelta(minutes=5)
+            - pd.Timedelta(milliseconds=1)
+        )
+        forming["is_closed"] = False
+        cached = pd.concat([cached, forming.to_frame().T], ignore_index=True)
+        cached["open_time"] = pd.to_datetime(cached["open_time"], utc=True)
+        cached["close_time"] = pd.to_datetime(cached["close_time"], utc=True)
+        cached.attrs["timeframe"] = "5m"
+
+        fresh = candle_frame("5min", rows=100)
+        fresh.attrs["timeframe"] = "5m"
+        feed = RefreshFeed(fresh)
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=0
+        )
+        stream._merge_frame("futures", "BTCUSDT", "5m", cached)
+
+        self.assertEqual(
+            stream._row_key(
+                stream._cache[("futures", "BTCUSDT", "5m")].iloc[-1]["open_time"]
+            ),
+            expected_open + 300000,
+        )
+        self.assertEqual(
+            stream._refresh_stale_5m(
+                "futures", ["BTCUSDT"], now_ms=now_ms
+            ),
+            ["BTCUSDT"],
+        )
+        self.assertEqual(feed.calls, 1)
+        refreshed = stream._cache[("futures", "BTCUSDT", "5m")]
+        self.assertIn(
+            expected_open,
+            {
+                stream._row_key(value)
+                for value in refreshed["open_time"]
+            },
+        )
+
     def test_failed_stale_refresh_can_retry_in_same_cycle(self):
         class RetryFeed:
             def __init__(self, frame):
