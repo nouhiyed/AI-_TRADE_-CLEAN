@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from core.binance_market_data import BinanceMarketData
 from core.binance_websocket import BinanceKlineStream
@@ -44,6 +45,41 @@ class Top250UniverseTests(unittest.TestCase):
             BinanceMarketData.FALLBACK_URLS["spot"][0],
             "https://data-api.binance.vision",
         )
+
+
+    def test_429_without_retry_after_uses_bounded_backoff_then_retries_once(self):
+        class Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.headers = {}
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class Session:
+            def __init__(self):
+                self.responses = [
+                    Response(429, {"code": -1003, "msg": "Too many requests"}),
+                    Response(200, {"symbols": []}),
+                ]
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                response = self.responses[self.calls]
+                self.calls += 1
+                return response
+
+        feed = BinanceMarketData(timeout=6, total_timeout=6)
+        feed.session = Session()
+        with patch("core.binance_market_data.time.sleep") as sleep:
+            result = feed._request("futures", "/fapi/v1/exchangeInfo", {})
+        self.assertEqual(result, {"symbols": []})
+        self.assertEqual(feed.session.calls, 2)
+        sleep.assert_called_once_with(3.0)
 
 
     def test_ranking_combines_24h_volume_book_liquidity_and_spread(self):
