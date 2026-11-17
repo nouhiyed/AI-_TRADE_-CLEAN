@@ -141,6 +141,53 @@ class BinanceKlineStream:
         with self._lock:
             return sorted(self._market_symbols[market])
 
+    def _prune_market_state(self, market, symbols):
+        """Discard candle state for pairs removed from the daily top-N universe."""
+        market = str(market).strip().lower()
+        keep = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+
+        def is_removed(key):
+            return (
+                isinstance(key, tuple) and len(key) >= 2
+                and key[0] == market and key[1] not in keep
+            )
+
+        with self._lock:
+            self._cache_ready = {
+                key for key in self._cache_ready
+                if not is_removed(key)
+            }
+            self._latest_candles = {
+                key: value for key, value in self._latest_candles.items()
+                if not is_removed(key)
+            }
+            self._last_open = {
+                key: value for key, value in self._last_open.items()
+                if not is_removed(key)
+            }
+            self._closed_seen = {
+                key for key in self._closed_seen
+                if not is_removed(key)
+            }
+            self._warm_errors = {
+                key: value for key, value in self._warm_errors.items()
+                if not is_removed(key)
+            }
+            state = self._status[market]
+            ready_count = sum(1 for key in self._cache_ready if key[0] == market)
+            state["cache_ready_symbols"] = ready_count
+            state["cache_warmup_completed"] = ready_count
+            state["cache_warmup_total"] = len(keep)
+            state["cache_warmup_errors"] = sum(
+                1 for key in self._warm_errors if key[0] == market
+            )
+
+        with self._cache_lock:
+            self._cache = {
+                key: value for key, value in self._cache.items()
+                if key[0] != market or key[1] in keep
+            }
+
     def latest_closed_events(self, market, expected_open_time_ms, symbols=None):
         """Build cache-backed audit events for the exact latest closed 5m candle.
 
@@ -678,6 +725,7 @@ class BinanceKlineStream:
                     for key in list(self._connection_live):
                         if key[0] == market:
                             self._connection_live.pop(key, None)
+                self._prune_market_state(market, symbols)
                 self._ensure_warmup_worker(market)
                 with self._lock:
                     universe_day = self._status[market].get("ranking_day") or (
