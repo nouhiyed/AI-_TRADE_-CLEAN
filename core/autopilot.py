@@ -507,14 +507,14 @@ class Autopilot:
     # ---- WebSocket-driven 5m strategy clock ---------------------------------
 
     def on_market_kline(self, market, event):
-        """Accept only deduplicated 5m close and next-candle-open events."""
+        """Accept deduplicated 5m closes and next-candle-open events."""
         domain = str(market).strip().lower()
         if domain not in ("spot", "futures") or not isinstance(event, dict):
-            return
+            return False
         symbol = str(event.get("symbol", "")).upper()
         open_time = int(event.get("open_time") or 0)
         if not symbol or open_time <= 0 or event.get("interval") != "5m":
-            return
+            return False
         key = (domain, symbol)
         if event.get("first_update") and not event.get("is_closed"):
             pending = None
@@ -546,37 +546,49 @@ class Autopilot:
                         domain, symbol, "execution_error", increment="errors",
                         reason="Execution writer submission failed: " + str(error),
                     )
-        if event.get("is_closed"):
-            identity = (domain, symbol, open_time)
+            return True
+        if not event.get("is_closed"):
+            return False
+
+        identity = (domain, symbol, open_time)
+        with self._event_lock:
+            if identity in self._event_seen:
+                return False
+            self._event_seen.add(identity)
+            if len(self._event_seen) > 20000:
+                self._event_seen = set(list(self._event_seen)[-10000:])
+
+        frames = event.get("market_data")
+        if isinstance(frames, dict) and frames:
             with self._event_lock:
-                if identity in self._event_seen:
-                    return
-                self._event_seen.add(identity)
-                if len(self._event_seen) > 20000:
-                    self._event_seen = set(list(self._event_seen)[-10000:])
-            frames = event.get("market_data")
-            if isinstance(frames, dict) and frames:
-                with self._event_lock:
-                    self._waiting_cache_events.pop(key, None)
-            if not isinstance(frames, dict) or not frames:
-                with self._event_lock:
-                    previous = self._waiting_cache_events.get(key)
-                    if previous is None or int(previous.get("close_time") or 0) < int(event.get("close_time") or 0):
-                        self._waiting_cache_events[key] = dict(event)
-                self._record_symbol_audit(
-                    domain, symbol, "waiting_cache", increment="events_received", also_increment="cache_waiting",
-                    close_time_ms=int(event.get("close_time") or 0),
-                    reason="Closed 5m candle retained until its historical cache is ready",
-                )
-                return
-            if not self._queue_latest_analysis(domain, symbol, event):
-                self.last_result = {
-                    "status": "ANALYSIS_QUEUE_FULL", "phase": "websocket_analysis",
-                    "domain": domain, "symbol": symbol,
-                    "reason": "Analysis queue full; latest event retained for retry",
-                }
-                with self._event_lock:
+                self._waiting_cache_events.pop(key, None)
+        if not isinstance(frames, dict) or not frames:
+            with self._event_lock:
+                previous = self._waiting_cache_events.get(key)
+                if previous is None or int(previous.get("close_time") or 0) < int(event.get("close_time") or 0):
                     self._waiting_cache_events[key] = dict(event)
+            self._record_symbol_audit(
+                domain, symbol, "waiting_cache", increment="events_received", also_increment="cache_waiting",
+                close_time_ms=int(event.get("close_time") or 0),
+                reason="Closed 5m candle retained until its historical cache is ready",
+            )
+            return True
+
+        if self._queue_latest_analysis(domain, symbol, event):
+            return True
+
+        self.last_result = {
+            "status": "ANALYSIS_QUEUE_FULL", "phase": "websocket_analysis",
+            "domain": domain, "symbol": symbol,
+            "reason": "Analysis queue full; latest event retained for retry",
+        }
+        with self._event_lock:
+            # A rejected submission must be eligible for the next reconciliation
+            # pass; otherwise the dedupe marker would turn a temporary full queue
+            # into a permanent lost candle.
+            self._event_seen.discard(identity)
+            self._waiting_cache_events[key] = dict(event)
+        return False
 
 
     def on_symbol_cache_ready(self, domain, symbol, frames):
@@ -600,7 +612,7 @@ class Autopilot:
                 reason="Cache became ready after the 10-minute audit retention window",
             )
             return False
-        replay["audit_only"] = age_ms > 30000
+        replay["audit_only"] = bool(replay.get("audit_only")) or age_ms > 30000
         accepted = self._queue_latest_analysis(domain, symbol, replay, count_event=False)
         if accepted:
             self._record_symbol_audit(
@@ -609,8 +621,42 @@ class Autopilot:
             )
         else:
             with self._event_lock:
+                self._event_seen.discard((
+                    domain, symbol, int(replay.get("open_time") or 0)
+                ))
                 self._waiting_cache_events[key] = replay
         return accepted
+
+
+    def has_seen_candle(self, domain, symbol, open_time_ms):
+        """Whether this exact market/symbol/5m close has been accepted or retained."""
+        identity = (
+            str(domain).strip().lower(),
+            str(symbol).strip().upper(),
+            int(open_time_ms or 0),
+        )
+        with self._event_lock:
+            return identity in self._event_seen
+
+
+    def completed_symbols_for_cycle(self, domain, open_time_ms, symbols):
+        """Return symbols whose analysis worker finished this exact 5m candle."""
+        domain = str(domain).strip().lower()
+        expected_open = int(open_time_ms or 0)
+        completed = []
+        errors = []
+        with self._event_lock:
+            records = self._symbol_audits.get(domain, {})
+            for raw_symbol in symbols or []:
+                symbol = str(raw_symbol).strip().upper()
+                record = records.get(symbol) or {}
+                if int(record.get("analysis_completed_open_time_ms") or 0) != expected_open:
+                    continue
+                completed.append(symbol)
+                if record.get("analysis_completed_error"):
+                    errors.append(symbol)
+        return {"completed": completed, "errors": errors}
+
 
     def queue_manual_signal(self, domain, symbol, signal):
         """Queue an agent-approved chart submission for the next 5m open."""
@@ -678,6 +724,7 @@ class Autopilot:
             self._record_symbol_audit(
                 domain, symbol, "analyzing",
                 queue_wait_ms=max(0, analysis_started_at_ms - received_at_ms),
+                open_time_ms=int(candle.get("open_time") or 0),
                 close_time_ms=int(candle.get("close_time") or 0),
             )
             if not self.c._agent_enabled(domain):
@@ -877,6 +924,15 @@ class Autopilot:
                 stats = self._analysis_stats[domain]
                 stats["last_completed_at_ms"] = completed_at_ms
                 stats["last_analysis_ms"] = max(0, completed_at_ms - analysis_started_at_ms)
+            with self._event_lock:
+                record = self._symbol_audits[domain].get(symbol)
+                if record is not None:
+                    record["analysis_completed_open_time_ms"] = int(candle.get("open_time") or 0)
+                    record["analysis_completed_close_time_ms"] = int(candle.get("close_time") or 0)
+                    record["analysis_completed_at_ms"] = completed_at_ms
+                    record["analysis_completed_error"] = record.get("state") in {
+                        "analysis_error", "prefilter_error", "stale", "waiting_cache"
+                    }
 
     def _execute_ws_entry(self, domain, symbol, pending, opening_candle):
         """Execute DEMO at the observed next 5m candle open, never on 1m."""
