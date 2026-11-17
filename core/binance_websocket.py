@@ -420,15 +420,33 @@ class BinanceKlineStream:
                 symbol for symbol in symbols
                 if self._snapshot(market, symbol) is not None
             }
+            # A cache can become healthy after the initial REST warmup because
+            # live closed candles fill a short history gap. Detect that
+            # transition and replay any close event retained by Autopilot.
             with self._lock:
+                previously_ready = {
+                    key[1] for key in self._cache_ready if key[0] == market
+                }
                 self._cache_ready = {
                     key for key in self._cache_ready
                     if key[0] != market or key[1] in ready
                 }
                 self._cache_ready.update((market, symbol) for symbol in ready)
+                newly_ready = ready - previously_ready
                 state = self._status[market]
                 state["cache_ready_symbols"] = len(ready)
                 state["cache_warmup_completed"] = len(ready)
+            if callable(self.on_cache_ready):
+                for symbol in newly_ready:
+                    frames = self._snapshot(market, symbol)
+                    if frames is not None:
+                        try:
+                            self.on_cache_ready(market, symbol, frames)
+                        except Exception as error:
+                            with self._lock:
+                                self._status[market]["last_error"] = (
+                                    "cache-ready replay callback: " + str(error)
+                                )
             pending = [symbol for symbol in symbols if symbol not in ready]
             if pending:
                 with ThreadPoolExecutor(max_workers=self.warmup_workers, thread_name_prefix="candle-warm-" + market) as pool:
