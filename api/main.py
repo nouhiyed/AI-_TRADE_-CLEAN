@@ -218,6 +218,7 @@ def initialize_runtime():
     market_stream = BinanceKlineStream(
         coordinator.market_feed, autopilot.on_market_kline,
         on_universe=autopilot.register_symbol_universe,
+        on_cache_ready=autopilot.on_symbol_cache_ready,
     )
 
 
