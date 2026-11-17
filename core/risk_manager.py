@@ -204,8 +204,8 @@ class RiskManager:
 
             if risk_pct <= 0 or leverage < 1:
                 return {"approved": False, "reason": "Invalid risk settings"}
-            if domain == "futures" and leverage > 5:
-                return {"approved": False, "reason": "Futures leverage exceeds the hard 5x limit"}
+            if domain == "futures" and leverage != 5:
+                return {"approved": False, "reason": "Futures leverage must be exactly 5x (minimum 5x; hard maximum 5x)"}
             if domain == "spot" and leverage != 1:
                 return {"approved": False, "reason": "Spot must use 1x leverage"}
 
