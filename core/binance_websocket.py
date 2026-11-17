@@ -91,6 +91,8 @@ class BinanceKlineStream:
                 "cache_ready_symbols": 0, "cache_warmup_total": 0,
                 "cache_warmup_completed": 0, "cache_warmup_errors": 0,
                 "cache_warmup_worker_starts": 0,
+                "cache_not_ready_reasons": {},
+                "cache_not_ready_samples": [],
                 "cache_warmup_last_error": None,
                 "last_close_code": None, "last_close_reason": None,
                 "last_disconnect_at": None, "reconnect_delay_seconds": 3,
@@ -474,39 +476,40 @@ class BinanceKlineStream:
             with self._lock:
                 self._status[market]["last_error"] = "cache candle: " + str(error)
 
-    def _frame_healthy(self, market, interval, frame, now_ms=None):
+    def _frame_health_reason(self, market, interval, frame, now_ms=None):
+        """Return an explicit cache rejection reason without weakening data guards."""
         minimum = self.REQUIRED_ROWS[market].get(
             interval, self.CACHE_LIMITS[market][interval])
-        if frame is None or len(frame) < minimum:
-            return False
+        if frame is None:
+            return "missing_frame"
+        if len(frame) < minimum:
+            return "insufficient_rows"
         if "is_closed" not in frame.columns or not bool(frame["is_closed"].iloc[-1]):
-            return False
+            return "latest_candle_not_closed"
         if "open_time" not in frame.columns or "close_time" not in frame.columns:
-            return False
+            return "missing_time_columns"
         try:
             interval_ms = self.INTERVAL_MS[interval]
             opens = pd.to_datetime(frame["open_time"], utc=True)
             closes = pd.to_datetime(frame["close_time"], utc=True)
             expected_delta = pd.Timedelta(milliseconds=interval_ms)
             if len(opens) > 1 and not bool((opens.diff().dropna() == expected_delta).all()):
-                return False
+                return "non_contiguous_candles"
             if not bool(((closes - opens) == expected_delta - pd.Timedelta(milliseconds=1)).all()):
-                return False
+                return "invalid_candle_duration"
             last_close = int(pd.Timestamp(closes.iloc[-1]).timestamp() * 1000)
             now_ms = int(now_ms or time.time() * 1000)
             if last_close > now_ms + 30000:
-                return False
-            # A cache can be structurally healthy yet one full candle behind.
-            # Full-universe reconciliation requires the exact latest closed bar,
-            # so freshness is anchored to the current interval boundary.
-            expected_latest_close = (
-                (now_ms // interval_ms) * interval_ms
-            ) - 1
+                return "future_candle"
+            expected_latest_close = ((now_ms // interval_ms) * interval_ms) - 1
             if last_close < expected_latest_close - 30000:
-                return False
-            return True
+                return "stale_latest_candle"
+            return None
         except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
-            return False
+            return "invalid_candle_data"
+
+    def _frame_healthy(self, market, interval, frame, now_ms=None):
+        return self._frame_health_reason(market, interval, frame, now_ms) is None
 
     def _snapshot(self, market, symbol):
         required = (
@@ -661,6 +664,26 @@ class BinanceKlineStream:
                                     "cache-ready replay callback: " + str(error)
                                 )
             pending = [symbol for symbol in current_symbols if symbol not in ready]
+            reason_counts = {}
+            reason_samples = []
+            for symbol in pending:
+                for interval in self._active_intervals(market):
+                    frame = self._cache.get((market, symbol, interval))
+                    reason = self._frame_health_reason(market, interval, frame)
+                    if reason:
+                        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                        if len(reason_samples) < 12:
+                            reason_samples.append({
+                                "symbol": symbol, "interval": interval,
+                                "reason": reason,
+                                "rows": 0 if frame is None else int(len(frame)),
+                                "required_rows": int(self.REQUIRED_ROWS[market].get(
+                                    interval, self.CACHE_LIMITS[market][interval])),
+                            })
+                        break
+            with self._lock:
+                self._status[market]["cache_not_ready_reasons"] = reason_counts
+                self._status[market]["cache_not_ready_samples"] = reason_samples
             if pending:
                 with ThreadPoolExecutor(
                     max_workers=self.warmup_workers,
