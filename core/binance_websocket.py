@@ -738,14 +738,9 @@ class BinanceKlineStream:
                                 "the exact closed cycle " + str(expected_open)
                             )
                 except Exception as error:
-                    # Transport failures remain immediately retryable.
+                    # Transport failures use the same bounded backoff as
+                    # incomplete successful responses to avoid REST retry storms.
                     with self._lock:
-                        self._last_rest_refresh_cycle.discard(
-                            (market, symbol, expected_open)
-                        )
-                        self._last_rest_refresh_attempt_at.pop(
-                            (market, symbol, expected_open), None
-                        )
                         self._status[market]["cache_warmup_last_error"] = (
                             symbol + " 5m refresh: " + str(error)
                         )
