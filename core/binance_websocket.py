@@ -656,15 +656,11 @@ class BinanceKlineStream:
             symbol = str(symbol).upper()
             with self._cache_lock:
                 frame = self._cache.get((market, symbol, "5m"))
-                has_expected_cycle = False
-                if frame is not None and not frame.empty:
-                    has_expected_cycle = any(
-                        self._row_key(value) == expected_open
-                        for value in frame["open_time"].tolist()
-                    )
-            # A newer cached row does not prove the expected candle exists:
-            # a WebSocket gap can leave a hole in the middle of the cache.
-            if has_expected_cycle:
+                latest_open = (
+                    self._row_key(frame.iloc[-1]["open_time"])
+                    if frame is not None and not frame.empty else None
+                )
+            if latest_open is None or latest_open >= expected_open:
                 continue
             refresh_key = (market, symbol, expected_open)
             with self._lock:
