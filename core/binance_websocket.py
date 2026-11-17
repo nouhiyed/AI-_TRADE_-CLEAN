@@ -825,7 +825,7 @@ class BinanceKlineStream:
                 )
                 with self._lock:
                     self._apps[conn_key] = app
-                app.run_forever(ping_interval=20, ping_timeout=10)
+                app.run_forever(ping_interval=30, ping_timeout=25)
             except Exception as error:
                 with self._lock:
                     self._status[market]["last_error"] = str(error)
