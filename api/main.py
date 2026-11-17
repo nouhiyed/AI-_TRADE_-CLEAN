@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.17.6"
+API_VERSION = "2026.11.17.7"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -390,6 +390,7 @@ def initialize_runtime():
     autopilot = Autopilot(coordinator, context=market_context)
     market_stream = BinanceKlineStream(
         coordinator.market_feed, autopilot.on_market_kline,
+        max_symbols=250,
         on_universe=autopilot.register_symbol_universe,
         on_cache_ready=autopilot.on_symbol_cache_ready,
     )
@@ -517,16 +518,31 @@ class APIHandler(BaseHTTPRequestHandler):
         try:
             if path == "/market/symbols":
                 market = params.get("market", ["spot"])[0].lower()
-                if market in {"spot", "futures"}:
-                    symbols = coordinator.market_feed.fetch_symbols(market)
-                    source = "binance_rest"
-                else:
+                if market not in {"spot", "futures"}:
                     return self.send_json({"error": "Unsupported market"}, 400)
+                symbols = (
+                    market_stream.registered_symbols(market)
+                    if market_stream else []
+                )
+                if len(symbols) != 250:
+                    ranked = coordinator.market_feed.fetch_top_symbols(
+                        market, limit=250
+                    )
+                    symbols = [item["symbol"] for item in ranked]
+                stream_state = (
+                    market_stream.status().get(market, {})
+                    if market_stream else {}
+                )
                 return self.send_json({
                     "market": market,
                     "symbols": symbols,
                     "count": len(symbols),
-                    "source": source,
+                    "limit": 250,
+                    "ranking_day": stream_state.get("ranking_day") or (
+                        ranked[0].get("ranking_day") if "ranked" in locals() and ranked else None
+                    ),
+                    "selection_rule": "24h USDT quote volume + best bid/ask liquidity + spread",
+                    "source": "binance_daily_top_250",
                     "received_at": time.time(),
                 })
 
