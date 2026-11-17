@@ -33,9 +33,10 @@ class BinanceKlineStream:
     INTERVAL_MS = {"5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000}
 
     def __init__(self, market_feed, on_kline, max_symbols=None,
-                 refresh_seconds=1800, reconnect_seconds=3):
+                 refresh_seconds=1800, reconnect_seconds=3, on_universe=None):
         self.feed = market_feed
         self.on_kline = on_kline
+        self.on_universe = on_universe
         # Default to every eligible symbol. A positive limit preserves an
         # explicit top-N deployment mode; zero means the full market universe.
         raw_limit = (
@@ -239,6 +240,12 @@ class BinanceKlineStream:
         if not symbols:
             raise RuntimeError("Binance returned no eligible liquid symbols for " + market)
         return symbols
+
+    def _register_universe(self, market, symbols):
+        """Notify the strategy runtime of the complete eligible market universe."""
+        if callable(self.on_universe):
+            return self.on_universe(market, list(symbols))
+        return None
 
     @staticmethod
     def _row_key(value):
@@ -447,6 +454,10 @@ class BinanceKlineStream:
         while not self._stop.is_set():
             try:
                 symbols = self._load_symbols(market)
+                # Provision one logical auditor record for every eligible pair
+                # before websocket events start arriving; status can distinguish
+                # registered coverage from symbols that actually emitted candles.
+                self._register_universe(market, symbols)
                 intervals = self._active_intervals(market)
                 stream_names = [
                     symbol.lower() + "@kline_" + interval
@@ -466,7 +477,8 @@ class BinanceKlineStream:
                 with self._lock:
                     self._symbol_connection.update(symbol_connections)
                     self._status[market].update({
-                        "symbols": len(symbols), "total_chunks": len(chunks),
+                        "symbols": len(symbols), "universe_registered": len(symbols),
+                        "total_chunks": len(chunks),
                         "connected_chunks": 0, "connected": False,
                         "fully_connected": False,
                         "state": "warming_and_connecting", "last_error": None,

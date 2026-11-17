@@ -55,6 +55,8 @@ class Autopilot:
         # One logical audit record per symbol; work itself is dispatched to a
         # bounded pool so hundreds of symbols never create hundreds of threads.
         self._symbol_audits = {"futures": {}, "spot": {}}
+        self._symbol_universes = {"futures": set(), "spot": set()}
+        self._universe_initialized = {"futures": False, "spot": False}
         self._symbol_audit_totals = {
             domain: {
                 "events_received": 0, "prefilter_passed": 0,
@@ -74,7 +76,9 @@ class Autopilot:
         # of spawning one operating-system thread per coin.
         workers = min(8, max(1, int(os.environ.get(
             "AI_TRADER_ANALYSIS_WORKERS_PER_MARKET", "4"))))
-        queue_limit = min(2048, max(64, int(os.environ.get(
+        # Reserve at least one scheduled slot for every symbol in a
+        # Binance full-universe market (up to the current 1020-stream chunk).
+        queue_limit = min(2048, max(1024, int(os.environ.get(
             "AI_TRADER_ANALYSIS_QUEUE_LIMIT", "1024"))))
         self._analysis_pools = {
             domain: ThreadPoolExecutor(
@@ -184,6 +188,44 @@ class Autopilot:
                 "cooldowns": {k: int(v - self.clock())
                               for k, v in self._cooldown.items() if v > self.clock()}}
 
+    def register_symbol_universe(self, domain, symbols):
+        """Register every eligible market pair before its first 5m candle event."""
+        domain = str(domain).strip().lower()
+        if domain not in self._symbol_audits:
+            return {"success": False, "reason": "Unknown market domain"}
+        normalized = {
+            str(symbol).strip().upper()
+            for symbol in (symbols or [])
+            if str(symbol).strip()
+        }
+        now_ms = int(self.clock() * 1000)
+        with self._event_lock:
+            previous = self._symbol_universes[domain]
+            self._symbol_universes[domain] = normalized
+            self._universe_initialized[domain] = True
+            records = self._symbol_audits[domain]
+            for symbol in normalized:
+                record = records.setdefault(symbol, {
+                    "symbol": symbol, "state": "waiting_for_5m_close",
+                    "events": 0, "prefilter_events": 0,
+                })
+                record["registered"] = True
+                record.setdefault("registered_at_ms", now_ms)
+                if int(record.get("events") or 0) == 0:
+                    record["state"] = "waiting_for_5m_close"
+                record["universe_updated_at_ms"] = now_ms
+            for symbol in previous - normalized:
+                if symbol in records:
+                    records[symbol]["registered"] = False
+                    records[symbol]["state"] = "not_in_current_universe"
+                    records[symbol]["universe_updated_at_ms"] = now_ms
+        return {
+            "success": True, "domain": domain,
+            "registered": len(normalized),
+            "added": len(normalized - previous),
+            "removed": len(previous - normalized),
+        }
+
     def worker_agent(self, domain):
         """Return this analysis worker's own persistent market-specific agent."""
         domain = str(domain).strip().lower()
@@ -205,14 +247,25 @@ class Autopilot:
         if domain not in self._symbol_audits or not symbol:
             return
         with self._event_lock:
+            # Standalone/test callers without a universe callback still get
+            # an auditor record for every observed symbol. In the production
+            # WebSocket path the complete universe is registered first.
+            if not self._universe_initialized[domain]:
+                self._symbol_universes[domain].add(symbol)
             record = self._symbol_audits[domain].setdefault(symbol, {
                 "symbol": symbol, "state": "waiting", "events": 0,
+                "prefilter_events": 0,
             })
             record.update(details)
             record["state"] = str(state)
-            record["updated_at_ms"] = int(time.time() * 1000)
+            record["updated_at_ms"] = int(self.clock() * 1000)
             if increment == "events_received":
                 record["events"] = int(record.get("events", 0)) + 1
+                record["last_event_at_ms"] = record["updated_at_ms"]
+                record["last_close_time_ms"] = int(details.get("close_time_ms") or 0)
+            if increment in ("prefilter_passed", "prefilter_rejected"):
+                record["prefilter_events"] = int(record.get("prefilter_events", 0)) + 1
+                record["last_prefilter_at_ms"] = record["updated_at_ms"]
             for counter in (increment, also_increment):
                 if counter and counter in self._symbol_audit_totals[domain]:
                     self._symbol_audit_totals[domain][counter] += 1
@@ -223,17 +276,48 @@ class Autopilot:
         with self._event_lock:
             for domain in ("futures", "spot"):
                 records = self._symbol_audits[domain]
+                active_symbols = self._symbol_universes[domain]
+                active_records = [
+                    records[symbol] for symbol in active_symbols
+                    if symbol in records
+                ]
                 states = {}
-                for record in records.values():
+                for record in active_records:
                     state = str(record.get("state", "unknown"))
                     states[state] = states.get(state, 0) + 1
                 latest = max(
-                    records.values(),
+                    active_records,
                     key=lambda item: int(item.get("updated_at_ms") or 0),
                     default={},
                 )
+                now_ms = int(self.clock() * 1000)
+                fresh_window_ms = 6 * 60 * 1000
+                symbols_seen_recently = sum(
+                    1 for record in active_records
+                    if 0 <= now_ms - int(record.get("last_event_at_ms") or 0)
+                    <= fresh_window_ms
+                )
+                symbols_audited_recently = sum(
+                    1 for record in active_records
+                    if 0 <= now_ms - int(record.get("last_prefilter_at_ms") or 0)
+                    <= fresh_window_ms
+                )
+                symbols_seen = sum(
+                    1 for record in active_records
+                    if int(record.get("events") or 0) > 0
+                )
+                symbols_audited = sum(
+                    1 for record in active_records
+                    if int(record.get("prefilter_events") or 0) > 0
+                )
                 result[domain] = {
-                    "symbols_tracked": len(records),
+                    "symbols_tracked": symbols_seen,
+                    "symbols_registered": len(active_symbols),
+                    "symbols_seen": symbols_seen,
+                    "symbols_audited": symbols_audited,
+                    "symbols_seen_recently": symbols_seen_recently,
+                    "symbols_audited_recently": symbols_audited_recently,
+                    "symbols_waiting_for_first_event": max(0, len(active_symbols) - symbols_seen),
                     "last_symbol": latest.get("symbol"),
                     "last_state": latest.get("state"),
                     "last_updated_at_ms": latest.get("updated_at_ms"),
