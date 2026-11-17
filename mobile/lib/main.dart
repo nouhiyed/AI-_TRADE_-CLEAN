@@ -785,6 +785,8 @@ class _TradeShellState extends State<TradeShell>
     final registered = int.tryParse('${audit['symbols_registered'] ?? monitoredTotal}') ?? monitoredTotal;
     final seenRecently = int.tryParse('${audit['symbols_seen_recently'] ?? tracked}') ?? tracked;
     final auditedRecently = int.tryParse('${audit['symbols_audited_recently'] ?? 0}') ?? 0;
+    final waitingCache = int.tryParse('${audit['symbols_waiting_for_cache'] ?? 0}') ?? 0;
+    final cacheReady = int.tryParse('${websocketMarket['cache_ready_symbols'] ?? 0}') ?? 0;
     final deep = int.tryParse('${audit['deep_analysis'] ?? lastBatch['deep_analysis'] ?? 0}') ?? 0;
     final signals = int.tryParse('${audit['actionable'] ?? opportunities}') ?? opportunities;
     final opened = int.tryParse('${audit['opened'] ?? lastBatch['opened'] ?? 0}') ?? 0;
@@ -907,6 +909,19 @@ class _TradeShellState extends State<TradeShell>
                 Text(
                   '$poolWorkers ${tr('عمّال', 'workers')}',
                   style: TextStyle(color: accent, fontSize: 8, fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${tr('جاهز الكاش:', 'CACHE READY:')} $cacheReady/$monitoredTotal · ${tr('بانتظار البيانات:', 'WAITING CACHE:')} $waitingCache',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: waitingCache > 0 ? Colors.orangeAccent : widget.muted, fontSize: 8),
+                  ),
                 ),
               ],
             ),
