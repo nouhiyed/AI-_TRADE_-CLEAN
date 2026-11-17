@@ -5,6 +5,7 @@ import pandas as pd
 from core.trailing_stop import (
     active_fixed_take_profit,
     calculate_trailing_stop,
+    apply_cost_aware_trailing_floor,
     initialize_trailing_take_profit,
     is_trailing_take_profit_enabled,
 )
@@ -37,6 +38,30 @@ class TrailingTakeProfitPolicyTests(unittest.TestCase):
         }
         self.assertFalse(is_trailing_take_profit_enabled(record))
         self.assertEqual(active_fixed_take_profit(record), "125.0")
+
+    def test_armed_short_trailing_floor_cannot_fall_back_above_net_break_even(self):
+        stop = apply_cost_aware_trailing_floor(
+            candidate_stop=0.01344,
+            entry_price=0.01333333,
+            direction="SHORT",
+            best_price=0.013208,
+            fee_rate=0.0004,
+            slippage_rate=0.0005,
+        )
+        self.assertLess(stop, 0.01333333)
+        self.assertGreater(stop, 0.013208)
+
+    def test_armed_long_trailing_floor_cannot_fall_back_below_net_break_even(self):
+        stop = apply_cost_aware_trailing_floor(
+            candidate_stop=99.0,
+            entry_price=100.0,
+            direction="LONG",
+            best_price=102.0,
+            fee_rate=0.0004,
+            slippage_rate=0.0005,
+        )
+        self.assertGreater(stop, 100.0)
+        self.assertLess(stop, 102.0)
 
     def test_atr_structure_trailing_stop_never_moves_away_from_market(self):
         frame = pd.DataFrame({

@@ -322,6 +322,12 @@ class _ClosedTradeDetailScreenState extends State<ClosedTradeDetailScreen> {
                     _metric(t('الإطار', 'TIMEFRAME'), timeframe, widget.text),
                   ]),
                   const SizedBox(height: 8),
+                  Row(children: [
+                    _metric('LEVERAGE', trade['leverage'] == null ? '—' : '${trade['leverage']}x', const Color(0xFF4287F5)),
+                    const Spacer(),
+                    const Spacer(),
+                  ]),
+                  const SizedBox(height: 8),
                   Text('${trade['close_reason'] ?? 'CLOSED'}',
                     style: TextStyle(color: widget.muted, fontSize: 10)),
                 ],
@@ -361,7 +367,9 @@ class _ClosedTradeDetailScreenState extends State<ClosedTradeDetailScreen> {
                                 timeframe: timeframe,
                                 entry: _price(_chart['entry'] ?? trade['entry'] ?? trade['entry_price']),
                                 exit: _price(_chart['exit'] ?? trade['exit_price'] ?? trade['close_price']),
-                                stopLoss: _price(_chart['stop_loss'] ?? trade['stop_loss']),
+                                // The trade ledger stores the final ratcheted stop.
+                                // Prefer it over the chart endpoint's initial plan stop.
+                                stopLoss: _price(trade['stop_loss'] ?? _chart['stop_loss']),
                                   takeProfit: _price(_chart['take_profit'] ?? trade['take_profit']),
                                 entryTime: int.tryParse('${_chart['opened_at'] ?? ''}'),
                                 exitTime: int.tryParse('${_chart['closed_at'] ?? ''}'),
