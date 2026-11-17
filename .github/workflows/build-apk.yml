@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 15
     env:
       AI_TRADER_WS_MAX_SYMBOLS: '250'
-      AI_TRADER_WS_WARMUP_WORKERS: '8'
+      AI_TRADER_WS_WARMUP_WORKERS: '4'
       AI_TRADER_ANALYSIS_WORKERS_PER_MARKET: '4'
       AI_TRADER_RECONCILE_BATCH_SIZE: '96'
     steps:
