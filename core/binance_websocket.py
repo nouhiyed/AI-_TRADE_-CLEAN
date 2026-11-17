@@ -607,6 +607,7 @@ class BinanceKlineStream:
                     current_symbols = sorted(self._market_symbols.get(market, set()))
             else:
                 current_symbols = sorted(fixed_symbols)
+            self._prune_market_state(market, current_symbols)
             with self._lock:
                 self._status[market]["cache_warmup_total"] = len(current_symbols)
             if not current_symbols:
