@@ -108,6 +108,45 @@ class Top250UniverseTests(unittest.TestCase):
             stream._load_symbols("futures")
         stream.stop()
 
+    def test_daily_universe_prunes_removed_symbols_from_live_cache(self):
+        stream = BinanceKlineStream(
+            object(), lambda _market, _event: None, max_symbols=250
+        )
+        stream._cache = {
+            ("spot", "KEEPUSDT", "5m"): "current",
+            ("spot", "REMOVEUSDT", "5m"): "stale",
+        }
+        stream._cache_ready = {
+            ("spot", "KEEPUSDT"),
+            ("spot", "REMOVEUSDT"),
+        }
+        stream._latest_candles = {
+            ("spot", "KEEPUSDT"): {"symbol": "KEEPUSDT"},
+            ("spot", "REMOVEUSDT"): {"symbol": "REMOVEUSDT"},
+        }
+        stream._last_open = {
+            ("spot", "KEEPUSDT"): 1,
+            ("spot", "REMOVEUSDT"): 2,
+        }
+        stream._closed_seen = {
+            ("spot", "KEEPUSDT", "5m", 1),
+            ("spot", "REMOVEUSDT", "5m", 2),
+        }
+        stream._warm_errors = {
+            ("spot", "REMOVEUSDT", "5m"): "old error",
+        }
+
+        stream._prune_market_state("spot", {"KEEPUSDT"})
+
+        self.assertEqual(set(stream._cache), {("spot", "KEEPUSDT", "5m")})
+        self.assertEqual(stream._cache_ready, {("spot", "KEEPUSDT")})
+        self.assertEqual(set(stream._latest_candles), {("spot", "KEEPUSDT")})
+        self.assertEqual(set(stream._last_open), {("spot", "KEEPUSDT")})
+        self.assertEqual(stream._closed_seen, {("spot", "KEEPUSDT", "5m", 1)})
+        self.assertEqual(stream._warm_errors, {})
+        self.assertEqual(stream.status()["latest_candle_symbols"]["spot"], 1)
+        stream.stop()
+
     def test_futures_scanner_never_exceeds_250(self):
         class Feed:
             def __init__(self):
