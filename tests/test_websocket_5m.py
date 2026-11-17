@@ -546,6 +546,22 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         self.assertEqual(event["source"], "binance_cache_reconciliation")
         self.assertEqual(batch["missing_symbols"], ["ETHUSDT"])
 
+    def test_cache_reconciliation_finds_expected_cycle_before_newer_cached_row(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0
+        )
+        frame = candle_frame("5min", rows=61)
+        frame.attrs["timeframe"] = "5m"
+        stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        expected_open = int(frame.iloc[-2]["open_time"].timestamp() * 1000)
+        stream._market_symbols["futures"] = {"BTCUSDT"}
+
+        batch = stream.latest_closed_events("futures", expected_open)
+
+        self.assertEqual(batch["available"], 1)
+        self.assertEqual(batch["events"][0]["open_time"], expected_open)
+        self.assertEqual(batch["missing_symbols"], [])
+
     def test_cache_reconciliation_rejects_a_different_candle_cycle(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
