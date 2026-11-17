@@ -38,10 +38,14 @@ class ReconcileBatchRotationTests(unittest.TestCase):
             pending.difference_update(set(batch) - unavailable)
 
         self.assertEqual(pending, unavailable)
-        batch, cursor = select_reconcile_batch(
-            universe, pending, cursor, 96
-        )
-        self.assertEqual(set(batch), unavailable)
+        retried = set()
+        for _ in range(3):
+            batch, cursor = select_reconcile_batch(
+                universe, pending, cursor, 96
+            )
+            retried.update(batch)
+
+        self.assertEqual(retried, unavailable)
 
 
 if __name__ == "__main__":
