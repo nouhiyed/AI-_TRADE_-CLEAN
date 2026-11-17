@@ -782,6 +782,9 @@ class _TradeShellState extends State<TradeShell>
     final streamSymbols = int.tryParse('${websocketMarket['symbols'] ?? total}') ?? total;
     final monitoredTotal = streamSymbols > 0 ? streamSymbols : total;
     final tracked = int.tryParse('${audit['symbols_tracked'] ?? completed}') ?? completed;
+    final registered = int.tryParse('${audit['symbols_registered'] ?? monitoredTotal}') ?? monitoredTotal;
+    final seenRecently = int.tryParse('${audit['symbols_seen_recently'] ?? tracked}') ?? tracked;
+    final auditedRecently = int.tryParse('${audit['symbols_audited_recently'] ?? 0}') ?? 0;
     final deep = int.tryParse('${audit['deep_analysis'] ?? lastBatch['deep_analysis'] ?? 0}') ?? 0;
     final signals = int.tryParse('${audit['actionable'] ?? opportunities}') ?? opportunities;
     final opened = int.tryParse('${audit['opened'] ?? lastBatch['opened'] ?? 0}') ?? 0;
@@ -860,7 +863,7 @@ class _TradeShellState extends State<TradeShell>
           const SizedBox(height: 6),
           LinearProgressIndicator(
             value: phase == 'websocket_5m' && monitoredTotal > 0
-                ? (tracked / monitoredTotal).clamp(0.0, 1.0).toDouble()
+                ? (seenRecently / monitoredTotal).clamp(0.0, 1.0).toDouble()
                 : scanning
                     ? null
                     : progress,
@@ -895,7 +898,7 @@ class _TradeShellState extends State<TradeShell>
               children: [
                 Expanded(
                   child: Text(
-                    '${tr('الفاحصون:', 'AUDITORS:')} $tracked/$monitoredTotal · ${tr('تحليل عميق:', 'DEEP:')} $deep',
+                    '${tr('مدققون مسجلون:', 'REGISTERED:')} $registered/$monitoredTotal · ${tr('أحداث 5m الحديثة:', 'RECENT 5m EVENTS:')} $seenRecently · ${tr('تحليل عميق:', 'DEEP:')} $deep',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(color: widget.muted, fontSize: 8),
