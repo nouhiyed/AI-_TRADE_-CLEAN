@@ -1,5 +1,6 @@
 import time
 import threading
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
@@ -61,6 +62,11 @@ class BinanceMarketData:
         self.session.headers.update({
             "User-Agent": "AI-Trader-MarketData/1.0"
         })
+        self._universe_cache = {}
+        self._universe_cache_locks = {
+            "spot": threading.RLock(),
+            "futures": threading.RLock(),
+        }
 
     def _request(self, market, endpoint, params):
         market = market.lower()
@@ -247,6 +253,143 @@ class BinanceMarketData:
         else:
             raise ValueError("Market must be spot or futures")
         return sorted(set(symbols))
+
+    def fetch_top_symbols(self, market, limit=250, force_refresh=False):
+        """Return the daily top-N USDT pairs ranked by turnover and live book liquidity.
+
+        Binance's 24h quote volume is the primary activity measure. Balanced
+        best-bid/best-ask notional and a tight spread provide the liquidity
+        component. The selection is cached per UTC day and per market.
+        """
+        market = str(market).strip().lower()
+        if market not in self.BASE_URLS:
+            raise ValueError("Market must be spot or futures")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise ValueError("limit must be a positive integer")
+        if limit < 1:
+            raise ValueError("limit must be a positive integer")
+
+        with self._universe_cache_locks[market]:
+            ranking_day = datetime.now(timezone.utc).date().isoformat()
+            cached = self._universe_cache.get(market)
+            if (
+                not force_refresh and cached
+                and cached.get("ranking_day") == ranking_day
+            ):
+                return [dict(item) for item in cached["ranked"][:limit]]
+
+            eligible = set(self.fetch_symbols(market))
+            if market == "spot":
+                ticker_endpoint = "/api/v3/ticker/24hr"
+                book_endpoint = "/api/v3/ticker/bookTicker"
+            else:
+                ticker_endpoint = "/fapi/v1/ticker/24hr"
+                book_endpoint = "/fapi/v1/ticker/bookTicker"
+
+            tickers = self._request(market, ticker_endpoint, {})
+            books = self._request(market, book_endpoint, {})
+            ticker_map = {
+                str(item.get("symbol", "")).upper(): item
+                for item in tickers if isinstance(item, dict)
+            } if isinstance(tickers, list) else {}
+            book_map = {
+                str(item.get("symbol", "")).upper(): item
+                for item in books if isinstance(item, dict)
+            } if isinstance(books, list) else {}
+
+            candidates = []
+            for symbol in eligible:
+                ticker = ticker_map.get(symbol)
+                book = book_map.get(symbol)
+                if not ticker or not book:
+                    continue
+                try:
+                    quote_volume = float(ticker.get("quoteVolume", 0) or 0)
+                    last_price = float(ticker.get("lastPrice", 0) or 0)
+                    change = float(ticker.get("priceChangePercent", 0) or 0)
+                    bid = float(book.get("bidPrice", 0) or 0)
+                    ask = float(book.get("askPrice", 0) or 0)
+                    bid_qty = float(book.get("bidQty", 0) or 0)
+                    ask_qty = float(book.get("askQty", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+
+                values = (quote_volume, last_price, change, bid, ask, bid_qty, ask_qty)
+                if not all(math.isfinite(value) for value in values):
+                    continue
+                if (
+                    quote_volume <= 0 or last_price <= 0
+                    or bid <= 0 or ask <= 0 or bid > ask
+                    or bid_qty <= 0 or ask_qty <= 0
+                ):
+                    continue
+
+                midpoint = (bid + ask) / 2.0
+                spread_bps = ((ask - bid) / midpoint) * 10000.0
+                # Use the weaker side of the best quote so one-sided displayed
+                # size cannot make an otherwise thin order book look liquid.
+                book_liquidity = min(bid * bid_qty, ask * ask_qty)
+                if not math.isfinite(spread_bps) or not math.isfinite(book_liquidity):
+                    continue
+                candidates.append({
+                    "symbol": symbol,
+                    "quote_volume": quote_volume,
+                    "last_price": last_price,
+                    "change_24h_percent": change,
+                    "book_liquidity_usdt": book_liquidity,
+                    "spread_bps": spread_bps,
+                    "ranking_day": ranking_day,
+                })
+
+            required = min(limit, len(eligible))
+            if len(candidates) < required:
+                raise RuntimeError(
+                    "Incomplete Binance liquidity snapshot for %s: %s valid pairs, %s required"
+                    % (market, len(candidates), required)
+                )
+            if not candidates:
+                raise RuntimeError("Binance returned no eligible liquid symbols for " + market)
+
+            def assign_percentile(field, target, descending=True):
+                ordered = sorted(
+                    candidates,
+                    key=lambda item: (item[field], item["symbol"]),
+                    reverse=descending,
+                )
+                denominator = max(1, len(ordered) - 1)
+                for index, item in enumerate(ordered):
+                    item[target] = 1.0 - (index / denominator)
+
+            assign_percentile("quote_volume", "volume_percentile")
+            assign_percentile("book_liquidity_usdt", "liquidity_percentile")
+            assign_percentile("spread_bps", "spread_percentile", descending=False)
+
+            for item in candidates:
+                item["ranking_score"] = (
+                    0.60 * item["volume_percentile"]
+                    + 0.30 * item["liquidity_percentile"]
+                    + 0.10 * item["spread_percentile"]
+                )
+
+            candidates.sort(
+                key=lambda item: (
+                    item["ranking_score"],
+                    item["quote_volume"],
+                    item["book_liquidity_usdt"],
+                    item["symbol"],
+                ),
+                reverse=True,
+            )
+            for index, item in enumerate(candidates, start=1):
+                item["rank"] = index
+
+            self._universe_cache[market] = {
+                "ranking_day": ranking_day,
+                "ranked": [dict(item) for item in candidates],
+            }
+            return [dict(item) for item in candidates[:limit]]
 
     def fetch_orderbook(self, market, symbol, limit=100):
         raw = self._request(

@@ -36,7 +36,7 @@ class TradingCoordinator(SpotDemoMixin):
         self.risk = RiskManager(initial_balance=initial_balance)
         self.market_feed = BinanceMarketData(timeout=6, total_timeout=6)
         self.market_engine = MarketDataEngine(timeout=6)
-        self.market_scanner = FuturesMarketScanner(timeout=6)
+        self.market_scanner = FuturesMarketScanner(timeout=6, market=self.market_feed)
         # Injected by the API runtime; kept optional for offline/unit-test use.
         self.market_context = None
 
@@ -1754,38 +1754,18 @@ class TradingCoordinator(SpotDemoMixin):
             }
 
         try:
-            symbols = self.market_feed.fetch_symbols("spot")
-            tickers = self.market_feed._request("spot", "/api/v3/ticker/24hr", {})
-            ticker_map = {
-                str(item.get("symbol", "")).upper(): item
-                for item in tickers if isinstance(item, dict)
-            }
-            universe = []
+            universe = self.market_feed.fetch_top_symbols(
+                "spot", limit=250
+            )
             minimum = (
                 float(min_quote_volume)
                 if min_quote_volume is not None else None
             )
-            for symbol in symbols:
-                item = ticker_map.get(symbol, {})
-                try:
-                    volume = float(item.get("quoteVolume", 0) or 0)
-                    price = float(item.get("lastPrice", 0) or 0)
-                    change = float(item.get("priceChangePercent", 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                if price <= 0:
-                    continue
-                if minimum is not None and volume < minimum:
-                    continue
-                universe.append({
-                    "symbol": symbol,
-                    "quote_volume": volume,
-                    "last_price": price,
-                    "change_24h_percent": change,
-                })
-            universe.sort(
-                key=lambda item: item["quote_volume"], reverse=True
-            )
+            if minimum is not None:
+                universe = [
+                    item for item in universe
+                    if float(item.get("quote_volume", 0) or 0) >= minimum
+                ]
         except Exception as error:
             return {
                 "success": False,
@@ -1796,7 +1776,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         if limit is not None:
             try:
-                requested_limit = max(1, int(limit))
+                requested_limit = min(250, max(1, int(limit)))
             except (TypeError, ValueError):
                 return {
                     "success": False,
