@@ -232,7 +232,20 @@ class BinanceKlineStream:
                 if frame is None or frame.empty:
                     missing.append(symbol)
                     continue
-                row = frame.iloc[-1]
+                # Select the requested cycle from the cached history rather
+                # than assuming the final row is always that cycle. A newer
+                # closed row can arrive while reconciliation is processing a
+                # batch; rejecting the whole cache in that case loses a valid
+                # exact-cycle candle that is still present in the frame.
+                opens = pd.to_datetime(frame["open_time"], utc=True)
+                matching = frame.loc[
+                    opens.map(lambda value: self._row_key(value))
+                    == expected_open_time_ms
+                ]
+                if matching.empty:
+                    missing.append(symbol)
+                    continue
+                row = matching.iloc[-1]
                 if not bool(row.get("is_closed", False)):
                     missing.append(symbol)
                     continue
