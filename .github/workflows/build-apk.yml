@@ -25,6 +25,7 @@ on:
       - 'agents/**'
       - 'core/**'
       - 'api/**'
+      - 'scripts/**'
       - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/build-apk.yml'
