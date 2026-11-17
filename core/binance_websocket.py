@@ -62,6 +62,10 @@ class BinanceKlineStream:
         self._cache_lock = threading.RLock()
         self._apps = {}
         self._threads = {}
+        # Exactly one long-lived cache warmup worker per market. WebSocket
+        # reconnects must not spawn duplicate REST warmup pools.
+        self._warmup_threads = {}
+        self._thread_factory = threading.Thread
         self._connection_threads = []
         self._connection_live = {}
         self._symbol_connection = {}
@@ -80,6 +84,7 @@ class BinanceKlineStream:
                 "reconnects": 0, "watchdog_restarts": 0, "last_error": None,
                 "cache_ready_symbols": 0, "cache_warmup_total": 0,
                 "cache_warmup_completed": 0, "cache_warmup_errors": 0,
+                "cache_warmup_worker_starts": 0,
             }
             for market in ("spot", "futures")
         }
@@ -97,6 +102,10 @@ class BinanceKlineStream:
                 for market in ("spot", "futures")
             }
             for market in ("spot", "futures"):
+                warmup_worker = self._warmup_threads.get(market)
+                snapshot[market]["cache_warmup_worker_alive"] = bool(
+                    warmup_worker and warmup_worker.is_alive()
+                )
                 last_event = snapshot[market].get("last_event")
                 try:
                     stamp = datetime.fromisoformat(last_event)
@@ -492,15 +501,44 @@ class BinanceKlineStream:
                     self._status[market]["last_error"] = "cache-ready callback: " + str(error)
         return ready
 
-    def _warm_market(self, market, symbols):
+    def _ensure_warmup_worker(self, market):
+        """Start at most one cache warmup worker for a market."""
+        market = str(market).strip().lower()
+        if market not in ("spot", "futures"):
+            return False
         with self._lock:
-            self._status[market]["cache_warmup_total"] = len(symbols)
-            self._status[market]["cache_warmup_completed"] = 0
-            self._status[market]["cache_ready_symbols"] = 0
-            self._status[market]["cache_warmup_errors"] = 0
+            current = self._warmup_threads.get(market)
+            if current is not None and current.is_alive():
+                return False
+            worker = self._thread_factory(
+                target=self._warm_market,
+                args=(market,),
+                name="binance-cache-warm-" + market,
+                daemon=True,
+            )
+            self._warmup_threads[market] = worker
+            self._status[market]["cache_warmup_worker_starts"] += 1
+            worker.start()
+            return True
+
+    def _warm_market(self, market, symbols=None):
+        """Keep one cache warmup loop aligned with the live registered universe."""
+        fixed_symbols = None if symbols is None else set(symbols)
         while not self._stop.is_set():
+            if fixed_symbols is None:
+                with self._lock:
+                    current_symbols = sorted(self._market_symbols.get(market, set()))
+            else:
+                current_symbols = sorted(fixed_symbols)
+            with self._lock:
+                self._status[market]["cache_warmup_total"] = len(current_symbols)
+            if not current_symbols:
+                if self._stop.wait(5):
+                    return
+                continue
+
             ready = {
-                symbol for symbol in symbols
+                symbol for symbol in current_symbols
                 if self._snapshot(market, symbol) is not None
             }
             # A cache can become healthy after the initial REST warmup because
@@ -530,19 +568,28 @@ class BinanceKlineStream:
                                 self._status[market]["last_error"] = (
                                     "cache-ready replay callback: " + str(error)
                                 )
-            pending = [symbol for symbol in symbols if symbol not in ready]
+            pending = [symbol for symbol in current_symbols if symbol not in ready]
             if pending:
-                with ThreadPoolExecutor(max_workers=self.warmup_workers, thread_name_prefix="candle-warm-" + market) as pool:
-                    futures = [pool.submit(self._warm_symbol, market, symbol) for symbol in pending]
+                with ThreadPoolExecutor(
+                    max_workers=self.warmup_workers,
+                    thread_name_prefix="candle-warm-" + market,
+                ) as pool:
+                    futures = [
+                        pool.submit(self._warm_symbol, market, symbol)
+                        for symbol in pending
+                    ]
                     for future in as_completed(futures):
                         try:
                             future.result()
                         except Exception as error:
                             with self._lock:
-                                self._status[market]["last_error"] = "cache warmup: " + str(error)
+                                self._status[market]["last_error"] = (
+                                    "cache warmup: " + str(error)
+                                )
                         if self._stop.is_set():
                             return
-            # Keep checking cache continuity and age while the stream runs.
+            # Re-read the registered universe after each pass. This worker is
+            # intentionally retained across WebSocket reconnects.
             if self._stop.wait(60):
                 return
 
@@ -601,10 +648,7 @@ class BinanceKlineStream:
                     for key in list(self._connection_live):
                         if key[0] == market:
                             self._connection_live.pop(key, None)
-                threading.Thread(
-                    target=self._warm_market, args=(market, symbols),
-                    name="binance-cache-warm-" + market, daemon=True,
-                ).start()
+                self._ensure_warmup_worker(market)
                 threads = []
                 for index, streams in enumerate(chunks):
                     thread = threading.Thread(
