@@ -30,6 +30,9 @@ class BinanceKlineStream:
         "spot": {"5m": 60, "15m": 60, "1h": 210},
     }
     MAX_STREAMS_PER_CONNECTION = 1020
+    # Binance sends server ping frames; websocket-client auto-replies with pong.
+    # Disable client-originated ping timers to avoid false ping/pong timeouts on mobile links.
+    CLIENT_PING_INTERVAL_SECONDS = 0
     INTERVAL_MS = {"5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000}
 
     def __init__(self, market_feed, on_kline, max_symbols=None,
@@ -838,7 +841,9 @@ class BinanceKlineStream:
                 )
                 with self._lock:
                     self._apps[conn_key] = app
-                app.run_forever(ping_interval=120, ping_timeout=60)
+                app.run_forever(
+                    ping_interval=self.CLIENT_PING_INTERVAL_SECONDS
+                )
             except Exception as error:
                 with self._lock:
                     self._status[market]["last_error"] = str(error)
