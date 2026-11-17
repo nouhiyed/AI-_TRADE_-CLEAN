@@ -21,6 +21,7 @@ _BINANCE_REQUEST_LOCKS = {
 _BINANCE_LAST_REQUEST_AT = {"spot": 0.0, "futures": 0.0}
 _BINANCE_MIN_REQUEST_INTERVAL = 0.12
 _BINANCE_DEFAULT_429_RETRY_SECONDS = 3.0
+_BINANCE_MAX_429_RETRIES = 3
 
 
 class _BinanceRateLimitError(RuntimeError):
@@ -58,7 +59,7 @@ class BinanceMarketData:
         "taker_buy_base", "taker_buy_quote", "ignore",
     ]
 
-    def __init__(self, timeout=6, total_timeout=8):
+    def __init__(self, timeout=30, total_timeout=30):
         self.timeout = max(0.1, float(timeout))
         self.total_timeout = max(0.1, float(total_timeout))
         self.session = requests.Session()
@@ -132,7 +133,7 @@ class BinanceMarketData:
                                 wait_seconds = _BINANCE_DEFAULT_429_RETRY_SECONDS
 
                         remaining = deadline - time.monotonic()
-                        if attempt == 0 and wait_seconds < remaining:
+                        if attempt < _BINANCE_MAX_429_RETRIES and wait_seconds < remaining:
                             time.sleep(wait_seconds)
                             attempt += 1
                             continue
