@@ -938,7 +938,8 @@ class Autopilot:
                     record["analysis_completed_close_time_ms"] = int(candle.get("close_time") or 0)
                     record["analysis_completed_at_ms"] = completed_at_ms
                     record["analysis_completed_error"] = record.get("state") in {
-                        "analysis_error", "prefilter_error", "stale", "waiting_cache"
+                        "analysis_error", "prefilter_error", "stale",
+                        "waiting_cache", "agent_stopped"
                     }
 
     def _execute_ws_entry(self, domain, symbol, pending, opening_candle):
