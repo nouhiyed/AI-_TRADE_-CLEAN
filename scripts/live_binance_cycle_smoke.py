@@ -1,130 +1,72 @@
-"""Live end-to-end Binance 5m coverage smoke test for the top-250 markets.
+"""Live end-to-end Binance 5m coverage smoke test.
 
-This runs the same WebSocket cache, exact-cycle reconciliation, and Autopilot
-analysis path used by the Android backend. It never enables DEMO entries.
+Runs the production API reconciliation worker against Binance public market
+data. It never enables DEMO entries. A market is reported as verified only
+when its WebSocket, 250-symbol cache, exact 5m cycle, and all 250 analyses pass.
 """
 import json
 import os
-import tempfile
-import time
 import sys
+import tempfile
+import threading
+import time
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from api.main import select_reconcile_batch
+import api.main as api_runtime
 from core.autopilot import Autopilot
 from core.binance_websocket import BinanceKlineStream
 from core.coordinator import TradingCoordinator
 
 
-def expected_closed_open(now_ms=None):
-    now_ms = int(now_ms or time.time() * 1000)
-    return ((now_ms // 300000) - 1) * 300000
-
-
-def wait_for_stream(stream, timeout_seconds=300):
+def wait_for_stream(stream, timeout_seconds=180):
     deadline = time.monotonic() + timeout_seconds
     last = {}
+    ready = set()
     while time.monotonic() < deadline:
         last = stream.status()
-        ready = all(
-            int(last.get(market, {}).get("cache_ready_symbols", 0)) == 250
-            and int(last.get(market, {}).get("symbols", 0)) == 250
+        ready = {
+            market for market in ("futures", "spot")
+            if int(last.get(market, {}).get("symbols", 0)) == 250
+            and int(last.get(market, {}).get("cache_ready_symbols", 0)) == 250
             and bool(last.get(market, {}).get("fully_connected"))
-            for market in ("futures", "spot")
-        )
-        if ready:
-            return last
-        time.sleep(2)
-    raise RuntimeError("Live stream/cache warmup timeout: " + json.dumps({
-        market: {
-            "symbols": last.get(market, {}).get("symbols"),
-            "connected": last.get(market, {}).get("fully_connected"),
-            "cache_ready": last.get(market, {}).get("cache_ready_symbols"),
-            "last_error": last.get(market, {}).get("last_error"),
-            "warmup_error": last.get(market, {}).get("cache_warmup_last_error"),
         }
-        for market in ("futures", "spot")
-    }, sort_keys=True))
+        if len(ready) == 2:
+            break
+        time.sleep(2)
+    return last, ready
 
 
-def collect_exact_cycle(stream, autopilot, domain, timeout_seconds=240):
-    symbols = stream.registered_symbols(domain)
-    if len(symbols) != 250 or len(set(symbols)) != 250:
-        raise RuntimeError("%s universe is not exactly 250 unique pairs" % domain)
-
-    cycle_open = expected_closed_open()
-    pending = set(symbols)
-    cursor = 0
+def wait_for_coverage(api_module, markets, timeout_seconds=240):
     deadline = time.monotonic() + timeout_seconds
-    last_missing = set(pending)
-
-    while pending and time.monotonic() < deadline:
-        batch_symbols, cursor = select_reconcile_batch(
-            symbols, pending, cursor, 96
-        )
-        if not batch_symbols:
-            time.sleep(1)
-            continue
-        batch = stream.latest_closed_events(
-            domain, cycle_open, symbols=batch_symbols
-        )
-        for event in batch.get("events", []):
-            symbol = str(event.get("symbol", "")).upper()
-            if not symbol:
-                continue
-            if autopilot.has_seen_candle(domain, symbol, cycle_open):
-                pending.discard(symbol)
-                continue
-            accepted = autopilot.on_market_kline(domain, event)
-            if accepted or autopilot.has_seen_candle(domain, symbol, cycle_open):
-                pending.discard(symbol)
-        last_missing = set(pending)
-        if pending:
-            time.sleep(2)
-
-    if pending:
-        raise RuntimeError(
-            "%s exact-cycle cache/reconcile incomplete: %s/250 missing; sample=%s"
-            % (domain, len(pending), sorted(pending)[:30])
-        )
-    return cycle_open, symbols
-
-
-def wait_for_analysis(autopilot, cycles, timeout_seconds=360):
-    deadline = time.monotonic() + timeout_seconds
-    snapshots = {}
+    latest = {}
     while time.monotonic() < deadline:
-        complete = True
-        for domain, (cycle_open, symbols) in cycles.items():
-            audit = autopilot.completed_symbols_for_cycle(
-                domain, cycle_open, symbols
+        done = set()
+        for market in markets:
+            coverage = dict(
+                api_module.scan_status.get(market, {}).get("coverage") or {}
             )
-            snapshots[domain] = audit
-            if len(audit.get("completed", [])) != 250:
-                complete = False
-        if complete:
-            failures = {
-                domain: audit.get("errors", [])
-                for domain, audit in snapshots.items()
-                if audit.get("errors")
-            }
-            if failures:
-                raise RuntimeError("Analysis completed with errors: " + json.dumps(
-                    {key: value[:30] for key, value in failures.items()},
-                    sort_keys=True,
-                ))
-            return snapshots
+            latest[market] = coverage
+            if (
+                coverage.get("complete") is True
+                and int(coverage.get("expected_symbols", 0)) == 250
+                and int(coverage.get("accepted_symbols", 0)) == 250
+                and int(coverage.get("completed_symbols", 0)) == 250
+                and int(coverage.get("pending_cache_symbols", -1)) == 0
+                and int(coverage.get("pending_analysis_symbols", -1)) == 0
+                and int(coverage.get("pending_reconcile_symbols", -1)) == 0
+                and int(coverage.get("queue_rejected_symbols", -1)) == 0
+                and int(coverage.get("analysis_errors", -1)) == 0
+            ):
+                done.add(market)
+        if done == set(markets):
+            return latest
         time.sleep(2)
-    raise RuntimeError("Analysis completion timeout: " + json.dumps({
-        domain: {
-            "completed": len(audit.get("completed", [])),
-            "errors": len(audit.get("errors", [])),
-        }
-        for domain, audit in snapshots.items()
-    }, sort_keys=True))
+    raise RuntimeError("Production API coverage did not reach 250/250: " + json.dumps(
+        latest, sort_keys=True
+    ))
 
 
 def main():
@@ -148,37 +90,53 @@ def main():
                 on_universe=autopilot.register_symbol_universe,
                 on_cache_ready=autopilot.on_symbol_cache_ready,
             )
+
+            # Exercise the exact production startup ordering: reconciliation
+            # worker must be alive before WebSocket subscriptions can deliver.
+            api_runtime.coordinator = coordinator
+            api_runtime.autopilot = autopilot
+            api_runtime.market_stream = stream
+            api_runtime.reconciliation_ready.clear()
+            reconcile_thread = threading.Thread(
+                target=api_runtime.full_universe_reconcile_worker,
+                name="live-smoke-production-reconciler",
+                daemon=True,
+            )
+            reconcile_thread.start()
+            if not api_runtime.reconciliation_ready.wait(timeout=5):
+                raise RuntimeError("Production reconciliation worker did not start")
+
             stream.start()
-            status = wait_for_stream(stream)
-            cycles = {}
-            for domain in ("futures", "spot"):
-                cycle_open, symbols = collect_exact_cycle(
-                    stream, autopilot, domain
-                )
-                cycles[domain] = (cycle_open, symbols)
-            completed = wait_for_analysis(autopilot, cycles)
-            result = {
-                "success": True,
+            status, ready_markets = wait_for_stream(stream)
+            coverage = {}
+            if ready_markets:
+                coverage = wait_for_coverage(api_runtime, ready_markets)
+
+            report = {
+                "success": ready_markets == {"futures", "spot"}
+                    and set(coverage) == {"futures", "spot"},
                 "markets": {
-                    domain: {
-                        "expected_symbols": 250,
-                        "accepted_exact_cycle": 250,
-                        "analysis_completed": len(completed[domain]["completed"]),
-                        "analysis_errors": len(completed[domain]["errors"]),
-                        "cycle_open_time_ms": cycles[domain][0],
+                    market: {
+                        "websocket_connected": bool(
+                            status.get(market, {}).get("fully_connected")
+                        ),
+                        "symbols": int(status.get(market, {}).get("symbols", 0)),
+                        "cache_ready_symbols": int(
+                            status.get(market, {}).get("cache_ready_symbols", 0)
+                        ),
+                        "last_error": status.get(market, {}).get("last_error"),
+                        "coverage": coverage.get(market),
+                        "verified": market in coverage,
                     }
-                    for domain in ("futures", "spot")
-                },
-                "websocket": {
-                    domain: {
-                        "fully_connected": status[domain]["fully_connected"],
-                        "cache_ready_symbols": status[domain]["cache_ready_symbols"],
-                    }
-                    for domain in ("futures", "spot")
+                    for market in ("futures", "spot")
                 },
                 "trading_enabled": False,
             }
-            print(json.dumps(result, indent=2, sort_keys=True))
+            print(json.dumps(report, indent=2, sort_keys=True))
+            if not report["success"]:
+                raise RuntimeError(
+                    "Live Binance verification incomplete; no APK may be released"
+                )
         finally:
             if stream is not None:
                 stream.stop()
