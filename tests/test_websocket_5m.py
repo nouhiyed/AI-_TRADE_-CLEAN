@@ -525,5 +525,80 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
                 pool.shutdown(wait=True)
 
 
+
+class LateClosedCandleAuditTests(unittest.TestCase):
+    def test_recent_delayed_close_is_audited_without_becoming_stale_or_tradable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json"
+            )
+            try:
+                class FakeStrategy:
+                    @staticmethod
+                    def prefilter_5m(_frame):
+                        return {"candidate": True, "setups": ["test_setup"]}
+
+                fake_agent = type(
+                    "FakeAgent", (), {"strategy": FakeStrategy()}
+                )()
+                autopilot.worker_agent = lambda _domain: fake_agent
+                autopilot.c.market_engine = type(
+                    "FakeMarketEngine", (),
+                    {"_prepare_frame": staticmethod(
+                        lambda *_args: "prepared_5m_frame"
+                    )},
+                )()
+                autopilot.c.last_signals = {}
+                autopilot.c.analyze_live = lambda *_args, **_kwargs: {
+                    "signals": {
+                        "futures": {
+                            "symbol": "BTCUSDT",
+                            "direction": "LONG",
+                            "strategy_version": "v3",
+                            "confidence": 80,
+                            "trade_plan": {
+                                "success": True,
+                                "strategy_version": "v3",
+                                "timeframe": "5m",
+                                "setup": "test_setup",
+                            },
+                        }
+                    }
+                }
+
+                now_ms = int(time.time() * 1000)
+                event_time = now_ms - 120_000
+                close_time = event_time - 1
+                open_time = close_time - 299_999
+                candle = {
+                    "symbol": "BTCUSDT",
+                    "interval": "5m",
+                    "open_time": open_time,
+                    "close_time": close_time,
+                    "event_time": event_time,
+                    "is_closed": True,
+                    "audit_only": False,
+                    "market_data": {"5m": "cached_frame"},
+                }
+
+                autopilot._analyze_ws_close(
+                    "futures", "BTCUSDT", candle, received_at_ms=now_ms
+                )
+
+                audit = autopilot.status()["symbol_auditors"]["futures"]
+                self.assertEqual(audit["audit_only"], 1)
+                self.assertEqual(audit["stale"], 0)
+                self.assertEqual(audit["entry_queued"], 0)
+                completion = autopilot.completed_symbols_for_cycle(
+                    "futures", open_time, ["BTCUSDT"]
+                )
+                self.assertEqual(completion["completed"], ["BTCUSDT"])
+                self.assertEqual(completion["errors"], [])
+            finally:
+                autopilot._event_executor.shutdown(wait=True)
+                for pool in autopilot._analysis_pools.values():
+                    pool.shutdown(wait=True)
+
+
 if __name__ == "__main__":
     unittest.main()
