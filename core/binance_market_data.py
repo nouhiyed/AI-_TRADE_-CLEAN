@@ -28,18 +28,20 @@ class _BinanceRateLimitError(RuntimeError):
 
 class BinanceMarketData:
     BASE_URLS = {
-        "spot": "https://api.binance.com",
+        # Official public market-data-only REST endpoint. The app does not
+        # require Spot user-data endpoints from this client.
+        "spot": "https://data-api.binance.vision",
         "futures": "https://fapi.binance.com",
     }
     FALLBACK_URLS = {
         "spot": (
+            "https://data-api.binance.vision",
+            "https://api.binance.vision",
             "https://api.binance.com",
             "https://api1.binance.com",
             "https://api2.binance.com",
             "https://api3.binance.com",
             "https://api4.binance.com",
-            "https://data-api.binance.vision",
-            "https://api.binance.vision",
         ),
         "futures": (
             "https://fapi.binance.com",
