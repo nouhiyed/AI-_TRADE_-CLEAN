@@ -621,6 +621,8 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         newer.attrs["timeframe"] = "5m"
         newer["open_time"] += pd.Timedelta(minutes=5)
         newer["close_time"] += pd.Timedelta(minutes=5)
+        expected_time = pd.to_datetime(expected_open, unit="ms", utc=True)
+        newer = newer[newer["open_time"] != expected_time].reset_index(drop=True)
         fresh = candle_frame("5min", rows=100)
         fresh.attrs["timeframe"] = "5m"
         feed = RefreshFeed(fresh)
