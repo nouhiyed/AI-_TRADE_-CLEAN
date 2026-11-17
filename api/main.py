@@ -54,6 +54,27 @@ scan_status = {
 scan_status_lock = threading.RLock()
 
 
+def select_reconcile_batch(universe_symbols, pending_symbols, cursor, batch_size):
+    """Select a fair batch using a stable universe cursor.
+
+    The cursor is an index into the unchanged universe, never into the shrinking
+    pending list. This prevents symbols from being skipped as earlier symbols
+    leave the pending set after successful reconciliation.
+    """
+    ordered = sorted(set(universe_symbols or []))
+    pending = set(pending_symbols or [])
+    if not ordered or not pending:
+        return [], 0
+    size = min(max(1, int(batch_size)), len(ordered))
+    start = int(cursor or 0) % len(ordered)
+    selected = [
+        ordered[(start + offset) % len(ordered)]
+        for offset in range(size)
+        if ordered[(start + offset) % len(ordered)] in pending
+    ]
+    return selected, (start + size) % len(ordered)
+
+
 def record_scan_progress(domain, details):
     details = details if isinstance(details, dict) else {}
     with scan_status_lock:
@@ -227,16 +248,11 @@ def full_universe_reconcile_worker():
                         state["pending"].discard(symbol)
                         state["missing_cache"].discard(symbol)
 
-                pending = sorted(state["pending"])
-                if pending:
-                    cursor = int(state.get("cursor", 0)) % len(pending)
-                    take = min(batch_size, len(pending))
-                    batch_symbols = [
-                        pending[(cursor + offset) % len(pending)]
-                        for offset in range(take)
-                    ]
-                    state["cursor"] = (cursor + take) % len(pending)
-
+                batch_symbols, state["cursor"] = select_reconcile_batch(
+                    state["symbols"], state["pending"],
+                    state.get("cursor", 0), batch_size,
+                )
+                if batch_symbols:
                     batch = market_stream.latest_closed_events(
                         domain, expected_open_time_ms, symbols=batch_symbols
                     )
