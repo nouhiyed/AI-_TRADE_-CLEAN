@@ -524,6 +524,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     market_stream.registered_symbols(market)
                     if market_stream else []
                 )
+                ranked = []
                 if len(symbols) != 250:
                     ranked = coordinator.market_feed.fetch_top_symbols(
                         market, limit=250
@@ -539,7 +540,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "count": len(symbols),
                     "limit": 250,
                     "ranking_day": stream_state.get("ranking_day") or (
-                        ranked[0].get("ranking_day") if "ranked" in locals() and ranked else None
+                        ranked[0].get("ranking_day") if ranked else None
                     ),
                     "selection_rule": "24h USDT quote volume + best bid/ask liquidity + spread",
                     "source": "binance_daily_top_250",
