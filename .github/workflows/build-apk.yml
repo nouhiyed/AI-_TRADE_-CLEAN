@@ -20,6 +20,8 @@ on:
       - 'requirements.txt'
       - '.github/workflows/build-apk.yml'
   push:
+    branches:
+      - main
     paths:
       - 'mobile/**'
       - 'agents/**'
