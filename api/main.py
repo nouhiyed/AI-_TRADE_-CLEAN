@@ -34,6 +34,7 @@ scan_status = {
     "running": False,
     "futures": {
         "last_batch": None, "batches": 0, "cycles_completed": 0,
+        "scanner_cycles_completed": 0, "last_completed_cycle_open_time_ms": None,
         "phase": "waiting", "current_symbol": None,
         "scanned_in_batch": 0, "universe_total": None,
         "started_in_batch": 0, "active_workers": 0,
@@ -42,6 +43,7 @@ scan_status = {
     },
     "spot": {
         "last_batch": None, "batches": 0, "cycles_completed": 0,
+        "scanner_cycles_completed": 0, "last_completed_cycle_open_time_ms": None,
         "phase": "waiting", "current_symbol": None,
         "scanned_in_batch": 0, "universe_total": None,
         "started_in_batch": 0, "active_workers": 0,
@@ -147,6 +149,21 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
     }
 
 
+def record_completed_cycle(status, coverage):
+    """Increment the exact 5m cycle counter once per fully analyzed cycle."""
+    if not isinstance(coverage, dict) or coverage.get("complete") is not True:
+        return False
+    cycle_open_time_ms = int(coverage.get("cycle_open_time_ms") or 0)
+    if cycle_open_time_ms <= 0:
+        return False
+    if int(status.get("last_completed_cycle_open_time_ms") or 0) == cycle_open_time_ms:
+        return False
+    status["cycles_completed"] = int(status.get("cycles_completed") or 0) + 1
+    status["last_completed_cycle_open_time_ms"] = cycle_open_time_ms
+    status["last_completed_cycle_at"] = time.time()
+    return True
+
+
 def record_scan_progress(domain, details):
     details = details if isinstance(details, dict) else {}
     with scan_status_lock:
@@ -214,7 +231,7 @@ def _scan_domain_worker(domain):
                 if result.get("success"):
                     current["batches"] += 1
                     if (result.get("scan") or {}).get("cycle_complete"):
-                        current["cycles_completed"] += 1
+                        current["scanner_cycles_completed"] += 1
                 current["phase"] = "idle" if result.get("success") else "error"
                 current["current_symbol"] = None
                 current["scanned_in_batch"] = int(result.get("scanned", 0) or 0)
@@ -394,6 +411,7 @@ def full_universe_reconcile_worker():
                 )
                 state["complete"] = coverage["complete"]
                 with scan_status_lock:
+                    record_completed_cycle(scan_status[domain], coverage)
                     scan_status[domain]["coverage"] = coverage
                     scan_status[domain]["universe_total"] = len(state["symbols"])
                     scan_status[domain]["scanned_in_batch"] = len(state["completed"])
