@@ -39,9 +39,9 @@ class ReconcileBatchRotationTests(unittest.TestCase):
         # completed symbols in the published coverage buckets.
         coverage = build_cycle_coverage(
             universe, accepted, completed,
-            missing_cache={"BTCUSDT", "SOLUSDT"},
-            waiting_cache={"ETHUSDT"},
-            queue_rejected={"BTCUSDT", "SOLUSDT"},
+            {"BTCUSDT", "SOLUSDT"},
+            {"ETHUSDT"},
+            {"BTCUSDT", "SOLUSDT"},
             analysis_errors=0,
         )
         self.assertEqual(coverage["completed_symbols"], 2)
