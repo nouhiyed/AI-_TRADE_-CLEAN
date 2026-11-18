@@ -1,6 +1,7 @@
 import unittest
 
-from api.main import (build_cycle_coverage, reconcile_completed_symbols,\n                      select_reconcile_batch)
+from api.main import (build_cycle_coverage, reconcile_completed_symbols,
+                      select_reconcile_batch)
 
 
 class ReconcileBatchRotationTests(unittest.TestCase):
