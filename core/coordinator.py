@@ -201,10 +201,17 @@ class TradingCoordinator(SpotDemoMixin):
         open_positions = []
         closed_by_id = {}
 
-        for position_id, raw in self.demo_positions.items():
-            if not isinstance(raw, dict):
-                continue
-            record = dict(raw)
+        # The monitor and manual-close paths mutate this mapping concurrently.
+        # Snapshot it under the coordinator lock so /status can never iterate a
+        # dictionary while another thread adds or removes a position.
+        with self._demo_lock:
+            position_snapshot = [
+                (position_id, dict(raw))
+                for position_id, raw in self.demo_positions.items()
+                if isinstance(raw, dict)
+            ]
+
+        for position_id, record in position_snapshot:
             record.setdefault("id", str(position_id))
             record.setdefault("position_id", str(position_id))
             record.setdefault("trade_id", str(position_id))
