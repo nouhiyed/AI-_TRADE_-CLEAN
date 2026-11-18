@@ -50,6 +50,16 @@ class CacheWarmupReplayTests(unittest.TestCase):
 
         self.assertIn(("futures", "BTCUSDT"), self.autopilot._waiting_cache_events)
         self.assertNotIn(("futures", "BTCUSDT"), self.autopilot._analysis_pending)
+        self.assertEqual(
+            self.autopilot.seen_symbols_for_cycle("futures", open_time, ["BTCUSDT"]),
+            {"BTCUSDT"},
+        )
+        self.assertEqual(
+            self.autopilot.waiting_cache_symbols_for_cycle(
+                "futures", open_time, ["BTCUSDT"]
+            ),
+            {"BTCUSDT"},
+        )
         status = self.autopilot.symbol_auditor_status()["futures"]
         self.assertEqual(status["events_received"], 1)
         self.assertEqual(status["symbols_waiting_for_cache"], 1)
@@ -68,6 +78,16 @@ class CacheWarmupReplayTests(unittest.TestCase):
 
         self.assertTrue(self.autopilot.on_symbol_cache_ready("futures", "ETHUSDT", frames))
         self.assertFalse(self.autopilot.on_symbol_cache_ready("futures", "ETHUSDT", frames))
+        self.assertEqual(
+            self.autopilot.seen_symbols_for_cycle("futures", open_time, ["ETHUSDT"]),
+            {"ETHUSDT"},
+        )
+        self.assertEqual(
+            self.autopilot.waiting_cache_symbols_for_cycle(
+                "futures", open_time, ["ETHUSDT"]
+            ),
+            set(),
+        )
         queued = self.autopilot._analysis_pending[("futures", "ETHUSDT")]
         self.assertEqual(queued["market_data"], frames)
         self.assertTrue(queued["cache_ready"])

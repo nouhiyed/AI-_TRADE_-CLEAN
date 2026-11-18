@@ -646,6 +646,32 @@ class Autopilot:
             return identity in self._event_seen
 
 
+    def seen_symbols_for_cycle(self, domain, open_time_ms, symbols):
+        """Return symbols with a retained/accepted event for this exact 5m close."""
+        domain = str(domain).strip().lower()
+        expected_open = int(open_time_ms or 0)
+        requested = {str(symbol).strip().upper() for symbol in (symbols or [])}
+        with self._event_lock:
+            return {
+                symbol for event_domain, symbol, event_open in self._event_seen
+                if event_domain == domain
+                and event_open == expected_open
+                and symbol in requested
+            }
+
+    def waiting_cache_symbols_for_cycle(self, domain, open_time_ms, symbols):
+        """Return exact-cycle events retained while their candle cache warms."""
+        domain = str(domain).strip().lower()
+        expected_open = int(open_time_ms or 0)
+        requested = {str(symbol).strip().upper() for symbol in (symbols or [])}
+        with self._event_lock:
+            return {
+                symbol for (event_domain, symbol), event in self._waiting_cache_events.items()
+                if event_domain == domain
+                and symbol in requested
+                and int(event.get("open_time") or 0) == expected_open
+            }
+
     def completed_symbols_for_cycle(self, domain, open_time_ms, symbols):
         """Return symbols whose analysis worker finished this exact 5m candle."""
         domain = str(domain).strip().lower()

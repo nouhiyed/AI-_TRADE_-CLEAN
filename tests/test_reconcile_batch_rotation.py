@@ -1,9 +1,57 @@
 import unittest
 
-from api.main import reconcile_completed_symbols, select_reconcile_batch
+from api.main import (build_cycle_coverage, reconcile_completed_symbols,
+                      select_reconcile_batch)
 
 
 class ReconcileBatchRotationTests(unittest.TestCase):
+    def test_coverage_uses_disjoint_exact_cycle_buckets(self):
+        universe = {"PAIR%03dUSDT" % index for index in range(250)}
+        ordered = sorted(universe)
+        completed = set(ordered[:38])
+        pending_analysis = set(ordered[38:50])
+        waiting_cache = set(ordered[50:55])
+        missing_cache = set(ordered[55:138])
+        accepted = completed | pending_analysis | waiting_cache
+        queue_rejected = set(ordered[138:145])
+
+        coverage = build_cycle_coverage(
+            universe, accepted, completed, missing_cache, waiting_cache,
+            queue_rejected, analysis_errors=0, cycle_open_time_ms=123,
+        )
+
+        self.assertEqual(coverage["expected_symbols"], 250)
+        self.assertEqual(coverage["accepted_symbols"], 55)
+        self.assertEqual(coverage["completed_symbols"], 38)
+        self.assertEqual(coverage["pending_cache_symbols"], 88)
+        self.assertEqual(coverage["pending_analysis_symbols"], 12)
+        self.assertEqual(coverage["pending_reconcile_symbols"], 112)
+        self.assertEqual(coverage["queue_rejected_symbols"], 7)
+        self.assertEqual(coverage["coverage_overlap_symbols"], 0)
+        self.assertEqual(coverage["coverage_unclassified_symbols"], 0)
+        self.assertFalse(coverage["complete"])
+
+    def test_coverage_never_counts_completed_symbols_as_pending(self):
+        universe = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+        accepted = set(universe)
+        completed = {"BTCUSDT", "ETHUSDT"}
+        # Deliberately stale cache/reconcile bookkeeping must not duplicate
+        # completed symbols in the published coverage buckets.
+        coverage = build_cycle_coverage(
+            universe, accepted, completed,
+            {"BTCUSDT", "SOLUSDT"},
+            {"ETHUSDT"},
+            {"BTCUSDT", "SOLUSDT"},
+            analysis_errors=0,
+        )
+        self.assertEqual(coverage["completed_symbols"], 2)
+        self.assertEqual(coverage["pending_cache_symbols"], 1)
+        self.assertEqual(coverage["pending_analysis_symbols"], 0)
+        self.assertEqual(coverage["pending_reconcile_symbols"], 0)
+        self.assertEqual(coverage["coverage_overlap_symbols"], 0)
+        self.assertEqual(coverage["coverage_unclassified_symbols"], 0)
+        self.assertFalse(coverage["complete"])
+
     def test_shrinking_pending_set_does_not_skip_symbols(self):
         universe = {"PAIR%03dUSDT" % index for index in range(250)}
         pending = set(universe)

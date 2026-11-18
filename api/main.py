@@ -92,6 +92,61 @@ def reconcile_completed_symbols(state, completed_symbols):
     return completed
 
 
+def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
+                         missing_cache_symbols, waiting_cache_symbols,
+                         queue_rejected_symbols, analysis_errors=0,
+                         cycle_open_time_ms=0):
+    """Build disjoint, source-of-truth coverage buckets for one exact 5m cycle.
+
+    Cache misses are a subset of reconciliation work, not a second count of
+    accepted analysis. Waiting-cache events are accepted WebSocket events but
+    have not reached the analysis queue yet. The four pending/completed buckets
+    below are disjoint and must account for the entire current universe.
+    """
+    universe = set(universe_symbols or [])
+    accepted = set(accepted_symbols or []).intersection(universe)
+    completed = set(completed_symbols or []).intersection(accepted)
+    missing_cache = set(missing_cache_symbols or []).intersection(universe)
+    waiting_cache = set(waiting_cache_symbols or []).intersection(accepted)
+    pending_cache = (missing_cache | waiting_cache) - completed
+    pending_analysis = accepted - completed - pending_cache
+    pending_reconcile = universe - accepted - missing_cache
+    rejected = set(queue_rejected_symbols or []).intersection(pending_reconcile)
+
+    buckets = (completed, pending_cache, pending_analysis, pending_reconcile)
+    overlap_symbols = set()
+    for index, bucket in enumerate(buckets):
+        for other in buckets[index + 1:]:
+            overlap_symbols.update(bucket.intersection(other))
+    accounted = set().union(*buckets) if buckets else set()
+    unclassified = universe - accounted
+    complete = bool(universe) and (
+        completed == universe
+        and not pending_cache
+        and not pending_analysis
+        and not pending_reconcile
+        and not rejected
+        and int(analysis_errors or 0) == 0
+        and not overlap_symbols
+        and not unclassified
+    )
+    return {
+        "cycle_open_time_ms": int(cycle_open_time_ms or 0),
+        "expected_symbols": len(universe),
+        "accepted_symbols": len(accepted),
+        "completed_symbols": len(completed),
+        "pending_cache_symbols": len(pending_cache),
+        "pending_analysis_symbols": len(pending_analysis),
+        "pending_reconcile_symbols": len(pending_reconcile),
+        "queue_rejected_symbols": len(rejected),
+        "analysis_errors": int(analysis_errors or 0),
+        "coverage_overlap_symbols": len(overlap_symbols),
+        "coverage_unclassified_symbols": len(unclassified),
+        "complete": complete,
+        "updated_at": time.time(),
+    }
+
+
 def record_scan_progress(domain, details):
     details = details if isinstance(details, dict) else {}
     with scan_status_lock:
@@ -247,27 +302,21 @@ def full_universe_reconcile_worker():
                     state["missing_cache"].difference_update(removed)
                     state["queue_rejected"].difference_update(removed)
 
+                # Rebuild accepted/pending from the exact-cycle event ledger on
+                # every pass. This avoids stale set membership after a cache
+                # replay, a delayed WebSocket callback, or a worker completion.
+                seen_before = set(autopilot.seen_symbols_for_cycle(
+                    domain, expected_open_time_ms, sorted(state["symbols"])
+                ))
+                state["accepted"] = seen_before
+                state["pending"] = state["symbols"] - seen_before
+                state["missing_cache"].intersection_update(state["symbols"])
+                state["queue_rejected"].intersection_update(state["pending"])
+
                 completed_before = set(autopilot.completed_symbols_for_cycle(
                     domain, expected_open_time_ms, sorted(state["symbols"])
                 ).get("completed", []))
                 reconcile_completed_symbols(state, completed_before)
-
-                for symbol in list(state["accepted"] - state["completed"]):
-                    if not autopilot.has_seen_candle(
-                        domain, symbol, expected_open_time_ms
-                    ):
-                        state["accepted"].discard(symbol)
-                        state["pending"].add(symbol)
-
-                # WebSocket events are primary; account for them immediately
-                # without waiting for the cache fallback to visit each symbol.
-                for symbol in list(state["pending"]):
-                    if autopilot.has_seen_candle(
-                        domain, symbol, expected_open_time_ms
-                    ):
-                        state["accepted"].add(symbol)
-                        state["pending"].discard(symbol)
-                        state["missing_cache"].discard(symbol)
 
                 batch_symbols, state["cursor"] = select_reconcile_batch(
                     state["symbols"], state["pending"],
@@ -308,12 +357,22 @@ def full_universe_reconcile_worker():
                 state["completed"] = set(audit.get("completed", []))
                 state["analysis_errors"] = len(audit.get("errors", []))
                 reconcile_completed_symbols(state, state["completed"])
-                state["complete"] = bool(state["symbols"]) and (
-                    state["completed"] == state["symbols"]
-                    and not state["pending"]
-                    and not state["queue_rejected"]
-                    and state["analysis_errors"] == 0
+
+                # Read the event and cache-wait ledgers again after dispatch.
+                # These are the authoritative states; batch-local counters are
+                # only scheduling hints and must not leak into coverage totals.
+                accepted_now = set(autopilot.seen_symbols_for_cycle(
+                    domain, expected_open_time_ms, sorted(state["symbols"])
+                ))
+                waiting_cache_now = set(autopilot.waiting_cache_symbols_for_cycle(
+                    domain, expected_open_time_ms, sorted(state["symbols"])
+                ))
+                state["accepted"] = accepted_now
+                state["pending"] = state["symbols"] - accepted_now
+                state["missing_cache"].intersection_update(
+                    state["pending"] | waiting_cache_now
                 )
+                state["queue_rejected"].intersection_update(state["pending"])
 
                 # Never publish a coverage snapshot for a cycle that became
                 # obsolete while its cache batch was being reconciled.
@@ -323,22 +382,17 @@ def full_universe_reconcile_worker():
                 if latest_open_time_ms != expected_open_time_ms:
                     continue
 
-                pending_analysis = (
-                    state["symbols"] - state["completed"] - state["pending"]
+                coverage = build_cycle_coverage(
+                    state["symbols"],
+                    state["accepted"],
+                    state["completed"],
+                    state["missing_cache"],
+                    waiting_cache_now,
+                    state["queue_rejected"],
+                    analysis_errors=state["analysis_errors"],
+                    cycle_open_time_ms=expected_open_time_ms,
                 )
-                coverage = {
-                    "cycle_open_time_ms": expected_open_time_ms,
-                    "expected_symbols": len(state["symbols"]),
-                    "accepted_symbols": len(state["accepted"]),
-                    "completed_symbols": len(state["completed"]),
-                    "pending_cache_symbols": len(state["missing_cache"]),
-                    "pending_analysis_symbols": len(pending_analysis),
-                    "pending_reconcile_symbols": len(state["pending"]),
-                    "queue_rejected_symbols": len(state["queue_rejected"]),
-                    "analysis_errors": state["analysis_errors"],
-                    "complete": state["complete"],
-                    "updated_at": time.time(),
-                }
+                state["complete"] = coverage["complete"]
                 with scan_status_lock:
                     scan_status[domain]["coverage"] = coverage
                     scan_status[domain]["universe_total"] = len(state["symbols"])
