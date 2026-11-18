@@ -43,6 +43,7 @@ scan_status = {
     },
     "spot": {
         "last_batch": None, "batches": 0, "cycles_completed": 0,
+        "scanner_cycles_completed": 0, "last_completed_cycle_open_time_ms": None,
         "phase": "waiting", "current_symbol": None,
         "scanned_in_batch": 0, "universe_total": None,
         "started_in_batch": 0, "active_workers": 0,
