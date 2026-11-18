@@ -1,10 +1,25 @@
 import unittest
 
-from api.main import (build_cycle_coverage, reconcile_completed_symbols,
-                      select_reconcile_batch)
+from api.main import (build_cycle_coverage, record_completed_cycle,
+                      reconcile_completed_symbols, select_reconcile_batch)
 
 
 class ReconcileBatchRotationTests(unittest.TestCase):
+    def test_exact_cycle_counter_increments_once_only_when_fully_complete(self):
+        status = {"cycles_completed": 0, "last_completed_cycle_open_time_ms": None}
+        incomplete = {"complete": False, "cycle_open_time_ms": 300000}
+        complete = {"complete": True, "cycle_open_time_ms": 300000}
+
+        self.assertFalse(record_completed_cycle(status, incomplete))
+        self.assertEqual(status["cycles_completed"], 0)
+        self.assertTrue(record_completed_cycle(status, complete))
+        self.assertFalse(record_completed_cycle(status, complete))
+        self.assertEqual(status["cycles_completed"], 1)
+
+        next_cycle = {"complete": True, "cycle_open_time_ms": 600000}
+        self.assertTrue(record_completed_cycle(status, next_cycle))
+        self.assertEqual(status["cycles_completed"], 2)
+
     def test_coverage_uses_disjoint_exact_cycle_buckets(self):
         universe = {"PAIR%03dUSDT" % index for index in range(250)}
         ordered = sorted(universe)
