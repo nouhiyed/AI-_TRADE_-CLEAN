@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.17.7"
+API_VERSION = "2026.11.19.1"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -936,6 +936,11 @@ class APIHandler(BaseHTTPRequestHandler):
                     "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                     "websocket": market_stream.status() if market_stream else {},
                 })
+            if path == "/funnel":
+                return self.send_json(
+                    autopilot.funnel_status() if autopilot else
+                    {"success": False, "reason": "Autopilot is not initialized"}
+                )
             if path == "/scan/status":
                 with scan_status_lock:
                     snapshot = json.loads(json.dumps(scan_status))
@@ -966,6 +971,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "analysis_pools": analysis_snapshot,
                     "analysis_metrics": analysis_snapshot,
                     "symbol_auditors": auditor_snapshot,
+                    "funnel": autopilot.funnel_status() if autopilot else {},
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
