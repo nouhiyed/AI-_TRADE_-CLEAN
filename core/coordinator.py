@@ -1741,6 +1741,12 @@ class TradingCoordinator(SpotDemoMixin):
                         "universe_total": len(universe),
                     })
                 try:
+                    data_errors = analysis.get("data_errors") or {}
+                    if data_errors:
+                        errors[symbol] = "; ".join(
+                            str(value) for value in data_errors.values()
+                        )[:500]
+                        continue
                     signal = analysis.get("signals", {}).get("futures", {})
                     if not isinstance(signal, dict):
                         reject("Missing Futures analysis", symbol)
@@ -1947,6 +1953,12 @@ class TradingCoordinator(SpotDemoMixin):
                         "universe_total": len(universe),
                     })
                 try:
+                    data_errors = analysis.get("data_errors") or {}
+                    if data_errors:
+                        errors[symbol] = "; ".join(
+                            str(value) for value in data_errors.values()
+                        )[:500]
+                        continue
                     signal = analysis.get("signals", {}).get("spot", {})
                     if not isinstance(signal, dict):
                         reject("Missing Spot analysis", symbol)
