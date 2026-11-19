@@ -862,6 +862,11 @@ class Autopilot:
                 )
                 return
 
+            if audit_only:
+                # The delayed candle was received and audited, but it is
+                # intentionally not sent through strategy or execution.
+                return
+
             self._record_funnel(domain, int(candle.get("open_time") or 0),
                                 "filter_passed")
             profile = str(self.config.get("profile", "standard"))
