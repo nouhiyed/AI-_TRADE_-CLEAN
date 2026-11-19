@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.19.1"
+API_VERSION = "2026.11.19.2"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
