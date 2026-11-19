@@ -1764,12 +1764,7 @@ class TradingCoordinator(SpotDemoMixin):
         }
 
     def scan_spot(self, limit=None, min_quote_volume=None, progress_callback=None):
-        """Analyze every eligible Binance USDT spot pair in persistent batches.
-
-        All active spot-enabled USDT pairs are included by default. Quote volume
-        determines processing order only; it never filters symbols unless the
-        caller explicitly supplies min_quote_volume or limit.
-        """
+        """Analyze the daily top-30 liquid Spot pairs from the warmed candle cache."""
         if not self._agent_enabled("spot"):
             return {
                 "success": False,
@@ -1779,7 +1774,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         try:
             universe = self.market_feed.fetch_top_symbols(
-                "spot", limit=250
+                "spot", limit=30
             )
             minimum = (
                 float(min_quote_volume)
@@ -1800,7 +1795,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         if limit is not None:
             try:
-                requested_limit = min(250, max(1, int(limit)))
+                requested_limit = min(30, max(1, int(limit)))
             except (TypeError, ValueError):
                 return {
                     "success": False,
@@ -1817,8 +1812,7 @@ class TradingCoordinator(SpotDemoMixin):
                 "last_symbol": universe[-1]["symbol"] if universe else None,
             }
         else:
-            # Continuous scanner analyzes the complete eligible universe in one pass.
-            # No rotating cursor or fixed-size batch is used.
+            # Analyze the complete top-30 liquidity-ranked universe in one pass.
             scan_meta = {
                 "universe_total": len(universe),
                 "batch_size": len(universe),
@@ -1868,7 +1862,20 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["spot"], include_orderbook=False)
+                stream = getattr(self, "market_stream", None)
+                if stream is None:
+                    return {
+                        "signals": {},
+                        "data_errors": {"cache": "Spot WebSocket cache is unavailable"},
+                    }
+                frames = stream._snapshot("spot", symbol)
+                if frames is None:
+                    return {
+                        "signals": {},
+                        "data_errors": {"cache": "Spot WebSocket candle cache is still warming"},
+                    }
+                return self.analyze_live_from_frames(
+                    symbol, "spot", frames, agent=self.agents["spot"])
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
@@ -1905,8 +1912,14 @@ class TradingCoordinator(SpotDemoMixin):
                     })
                 try:
                     signal = analysis.get("signals", {}).get("spot", {})
-                    if not isinstance(signal, dict):
-                        reject("Missing Spot analysis", symbol)
+                    if not isinstance(signal, dict) or not signal:
+                        data_errors = analysis.get("data_errors") or {}
+                        if data_errors:
+                            errors[symbol] = "; ".join(
+                                str(value) for value in data_errors.values())
+                            reject("Spot candle cache or analysis data unavailable", symbol)
+                        else:
+                            reject("Missing Spot analysis", symbol)
                         continue
 
                     direction = str(
