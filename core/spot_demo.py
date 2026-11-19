@@ -94,7 +94,7 @@ class SpotDemoMixin:
             })
 
         ranked.sort(key=lambda item: item["quote_volume"], reverse=True)
-        universe = ranked if limit is None else ranked[:max(1, int(limit))]
+        universe = ranked[:30] if limit is None else ranked[:min(30, max(1, int(limit)))]
 
         scan_meta = {
             "universe_total": len(universe),
