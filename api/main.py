@@ -955,6 +955,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 snapshot["websocket"] = market_stream.status() if market_stream else {}
                 snapshot["analysis"] = runtime.get("analysis_pools", {})
                 snapshot["symbol_auditors"] = runtime.get("symbol_auditors", {})
+                snapshot["funnel"] = runtime.get("funnel", {})
                 snapshot["strategy_timeframe"] = "5m"
                 snapshot["entry_timing"] = "next_5m_candle_open"
                 return self.send_json(snapshot)
