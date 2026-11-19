@@ -1150,6 +1150,8 @@ class _TradeShellState extends State<TradeShell>
     scanStatus = scan is Map
         ? Map<String, dynamic>.from(scan)
         : <String, dynamic>{};
+    final funnel = data['funnel'];
+    if (funnel is Map) scanStatus['funnel'] = Map<String, dynamic>.from(funnel);
   }
 
   bool get allAgentsEnabled {
@@ -1702,7 +1704,7 @@ class _TradeShellState extends State<TradeShell>
                     border: Border.all(color: accent.withOpacity(.18)),
                   ),
                   child: Text('${stage.$1}: $value',
-                    style: TextStyle(color: widget.foreground, fontSize: 10,
+                    style: TextStyle(color: widget.text, fontSize: 10,
                       fontWeight: FontWeight.w700)),
                 );
               }).toList(),
@@ -1730,7 +1732,7 @@ class _TradeShellState extends State<TradeShell>
       decoration: BoxDecoration(
         color: widget.panel.withOpacity(.72),
         borderRadius: BorderRadius.circular(17),
-        border: Border.all(color: widget.border),
+        border: Border.all(color: widget.muted.withOpacity(.22)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
