@@ -686,12 +686,26 @@ class APIHandler(BaseHTTPRequestHandler):
                         "reason": "No WebSocket candle is cached for this symbol",
                     }, 404)
                 stream_status = market_stream.status().get(market, {}) if market_stream else {}
-                event_age_ms = abs(int(time.time() * 1000) - int(candle.get("event_time") or 0))
+                # Compare local receipt time with the local clock. Binance's
+                # event timestamp is exchange-clock time and can differ from
+                # an Android/Termux device clock, causing false 503 responses
+                # even while this symbol's WebSocket is actively receiving data.
+                try:
+                    received_at_ms = int(candle.get("received_at_ms") or 0)
+                    event_age_ms = (
+                        int(time.time() * 1000) - received_at_ms
+                        if received_at_ms > 0 else None
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    event_age_ms = None
                 symbol_live = (
                     market_stream.symbol_connected(market, symbol)
                     if market_stream else False
                 )
-                if not symbol_live or event_age_ms > 30000:
+                if (
+                    not symbol_live or event_age_ms is None
+                    or event_age_ms < -5000 or event_age_ms > 30000
+                ):
                     return self.send_json({
                         "success": False, "market": market, "symbol": symbol,
                         "reason": "WebSocket candle is stale or stream is disconnected",
