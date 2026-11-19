@@ -45,59 +45,27 @@ class SpotDemoMixin:
         if not self._agent_enabled("spot"):
             return {"success": False, "reason": "Spot agent is stopped",
                     "opportunities": []}
-        # Volume ranks the universe but does not exclude eligible USDT pairs.
-        # A volume floor is applied only when explicitly requested by a caller.
+        # Use the same daily turnover + top-of-book liquidity ranking as
+        # the live WebSocket universe, capped at 30 Spot USDT pairs.
         requested_limit = (
             30 if limit is None else min(30, max(1, int(limit)))
         )
         minimum = (float(min_quote_volume)
                    if min_quote_volume is not None else None)
         try:
-            tickers = self.market_feed._request(
-                "spot", "/api/v3/ticker/24hr", {}
-            )
-            if limit is None:
-                # Automatic scans use exchangeInfo as the authoritative,
-                # complete list of eligible Spot USDT symbols.
-                symbols = self.market_feed.fetch_symbols("spot")
-            else:
-                # A user-requested limited scan can use the live Spot ticker
-                # response directly, avoiding a second exchangeInfo request.
-                symbols = sorted({
-                    str(item.get("symbol", "")).strip().upper()
-                    for item in tickers
-                    if str(item.get("symbol", "")).strip().upper().endswith("USDT")
-                })
+            universe = self.market_feed.fetch_top_symbols(
+                "spot", limit=requested_limit)
         except Exception as error:
             return {
                 "success": False,
                 "reason": "Spot universe scan failed: " + str(error),
                 "opportunities": [],
             }
-
-        ticker_by_symbol = {
-            str(item.get("symbol", "")).strip().upper(): item for item in tickers
-        }
-        ranked = []
-        for symbol in symbols:
-            item = ticker_by_symbol.get(symbol, {})
-            try:
-                volume = float(item.get("quoteVolume", 0))
-                price = float(item.get("lastPrice", 0))
-            except (TypeError, ValueError):
-                volume, price = 0.0, 0.0
-
-            if minimum is not None and volume < minimum:
-                continue
-
-            ranked.append({
-                "symbol": symbol,
-                "quote_volume": volume,
-                "last_price": price,
-            })
-
-        ranked.sort(key=lambda item: item["quote_volume"], reverse=True)
-        universe = ranked[:requested_limit]
+        if minimum is not None:
+            universe = [
+                item for item in universe
+                if float(item.get("quote_volume", 0) or 0) >= minimum
+            ]
 
         scan_meta = {
             "universe_total": len(universe),
