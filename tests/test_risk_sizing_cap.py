@@ -22,8 +22,9 @@ class RiskSizingCapTests(unittest.TestCase):
 
             self.assertTrue(result["approved"])
             self.assertTrue(result["sizing_capped"])
+            self.assertTrue(result["size_capped"])
             self.assertAlmostEqual(result["margin"], 250.0, places=6)
-            self.assertLess(result["risk"], 10.0)
+            self.assertLess(result["risk"], result["requested_risk"])
             self.assertAlmostEqual(result["actual_risk_pct"], 0.0025, places=6)
             self.assertAlmostEqual(
                 risk.reservations[result["trade_id"]]["risk"],
