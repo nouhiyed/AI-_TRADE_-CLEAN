@@ -1339,13 +1339,23 @@ class TradingCoordinator(SpotDemoMixin):
     def analyze_cached(self, symbol, domain, profile="standard", agent=None):
         """Analyze exclusively from the warmed local WebSocket candle cache."""
         domain = str(domain).strip().lower()
+        provider = getattr(self, "market_frame_provider", None)
         frames = (
-            self.market_frame_provider(domain, str(symbol).strip().upper())
-            if callable(self.market_frame_provider) else None
+            provider(domain, str(symbol).strip().upper())
+            if callable(provider) else None
         )
+        if not isinstance(frames, dict) or not frames:
+            stream = getattr(self, "market_stream", None)
+            snapshot = getattr(stream, "_snapshot", None)
+            if callable(snapshot):
+                frames = snapshot(domain, str(symbol).strip().upper())
         if not isinstance(frames, dict) or not frames:
             return {"symbol": str(symbol).strip().upper(), "signals": {},
                     "data_errors": {domain: "Warmed WebSocket candle cache is not ready"}}
+        if str(profile or "standard").lower() == "standard":
+            return self.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent
+            )
         return self.analyze_live_from_frames(
             symbol, domain, frames, agent=agent, profile=profile
         )
@@ -1463,17 +1473,25 @@ class TradingCoordinator(SpotDemoMixin):
 
         # A chart submission belongs to one selected market/agent. Do not
         # fetch the other market or run its agent on this request.
-        frames = (
-            self.market_frame_provider(domain, symbol)
-            if callable(self.market_frame_provider) else None
-        )
+        provider = getattr(self, "market_frame_provider", None)
+        frames = provider(domain, symbol) if callable(provider) else None
+        if not isinstance(frames, dict) or not frames:
+            stream = getattr(self, "market_stream", None)
+            snapshot = getattr(stream, "_snapshot", None)
+            if callable(snapshot):
+                frames = snapshot(domain, symbol)
         if not isinstance(frames, dict) or not frames:
             reason = "Warmed WebSocket candle cache is not ready for this symbol"
             return {**base, "success": False, "decision_status": "WAITING_FOR_CACHE",
                     "decision_reason": reason, "reason": reason}
-        analysis = self.analyze_live_from_frames(
-            symbol, domain, frames, agent=agent, profile=profile
-        )
+        if str(profile or "standard").lower() == "standard":
+            analysis = self.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent
+            )
+        else:
+            analysis = self.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent, profile=profile
+            )
         signal = analysis.get("signals", {}).get(domain, {})
         if not isinstance(signal, dict) or signal.get("error"):
             reason = (signal.get("error") if isinstance(signal, dict) else None) or "Analysis unavailable"
