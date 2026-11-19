@@ -733,12 +733,14 @@ class TradingCoordinator(SpotDemoMixin):
 
     def _cached_trailing_5m_frame(self, market, symbol, limit=40):
         """Return confirmed closed 5m bars from the warmed WebSocket cache only."""
-        provider = getattr(self, "market_frame_provider", None)
-        frames = provider(market, str(symbol).strip().upper()) if callable(provider) else None
-        if not isinstance(frames, dict) or not frames:
-            stream = getattr(self, "market_stream", None)
-            snapshot = getattr(stream, "_snapshot", None)
-            frames = snapshot(market, str(symbol).strip().upper()) if callable(snapshot) else None
+        stream = getattr(self, "market_stream", None)
+        snapshot = getattr(stream, "_snapshot", None)
+        if callable(snapshot):
+            frames = snapshot(
+                market, str(symbol).strip().upper(), max_age_seconds=360)
+        else:
+            provider = getattr(self, "market_frame_provider", None)
+            frames = provider(market, str(symbol).strip().upper()) if callable(provider) else None
         if not isinstance(frames, dict):
             return None
         frame = frames.get("5m")
