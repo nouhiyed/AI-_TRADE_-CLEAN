@@ -554,8 +554,9 @@ class Autopilot:
 
 
     def _process(self, domain, scan, cfg, open_symbols, slots, result):
-        # Kept for API compatibility only. Polling/scanner opportunities are
-        # never allowed to bypass the confirmed 5m WebSocket opening event.
+        # Kept for API compatibility only. Scanner polling never submits trades;
+        # all entries flow through closed 5m WebSocket analysis and immediate
+        # bid/ask execution with the ATR drift guard.
         for opportunity in scan.get("opportunities", []):
             result["skipped"].append({
                 "domain": domain,
@@ -568,7 +569,7 @@ class Autopilot:
     # ---- WebSocket-driven 5m strategy clock ---------------------------------
 
     def on_market_kline(self, market, event):
-        """Accept deduplicated 5m closes and next-candle-open events."""
+        """Accept deduplicated 5m closes; opening updates are telemetry only."""
         domain = str(market).strip().lower()
         if domain not in ("spot", "futures") or not isinstance(event, dict):
             return False
