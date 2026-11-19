@@ -30,7 +30,7 @@ class ExploreIsolationTests(unittest.TestCase):
 
         self.assertEqual(report["min_samples"], 150)
         self.assertEqual(report["closed_trades"], 1)
-        self.assertEqual(report["overall"]["trades"], 1)
+        self.assertEqual(report["setups"][0]["trades"], 1)
         self.assertTrue(report["random_baseline_required"])
         self.assertFalse(report["random_baseline_compared"])
         self.assertIsNone(report["profitability_conclusion"])
