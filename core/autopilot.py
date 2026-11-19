@@ -1134,7 +1134,7 @@ class Autopilot:
                     entry_reference_price=entry_price)
             else:
                 trade = self.c.request_demo_spot_trade(
-                    symbol, domain="spot", risk_pct=float(cfg["risk_pct"]),
+                    symbol, domain="spot", risk_pct=execution_risk_pct,
                     signal_override=signal, entry_reference_price=entry_price)
             if trade.get("approved"):
                 self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
@@ -1149,8 +1149,6 @@ class Autopilot:
                 result["phase"] = "opened"
             else:
                 reason = trade.get("reason", "Execution rejected")
-                self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
-                                    "rejection", reason=reason)
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": reason})
         except Exception as error:
