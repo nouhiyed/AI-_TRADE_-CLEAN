@@ -126,21 +126,83 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertEqual(full._active_intervals("futures"), ["5m"])
         self.assertEqual(full._active_intervals("spot"), ["5m"])
 
-    def test_full_universe_snapshot_requires_only_closed_5m_history(self):
+    def test_full_universe_snapshot_requires_derived_closed_context(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0)
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         snapshot = stream._snapshot("futures", "BTCUSDT")
         self.assertIsNotNone(snapshot)
-        self.assertEqual(set(snapshot), {"5m"})
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
+
+    def test_800_cached_5m_bars_build_closed_15m_and_1h_without_rest(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=250)
+        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 800)
+        self.assertEqual(stream._active_intervals("futures"), ["5m"])
+        frame = candle_frame("5min", rows=800)
+        frame.attrs["timeframe"] = "5m"
+        stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        snapshot = stream._snapshot("futures", "BTCUSDT")
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
+        self.assertGreaterEqual(len(snapshot["15m"]), 60)
+        self.assertGreaterEqual(len(snapshot["1h"]), 60)
+        self.assertTrue(snapshot["15m"]["is_closed"].all())
+        self.assertTrue(snapshot["1h"]["is_closed"].all())
+        self.assertEqual(snapshot["15m"].iloc[-1]["close"], frame.iloc[-1]["close"])
+        self.assertEqual(snapshot["1h"].iloc[-1]["close"], frame.iloc[-1]["close"])
+
+    def test_spot_keeps_seeded_210_hour_history_and_includes_optional_4h(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=30)
+        five = candle_frame("5min", rows=2544)
+        five.attrs["timeframe"] = "5m"
+        four_hour = candle_frame("4h", rows=210)
+        four_hour.attrs["timeframe"] = "4h"
+        stream._merge_frame("spot", "BTCUSDT", "5m", five)
+        stream._merge_frame("spot", "BTCUSDT", "4h", four_hour)
+        snapshot = stream._snapshot("spot", "BTCUSDT")
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
+        self.assertGreaterEqual(len(snapshot["1h"]), 210)
+        self.assertEqual(snapshot["1h"].attrs["source"], "derived_from_binance_5m_cache")
+
+    def test_analysis_snapshot_rejects_stale_5m_cache(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0)
+        frame = candle_frame("5min", rows=800)
+        frame.attrs["timeframe"] = "5m"
+        frame["open_time"] -= pd.Timedelta(minutes=10)
+        frame["close_time"] -= pd.Timedelta(minutes=10)
+        stream._merge_frame("futures", "STALEUSDT", "5m", frame)
+        self.assertIsNotNone(stream._snapshot("futures", "STALEUSDT"))
+        self.assertIsNone(stream._snapshot(
+            "futures", "STALEUSDT", max_age_seconds=90))
+
+    def test_spot_4h_history_refreshes_once_per_hour(self):
+        class FourHourFeed:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_candles(self, market, symbol, interval, **kwargs):
+                self.calls.append((market, symbol, interval, kwargs))
+                return candle_frame("4h", rows=210)
+
+        feed = FourHourFeed()
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=30)
+        self.assertTrue(stream._refresh_spot_4h_if_due("BTCUSDT"))
+        self.assertFalse(stream._refresh_spot_4h_if_due("BTCUSDT"))
+        self.assertEqual(len(feed.calls), 1)
+        self.assertEqual(feed.calls[0][0:3], ("spot", "BTCUSDT", "4h"))
+        self.assertEqual(feed.calls[0][3]["limit"], 210)
+
 
     def test_historical_cache_can_be_ready_when_latest_trade_is_old(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         frame["open_time"] -= pd.Timedelta(minutes=5)
         frame["close_time"] -= pd.Timedelta(minutes=5)
@@ -192,11 +254,12 @@ class BinanceCandleCacheTests(unittest.TestCase):
         )
 
     def test_snapshot_requires_all_closed_context_frames(self):
-        for interval in ("5m", "15m", "1h"):
-            frame = candle_frame("5min" if interval == "5m" else "15min" if interval == "15m" else "1h")
-            frame.attrs["timeframe"] = interval
-            self.stream._merge_frame("futures", "BTCUSDT", interval, frame)
-        self.assertIsNotNone(self.stream._snapshot("futures", "BTCUSDT"))
+        frame = candle_frame("5min", rows=800)
+        frame.attrs["timeframe"] = "5m"
+        self.stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        snapshot = self.stream._snapshot("futures", "BTCUSDT")
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
 
         open_frame = candle_frame("5min")
         open_frame.attrs["timeframe"] = "5m"
@@ -205,12 +268,9 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNone(self.stream._snapshot("futures", "BTCUSDT"))
 
     def test_spot_cache_does_not_require_optional_4h_history(self):
-        for interval, freq, rows in (
-            ("5m", "5min", 60), ("15m", "15min", 60), ("1h", "1h", 210),
-        ):
-            frame = candle_frame(freq, rows=rows)
-            frame.attrs["timeframe"] = interval
-            self.stream._merge_frame("spot", "NEWUSDT", interval, frame)
+        frame = candle_frame("5min", rows=2544)
+        frame.attrs["timeframe"] = "5m"
+        self.stream._merge_frame("spot", "NEWUSDT", "5m", frame)
         snapshot = self.stream._snapshot("spot", "NEWUSDT")
         self.assertIsNotNone(snapshot)
         self.assertNotIn("4h", snapshot)
@@ -219,7 +279,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        gap = candle_frame("5min", rows=61)
+        gap = candle_frame("5min", rows=800)
         gap.attrs["timeframe"] = "5m"
         # Binance can omit no-trade intervals. Keep only actual returned bars;
         # no synthetic rows are inserted to fill the time gap.
@@ -237,7 +297,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
             "insufficient_rows",
         )
 
-        stale = candle_frame("5min")
+        stale = candle_frame("5min", rows=800)
         stale.attrs["timeframe"] = "5m"
         stale["open_time"] -= pd.Timedelta(hours=1)
         stale["close_time"] -= pd.Timedelta(hours=1)
@@ -333,7 +393,24 @@ class V3PrefilterTests(unittest.TestCase):
 
 
 class ManualEntryQueueTests(unittest.TestCase):
-    def test_stale_agent_signal_is_rejected(self):
+    def test_agent_signal_older_than_90_seconds_is_rejected(self):
+        now = 1_800_000_000
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json",
+                clock=lambda: now,
+            )
+            signal = {
+                "symbol": "BTCUSDT", "direction": "LONG",
+                "strategy_version": "v3", "signal_generated_at_ms": (now - 91) * 1000,
+                "trade_plan": {"success": True, "strategy_version": "v3", "timeframe": "5m", "direction": "LONG"},
+            }
+            result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
+            self.assertFalse(result["success"])
+            self.assertIn("90-second", result["reason"].lower())
+            autopilot._event_executor.shutdown(wait=True)
+
+    def test_agent_signal_within_90_seconds_is_accepted(self):
         now = 1_800_000_000
         with tempfile.TemporaryDirectory() as directory:
             autopilot = Autopilot(
@@ -346,9 +423,117 @@ class ManualEntryQueueTests(unittest.TestCase):
                 "trade_plan": {"success": True, "strategy_version": "v3", "timeframe": "5m", "direction": "LONG"},
             }
             result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
-            self.assertFalse(result["success"])
-            self.assertIn("stale", result["reason"].lower())
+            self.assertTrue(result["success"])
+            self.assertFalse(result["queued"])
+            self.assertEqual(result["decision_status"], "SUBMITTED")
             autopilot._event_executor.shutdown(wait=True)
+
+
+class ImmediateBookTickerEntryTests(unittest.TestCase):
+    class Coordinator(FakeCoordinator):
+        def __init__(self, quote):
+            self.market_feed = type(
+                "Feed", (), {"fetch_book_ticker": staticmethod(
+                    lambda _market, _symbol: dict(quote)
+                )}
+            )()
+            self.demo_positions = {}
+            self.last_signals = {}
+            self.open_request = None
+
+        def select_futures_leverage(self, _signal, _plan):
+            return 1
+
+        def request_demo_futures_trade(self, *args, **kwargs):
+            self.open_request = {"args": args, "kwargs": kwargs}
+            return {
+                "approved": True, "trade_id": "demo-test-1",
+                "entry_price": kwargs.get("entry_reference_price"),
+            }
+
+    def test_approved_signal_executes_at_current_ask_without_waiting_for_next_candle(self):
+        coordinator = self.Coordinator({"bid": "100.05", "ask": "100.10"})
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                coordinator, config_path=directory + "/autopilot.json"
+            )
+            autopilot.update({
+                "enabled": True, "trade_futures": True,
+                "min_confidence": 60, "risk_pct": 0.5,
+            }, persist=False)
+            now_ms = int(time.time() * 1000)
+            candle_open = (now_ms // 300000) * 300000
+            signal = {
+                "symbol": "BTCUSDT", "direction": "LONG",
+                "strategy_version": "v3", "confidence": 90,
+                "signal_generated_at_ms": now_ms,
+                "signal_candle_open_time": candle_open,
+                "signal_candle_close_time": candle_open + 299999,
+                "trade_plan": {
+                    "success": True, "strategy_version": "v3",
+                    "timeframe": "5m", "direction": "LONG",
+                    "entry": 100.0, "stop_loss": 99.0,
+                    "take_profit": 102.0, "atr": 1.0,
+                    "reward_risk": 2.0, "setup": "PULLBACK_LONG",
+                },
+            }
+            autopilot._execute_ws_entry(
+                "futures", "BTCUSDT",
+                {"signal": signal, "immediate": True}, None,
+            )
+            result = autopilot._last_execution_result
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(result["phase"], "opened")
+            self.assertEqual(
+                coordinator.open_request["kwargs"]["entry_reference_price"],
+                100.10,
+            )
+            executed_signal = coordinator.open_request["kwargs"]["signal_override"]
+            self.assertEqual(executed_signal["entry_price_source"], "BINANCE_BOOK_TICKER")
+            self.assertAlmostEqual(executed_signal["entry_deviation_pct"], 0.1, places=5)
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
+
+    def test_short_signal_uses_current_bid(self):
+        coordinator = self.Coordinator({"bid": "99.90", "ask": "100.00"})
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                coordinator, config_path=directory + "/autopilot.json"
+            )
+            autopilot.update({
+                "enabled": True, "trade_futures": True,
+                "min_confidence": 60,
+            }, persist=False)
+            now_ms = int(time.time() * 1000)
+            candle_open = (now_ms // 300000) * 300000
+            signal = {
+                "symbol": "BTCUSDT", "direction": "SHORT",
+                "strategy_version": "v3", "confidence": 90,
+                "signal_generated_at_ms": now_ms,
+                "signal_candle_open_time": candle_open,
+                "signal_candle_close_time": candle_open + 299999,
+                "trade_plan": {
+                    "success": True, "strategy_version": "v3",
+                    "timeframe": "5m", "direction": "SHORT",
+                    "entry": 100.0, "stop_loss": 101.0,
+                    "take_profit": 98.0, "atr": 1.0,
+                    "reward_risk": 2.0, "setup": "PULLBACK_SHORT",
+                },
+            }
+            autopilot._execute_ws_entry(
+                "futures", "BTCUSDT",
+                {"signal": signal, "immediate": True}, None,
+            )
+            result = autopilot._last_execution_result
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(
+                coordinator.open_request["kwargs"]["entry_reference_price"],
+                99.90,
+            )
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
 
 
 class LatestEventQueueTests(unittest.TestCase):
@@ -531,7 +716,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=60)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
@@ -556,7 +741,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=61)
+        frame = candle_frame("5min", rows=801)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         expected_open = int(frame.iloc[-2]["open_time"].timestamp() * 1000)
@@ -768,7 +953,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         self.assertEqual(feed.calls, 2)
 
     def test_full_250_symbol_cycle_reaches_the_analysis_queue(self):
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
         symbols = ["COIN%03dUSDT" % index for index in range(250)]
@@ -888,7 +1073,7 @@ class LateClosedCandleAuditTests(unittest.TestCase):
                     )},
                 )()
                 autopilot.c.last_signals = {}
-                autopilot.c.analyze_live = lambda *_args, **_kwargs: {
+                autopilot.c.analyze_live_from_frames = lambda *_args, **_kwargs: {
                     "signals": {
                         "futures": {
                             "symbol": "BTCUSDT",

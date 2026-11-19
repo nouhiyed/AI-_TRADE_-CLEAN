@@ -94,7 +94,7 @@ class SpotDemoMixin:
             })
 
         ranked.sort(key=lambda item: item["quote_volume"], reverse=True)
-        universe = ranked if limit is None else ranked[:max(1, int(limit))]
+        universe = ranked[:30] if limit is None else ranked[:min(30, max(1, int(limit)))]
 
         scan_meta = {
             "universe_total": len(universe),
@@ -105,7 +105,7 @@ class SpotDemoMixin:
         if limit is None:
             from core.scan_rotation import next_scan_batch
             universe, scan_meta = next_scan_batch(
-                "spot", universe, batch_size=20
+                "spot", universe, batch_size=30
             )
 
         opportunities, errors = [], {}
@@ -241,6 +241,9 @@ class SpotDemoMixin:
                 risk_pct=float(risk_pct), leverage=1)
             if not reservation.get("approved"):
                 return reservation
+            if callable(getattr(self, "funnel_recorder", None)):
+                self.funnel_recorder(domain,
+                    int(signal.get("signal_candle_open_time") or 0), "risk_approved")
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
 

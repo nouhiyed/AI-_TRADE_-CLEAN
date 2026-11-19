@@ -35,10 +35,14 @@ class TradingCoordinator(SpotDemoMixin):
     def __init__(self, initial_balance=1000):
         self.risk = RiskManager(initial_balance=initial_balance)
         self.market_feed = BinanceMarketData(timeout=240, total_timeout=240)
+        # Execution quotes must fail fast; candle warmup has a separate longer
+        # timeout and never runs in the entry writer.
+        self.execution_quote_feed = BinanceMarketData(timeout=3, total_timeout=5)
         self.market_engine = MarketDataEngine(timeout=6)
         self.market_scanner = FuturesMarketScanner(timeout=6, market=self.market_feed)
         # Injected by the API runtime; kept optional for offline/unit-test use.
         self.market_context = None
+        self.market_frame_provider = None
 
         self.agents = {
             "futures": FuturesAgent(),
@@ -52,6 +56,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         self.last_signals = {}
         self._demo_lock = threading.RLock()
+        self.funnel_recorder = None
         self._demo_position_locks = {}
         self._demo_position_locks_guard = threading.Lock()
         self.mode = "DEMO"
@@ -434,9 +439,9 @@ class TradingCoordinator(SpotDemoMixin):
             price = Decimal(str(market_price))
             if not all(v.is_finite() and v > 0 for v in (entry, stop, target, atr, price)):
                 return False, "Invalid plan or execution price"
-            max_drift = max(atr * Decimal("0.10"), entry * Decimal("0.0002"))
+            max_drift = max(atr * Decimal("0.30"), entry * Decimal("0.0002"))
             if abs(price - entry) > max_drift:
-                return False, "Entry moved more than 0.10 ATR after confirmation; wait for a new setup"
+                return False, "Entry moved more than 0.30 ATR after confirmation; wait for a new setup"
             if str(direction).upper() == "SHORT":
                 if not target < price < stop:
                     return False, "Live price invalidated the SHORT structure"
@@ -512,6 +517,18 @@ class TradingCoordinator(SpotDemoMixin):
             record["setup_key"] = key
             record["confidence"] = confidence
             record["risk_amount"] = reservation.get("risk")
+            record["actual_risk_pct"] = reservation.get("actual_risk_pct")
+            record["sizing_capped"] = bool(reservation.get("sizing_capped"))
+            record["margin_used"] = reservation.get("margin")
+            record["notional"] = reservation.get("notional")
+            record["profile"] = str(signal.get("profile") or "standard")
+            record["learning_eligible"] = record["profile"] != "explore"
+            context["profile"] = record["profile"]
+            context["actual_risk_pct"] = reservation.get("actual_risk_pct")
+            context["risk_amount"] = reservation.get("risk")
+            context["sizing_capped"] = bool(reservation.get("sizing_capped"))
+            context["margin_used"] = reservation.get("margin")
+            context["notional"] = reservation.get("notional")
             record["context"] = context
             self.journal.record_open(
                 record["trade_id"], record.get("domain", "futures"),
@@ -1077,6 +1094,9 @@ class TradingCoordinator(SpotDemoMixin):
             )
             if not reservation.get("approved"):
                 return reservation
+            if callable(self.funnel_recorder):
+                self.funnel_recorder("futures",
+                    int(signal.get("signal_candle_open_time") or 0), "risk_approved")
 
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
@@ -1316,7 +1336,31 @@ class TradingCoordinator(SpotDemoMixin):
         }
 
 
-    def analyze_live_from_frames(self, symbol, domain, frames, agent=None):
+    def analyze_cached(self, symbol, domain, profile="standard", agent=None):
+        """Analyze exclusively from the warmed local WebSocket candle cache."""
+        domain = str(domain).strip().lower()
+        provider = getattr(self, "market_frame_provider", None)
+        frames = (
+            provider(domain, str(symbol).strip().upper())
+            if callable(provider) else None
+        )
+        if not isinstance(frames, dict) or not frames:
+            stream = getattr(self, "market_stream", None)
+            snapshot = getattr(stream, "_snapshot", None)
+            if callable(snapshot):
+                frames = snapshot(domain, str(symbol).strip().upper())
+        if not isinstance(frames, dict) or not frames:
+            return {"symbol": str(symbol).strip().upper(), "signals": {},
+                    "data_errors": {domain: "Warmed WebSocket candle cache is not ready"}}
+        if str(profile or "standard").lower() == "standard":
+            return self.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent
+            )
+        return self.analyze_live_from_frames(
+            symbol, domain, frames, agent=agent, profile=profile
+        )
+
+    def analyze_live_from_frames(self, symbol, domain, frames, agent=None, profile="standard"):
         """Run V3 against the closed multi-timeframe WebSocket cache (no REST I/O)."""
         symbol = str(symbol).strip().upper()
         domain = str(domain).strip().lower()
@@ -1364,6 +1408,7 @@ class TradingCoordinator(SpotDemoMixin):
         }
         try:
             agent_data = self.market_engine.for_live_agent(live_data, domain)
+            agent_data["profile"] = str(profile or "standard").lower()
             active_agent = agent if agent is not None else self.agents[domain]
             signal = active_agent.analyze(agent_data)
             if not isinstance(signal, dict) or signal.get("strategy_version") != "v3":
@@ -1396,7 +1441,8 @@ class TradingCoordinator(SpotDemoMixin):
 
     def submit_chart_signal(
         self, domain, symbol, timeframe,
-        entry_price=None, take_profit=None, stop_loss=None, agent=None
+        entry_price=None, take_profit=None, stop_loss=None, agent=None,
+        profile="standard"
     ):
         """Review user-proposed chart levels; only an agent-approved plan can reach DEMO execution."""
         domain = str(domain).strip().lower()
@@ -1427,10 +1473,25 @@ class TradingCoordinator(SpotDemoMixin):
 
         # A chart submission belongs to one selected market/agent. Do not
         # fetch the other market or run its agent on this request.
-        analysis = self.analyze_live(
-            symbol, preferred_timeframe=timeframe, domains=[domain],
-            agent_overrides={domain: agent} if agent is not None else None,
-        )
+        provider = getattr(self, "market_frame_provider", None)
+        frames = provider(domain, symbol) if callable(provider) else None
+        if not isinstance(frames, dict) or not frames:
+            stream = getattr(self, "market_stream", None)
+            snapshot = getattr(stream, "_snapshot", None)
+            if callable(snapshot):
+                frames = snapshot(domain, symbol, max_age_seconds=90)
+        if not isinstance(frames, dict) or not frames:
+            reason = "Warmed WebSocket candle cache is not ready for this symbol"
+            return {**base, "success": False, "decision_status": "WAITING_FOR_CACHE",
+                    "decision_reason": reason, "reason": reason}
+        if str(profile or "standard").lower() == "standard":
+            analysis = self.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent
+            )
+        else:
+            analysis = self.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent, profile=profile
+            )
         signal = analysis.get("signals", {}).get(domain, {})
         if not isinstance(signal, dict) or signal.get("error"):
             reason = (signal.get("error") if isinstance(signal, dict) else None) or "Analysis unavailable"
@@ -1545,10 +1606,9 @@ class TradingCoordinator(SpotDemoMixin):
         signal["trade_plan"] = plan
         self.last_signals[domain] = signal
 
-        # A chart submission is an agent decision, not an immediate market order.
-        # The API queues approved decisions and the WebSocket opens them only on
-        # the first update of the following 5m candle.
-        reason = "Agent approved the setup; waiting for the next 5m candle open"
+        # The API job queue is asynchronous, but execution itself is immediate
+        # after the current executable quote passes the 0.3 ATR drift guard.
+        reason = "Agent approved the setup; immediate execution will apply the 90-second and 0.3 ATR guards"
         return {
             **base, "success": True, "opened": False,
             "decision_status": "QUEUED", "decision_reason": reason,
@@ -1645,7 +1705,7 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["futures"], include_orderbook=False)
+                return self.analyze_cached(scan_item["symbol"], "futures")
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
@@ -1681,6 +1741,12 @@ class TradingCoordinator(SpotDemoMixin):
                         "universe_total": len(universe),
                     })
                 try:
+                    data_errors = analysis.get("data_errors") or {}
+                    if data_errors:
+                        errors[symbol] = "; ".join(
+                            str(value) for value in data_errors.values()
+                        )[:500]
+                        continue
                     signal = analysis.get("signals", {}).get("futures", {})
                     if not isinstance(signal, dict):
                         reject("Missing Futures analysis", symbol)
@@ -1762,7 +1828,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         try:
             universe = self.market_feed.fetch_top_symbols(
-                "spot", limit=250
+                "spot", limit=30
             )
             minimum = (
                 float(min_quote_volume)
@@ -1783,7 +1849,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         if limit is not None:
             try:
-                requested_limit = min(250, max(1, int(limit)))
+                requested_limit = min(30, max(1, int(limit)))
             except (TypeError, ValueError):
                 return {
                     "success": False,
@@ -1851,7 +1917,7 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["spot"], include_orderbook=False)
+                return self.analyze_cached(scan_item["symbol"], "spot")
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
@@ -1887,6 +1953,12 @@ class TradingCoordinator(SpotDemoMixin):
                         "universe_total": len(universe),
                     })
                 try:
+                    data_errors = analysis.get("data_errors") or {}
+                    if data_errors:
+                        errors[symbol] = "; ".join(
+                            str(value) for value in data_errors.values()
+                        )[:500]
+                        continue
                     signal = analysis.get("signals", {}).get("spot", {})
                     if not isinstance(signal, dict):
                         reject("Missing Spot analysis", symbol)

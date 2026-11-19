@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.17.7"
+API_VERSION = "2026.11.19.2"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -122,21 +122,26 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
             overlap_symbols.update(bucket.intersection(other))
     accounted = set().union(*buckets) if buckets else set()
     unclassified = universe - accounted
-    complete = bool(universe) and (
-        completed == universe
-        and not pending_cache
-        and not pending_analysis
-        and not pending_reconcile
-        and not rejected
-        and int(analysis_errors or 0) == 0
-        and not overlap_symbols
-        and not unclassified
-    )
+    failed_count = min(len(completed), int(analysis_errors or 0))
+    successful_count = max(0, len(completed) - failed_count)
+    required_successful = int(math.ceil(len(universe) * 0.95))
+    processed_ratio = (successful_count / len(universe)) if universe else 0.0
+    # A cycle is operationally successful once at least 95% of its symbols
+    # completed analysis. Fatal errors and the unprocessed remainder stay
+    # visible as separate metrics instead of invalidating all useful work.
+    complete = bool(universe) and processed_ratio >= 0.95 and not overlap_symbols and not unclassified
     return {
         "cycle_open_time_ms": int(cycle_open_time_ms or 0),
         "expected_symbols": len(universe),
         "accepted_symbols": len(accepted),
         "completed_symbols": len(completed),
+        "successful_symbols": successful_count,
+        "failed_symbols": failed_count,
+        "completion_threshold_percent": 95,
+        "required_successful_symbols": required_successful,
+        "processed_ratio": round(processed_ratio, 4),
+        "processed_pct": round(processed_ratio * 100, 2),
+        "completion_percent": round(processed_ratio * 100, 2),
         "pending_cache_symbols": len(pending_cache),
         "pending_analysis_symbols": len(pending_analysis),
         "pending_reconcile_symbols": len(pending_reconcile),
@@ -488,11 +493,11 @@ def continuous_scan_worker():
 
 
 def selected_market_symbols(market):
-    """Return the current daily top-250 symbols for one Binance market."""
+    """Return the current daily top-30 symbols for one Binance market."""
     market = str(market).strip().lower()
     if market not in {"spot", "futures"}:
         raise ValueError("Unsupported market")
-    ranked = coordinator.market_feed.fetch_top_symbols(market, limit=250)
+    ranked = coordinator.market_feed.fetch_top_symbols(market, limit=30)
     return {str(item["symbol"]).strip().upper() for item in ranked}
 
 
@@ -506,11 +511,17 @@ def initialize_runtime():
                                    news_max_age_h=12)
     coordinator.market_context = market_context
     autopilot = Autopilot(coordinator, context=market_context)
+    coordinator.funnel_recorder = autopilot._record_funnel
     market_stream = BinanceKlineStream(
         coordinator.market_feed, autopilot.on_market_kline,
-        max_symbols=250,
+        max_symbols=30,
         on_universe=autopilot.register_symbol_universe,
         on_cache_ready=autopilot.on_symbol_cache_ready,
+    )
+    coordinator.market_stream = market_stream
+    coordinator.market_frame_provider = (
+        lambda domain, symbol: market_stream._snapshot(domain, symbol)
+        if market_stream else None
     )
 
 
@@ -560,6 +571,7 @@ def _process_agent_submission(request_id, payload):
             take_profit=payload.get("take_profit"),
             stop_loss=payload.get("stop_loss"),
             agent=autopilot.worker_agent(str(payload.get("domain", "")).lower()),
+            profile=autopilot.config.get("profile", "standard"),
         )
     except Exception as error:
         failed = True
@@ -642,7 +654,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 # return its ranked order rather than alphabetically sorting
                 # the stream's internal symbol set.
                 ranked = coordinator.market_feed.fetch_top_symbols(
-                    market, limit=250
+                    market, limit=30
                 )
                 symbols = [item["symbol"] for item in ranked]
                 stream_state = (
@@ -653,12 +665,12 @@ class APIHandler(BaseHTTPRequestHandler):
                     "market": market,
                     "symbols": symbols,
                     "count": len(symbols),
-                    "limit": 250,
+                    "limit": 30,
                     "ranking_day": stream_state.get("ranking_day") or (
                         ranked[0].get("ranking_day") if ranked else None
                     ),
                     "selection_rule": "24h USDT quote volume + best bid/ask liquidity + spread",
-                    "source": "binance_daily_top_250",
+                    "source": "binance_daily_top_30",
                     "received_at": time.time(),
                 })
 
@@ -699,7 +711,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected_market_symbols(market):
                     return self.send_json({
                         "success": False, "market": market, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 universe",
+                        "reason": "Symbol is outside the current daily top-30 universe",
                     }, 403)
                 live = params.get("live", ["0"])[0] == "1"
                 start_time = params.get("startTime", [None])[0]
@@ -835,8 +847,21 @@ class APIHandler(BaseHTTPRequestHandler):
                 })
 
             if path == "/performance":
-                return self.send_json(
-                    performance.compute(coordinator.journal.closed_trades()))
+                standard_trades = [
+                    trade for trade in coordinator.journal.closed_trades()
+                    if (trade.get("context") or {}).get("profile", "standard") != "explore"
+                ]
+                metrics = performance.compute(standard_trades)
+                return self.send_json({
+                    **metrics,
+                    "sample_threshold_met": metrics["overall"]["trades"] >= 150,
+                    "evaluation_ready": False,
+                    "random_baseline_required": True,
+                    "random_baseline_compared": False,
+                    "profitability_conclusion": None,
+                    "minimum_standard_trades": 150,
+                    "evaluation_policy": "Do not judge profitability before 150 Standard trades and a random-baseline comparison; adjust one factor per weekly review.",
+                })
             if path == "/journal":
                 if params.get("closed", ["0"])[0] == "1":
                     trades = coordinator.journal.closed_trades()
@@ -901,8 +926,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     and int(coverage[domain].get("cycle_open_time_ms") or 0) == expected_cycle
                     and int(coverage[domain].get("expected_symbols") or 0)
                         == int((stream.get(domain) or {}).get("symbols") or 0)
-                    and int(coverage[domain].get("completed_symbols") or 0)
-                        == int(coverage[domain].get("expected_symbols") or 0)
+                    and int(coverage[domain].get("successful_symbols") or 0)
+                        >= math.ceil(int(coverage[domain].get("expected_symbols") or 0) * 0.95)
                     and time.time() - float(coverage[domain].get("updated_at") or 0) <= 30
                     for domain in ("futures", "spot")
                 )
@@ -936,9 +961,14 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json({
                     "success": True,
                     "strategy_timeframe": "5m",
-                    "entry_timing": "next_5m_candle_open",
+                    "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                     "websocket": market_stream.status() if market_stream else {},
                 })
+            if path == "/funnel":
+                return self.send_json(
+                    autopilot.funnel_status() if autopilot else
+                    {"success": False, "reason": "Autopilot is not initialized"}
+                )
             if path == "/scan/status":
                 with scan_status_lock:
                     snapshot = json.loads(json.dumps(scan_status))
@@ -946,8 +976,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 snapshot["websocket"] = market_stream.status() if market_stream else {}
                 snapshot["analysis"] = runtime.get("analysis_pools", {})
                 snapshot["symbol_auditors"] = runtime.get("symbol_auditors", {})
+                snapshot["funnel"] = autopilot.funnel_status() if autopilot else {}
                 snapshot["strategy_timeframe"] = "5m"
-                snapshot["entry_timing"] = "next_5m_candle_open"
+                snapshot["entry_timing"] = "immediate_after_analysis_with_atr_drift_guard"
                 return self.send_json(snapshot)
             if path == "/status":
                 with scan_status_lock:
@@ -969,10 +1000,11 @@ class APIHandler(BaseHTTPRequestHandler):
                     "analysis_pools": analysis_snapshot,
                     "analysis_metrics": analysis_snapshot,
                     "symbol_auditors": auditor_snapshot,
+                    "funnel": autopilot.funnel_status() if autopilot else {},
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
-                        "entry_timing": "next_5m_candle_open",
+                        "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                         "live_mode_locked": True,
                     },
                 })
@@ -1023,9 +1055,27 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected:
                     return self.send_json({
                         "success": False, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 Spot/Futures universes",
+                        "reason": "Symbol is outside the current daily top-30 Spot/Futures universes",
                     }, 403)
-                return self.send_json(coordinator.analyze_live(symbol))
+                signals = {}
+                errors = {}
+                for domain in ("futures", "spot"):
+                    if symbol not in selected_market_symbols(domain):
+                        continue
+                    frames = market_stream._snapshot(domain, symbol) if market_stream else None
+                    if not isinstance(frames, dict) or not frames:
+                        errors[domain] = "Warmed WebSocket candle cache is not ready"
+                        continue
+                    result = coordinator.analyze_live_from_frames(
+                        symbol, domain, frames, profile="standard"
+                    )
+                    signals[domain] = (result.get("signals") or {}).get(domain, {})
+                    errors.update(result.get("data_errors") or {})
+                return self.send_json({
+                    "symbol": symbol, "source": "binance_websocket_cache",
+                    "signals": signals, "data_errors": errors,
+                    "success": bool(signals) and not errors,
+                })
 
             if path == "/agent/submit":
                 domain = str(data.get("domain", "")).strip().lower()
@@ -1037,7 +1087,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected_market_symbols(domain):
                     return self.send_json({
                         "success": False, "domain": domain, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 universe",
+                        "reason": "Symbol is outside the current daily top-30 universe",
                     }, 403)
                 request_id = uuid4().hex
                 now = time.time()
