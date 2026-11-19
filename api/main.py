@@ -1051,7 +1051,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 signals = {}
                 data_errors = {}
                 for domain in domains:
-                    frames = market_stream._snapshot(domain, symbol)
+                    frames = market_stream._snapshot(domain, symbol, max_age_seconds=90)
                     if frames is None:
                         data_errors[domain] = "Market candle cache is still warming"
                         continue
