@@ -4,6 +4,8 @@ import time
 import threading
 import unittest
 
+# Release regression coverage: trailing stop reads warmed WebSocket cache only.
+
 import pandas as pd
 
 from core.autopilot import Autopilot
