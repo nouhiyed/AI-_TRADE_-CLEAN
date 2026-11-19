@@ -1029,16 +1029,45 @@ class APIHandler(BaseHTTPRequestHandler):
 
             if path == "/analyze":
                 symbol = str(data.get("symbol", "BTCUSDT")).strip().upper()
-                selected = (
-                    selected_market_symbols("spot")
-                    | selected_market_symbols("futures")
+                requested_domain = str(data.get("domain", "")).strip().lower()
+                if requested_domain and requested_domain not in {"spot", "futures"}:
+                    return self.send_json({
+                        "success": False, "symbol": symbol,
+                        "reason": "Unsupported market domain",
+                    }, 400)
+                domains = (
+                    [requested_domain] if requested_domain else
+                    [domain for domain in ("spot", "futures")
+                     if symbol in selected_market_symbols(domain)]
                 )
-                if symbol not in selected:
+                if not domains or any(
+                    symbol not in selected_market_symbols(domain)
+                    for domain in domains
+                ):
                     return self.send_json({
                         "success": False, "symbol": symbol,
                         "reason": "Symbol is outside the current daily top-30 Spot/Futures universes",
                     }, 403)
-                return self.send_json(coordinator.analyze_live(symbol))
+                signals = {}
+                data_errors = {}
+                for domain in domains:
+                    frames = market_stream._snapshot(domain, symbol)
+                    if frames is None:
+                        data_errors[domain] = "Market candle cache is still warming"
+                        continue
+                    analysis = coordinator.analyze_live_from_frames(
+                        symbol, domain, frames, agent=coordinator.agents[domain]
+                    )
+                    signal = analysis.get("signals", {}).get(domain)
+                    if isinstance(signal, dict) and signal:
+                        signals[domain] = signal
+                    if analysis.get("data_errors"):
+                        data_errors[domain] = analysis["data_errors"]
+                return self.send_json({
+                    "success": bool(signals), "symbol": symbol,
+                    "source": "binance_websocket_cache",
+                    "signals": signals, "data_errors": data_errors,
+                }, 200 if signals else 503)
 
             if path == "/agent/submit":
                 domain = str(data.get("domain", "")).strip().lower()
