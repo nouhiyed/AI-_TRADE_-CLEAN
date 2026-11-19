@@ -285,7 +285,7 @@ class BinanceKlineStream:
                     "source": "binance_cache_reconciliation",
                     "market_data": frames,
                     "cache_ready": True,
-                    "audit_only": age_ms > 30000,
+                    "audit_only": age_ms > 90000,
                 })
             except Exception:
                 missing.append(symbol)
