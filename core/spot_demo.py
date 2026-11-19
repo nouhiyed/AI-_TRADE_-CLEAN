@@ -387,8 +387,8 @@ class SpotDemoMixin:
                     trail_update = None
                     if trailing_enabled and trailing_active:
                         try:
-                            trail_frame = self.market_feed.fetch_candles(
-                                "spot", symbol, "5m", limit=40, closed_only=True)
+                            trail_frame = self._cached_trailing_5m_frame(
+                                "spot", symbol, limit=40)
                             trail_update = calculate_trailing_stop(
                                 trail_frame, "LONG", stop,
                                 snapshot.get("trailing_best_price"), price)
