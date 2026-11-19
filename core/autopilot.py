@@ -1135,6 +1135,7 @@ class Autopilot:
             signal["entry_drift"] = drift
             signal["entry_atr"] = atr
             signal["entry_timing"] = "immediate_after_analysis"
+            signal["entry_price_source"] = "BINANCE_BOOK_TICKER"
             signal["profile"] = str(cfg.get("profile", "standard"))
             execution_risk_pct = (
                 min(0.25, max(0.10, float(cfg.get("risk_pct", 0.2))))
