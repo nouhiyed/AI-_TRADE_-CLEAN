@@ -23,8 +23,8 @@ class BinanceKlineStream:
         "futures": "wss://fstream.binance.com/market/stream",
     }
     CACHE_LIMITS = {
-        "futures": {"5m": 100, "15m": 60, "1h": 60},
-        "spot": {"5m": 100, "15m": 60, "1h": 210, "4h": 210},
+        "futures": {"5m": 800, "15m": 267, "1h": 800},
+        "spot": {"5m": 800, "15m": 267, "1h": 800, "4h": 210},
     }
     REQUIRED_ROWS = {
         "futures": {"5m": 60, "15m": 60, "1h": 60},
@@ -53,7 +53,7 @@ class BinanceKlineStream:
         try:
             self.max_symbols = max(0, int(raw_limit))
         except (TypeError, ValueError):
-            self.max_symbols = 250
+            self.max_symbols = 30
         self.full_universe = self.max_symbols == 0
         # Large top-N lists use only 5m trigger streams; higher-timeframe
         # context is fetched on demand after the local 5m prefilter passes.
