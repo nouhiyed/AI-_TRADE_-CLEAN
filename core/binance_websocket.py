@@ -23,7 +23,7 @@ class BinanceKlineStream:
         "futures": "wss://fstream.binance.com/market/stream",
     }
     CACHE_LIMITS = {
-        "futures": {"5m": 2400, "15m": 800, "1h": 200},
+        "futures": {"5m": 2412, "15m": 800, "1h": 200},
         "spot": {"5m": 2400, "15m": 800, "1h": 200, "4h": 210},
     }
     REQUIRED_ROWS = {
@@ -768,115 +768,6 @@ class BinanceKlineStream:
             self._status[market]["cache_warmup_worker_starts"] += 1
             worker.start()
             return True
-
-    def _refresh_stale_5m(self, market, symbols, now_ms=None):
-        """Refresh stale 5m caches once per symbol and closed-candle cycle.
-
-        Historical cache readiness must not prevent refreshing a healthy but
-        stale cache after missed WebSocket close events.
-        """
-        fetch = getattr(self.feed, "fetch_candles", None)
-        if not callable(fetch):
-            return []
-        now_ms = int(now_ms or time.time() * 1000)
-        interval_ms = self.INTERVAL_MS["5m"]
-        expected_open = ((now_ms // interval_ms) - 1) * interval_ms
-        # Bound bookkeeping to the current and immediately previous 5m cycle.
-        with self._lock:
-            self._last_rest_refresh_cycle = {
-                item for item in self._last_rest_refresh_cycle
-                if item[2] >= expected_open - interval_ms
-            }
-            self._last_rest_refresh_attempt_at = {
-                key: stamp for key, stamp in self._last_rest_refresh_attempt_at.items()
-                if key[2] >= expected_open - interval_ms
-            }
-        stale = []
-        for symbol in symbols:
-            symbol = str(symbol).upper()
-            with self._cache_lock:
-                frame = self._cache.get((market, symbol, "5m"))
-                has_expected_closed = False
-                if frame is not None and not frame.empty:
-                    opens = pd.to_datetime(frame["open_time"], utc=True)
-                    exact_rows = frame.loc[
-                        opens.map(lambda value: self._row_key(value))
-                        == expected_open
-                    ]
-                    has_expected_closed = bool(
-                        not exact_rows.empty
-                        and exact_rows.iloc[-1].get("is_closed", False)
-                    )
-            refresh_key = (market, symbol, expected_open)
-            if has_expected_closed:
-                with self._lock:
-                    self._last_rest_refresh_cycle.add(refresh_key)
-                continue
-            with self._lock:
-                last_attempt = self._last_rest_refresh_attempt_at.get(refresh_key)
-                # A valid HTTP response is not enough: it must contain this
-                # exact candle. Retry missing-cycle responses every 30 seconds.
-                if (refresh_key in self._last_rest_refresh_cycle
-                        and last_attempt is not None
-                        and time.monotonic() - last_attempt < 30.0):
-                    continue
-                self._last_rest_refresh_cycle.add(refresh_key)
-                self._last_rest_refresh_attempt_at[refresh_key] = time.monotonic()
-            stale.append(symbol)
-
-        if not stale:
-            return []
-
-        refreshed = []
-        def refresh(symbol):
-            # Request the expected interval and its predecessor explicitly;
-            # do not trust a latest-page response to prove exact-cycle coverage.
-            frame = fetch(
-                market, symbol, "5m",
-                limit=self.CACHE_LIMITS[market]["5m"],
-                closed_only=True,
-                start_time=max(0, expected_open - interval_ms),
-                end_time=expected_open + interval_ms - 1,
-            )
-            self._merge_frame(market, symbol, "5m", frame)
-            with self._cache_lock:
-                merged = self._cache.get((market, symbol, "5m"))
-                if merged is None or merged.empty:
-                    return False
-                opens = pd.to_datetime(merged["open_time"], utc=True)
-                exact = merged.loc[
-                    opens.map(lambda value: self._row_key(value)) == expected_open
-                ]
-                return bool(
-                    not exact.empty and bool(exact.iloc[-1].get("is_closed", False))
-                )
-
-        # Keep REST concurrency bounded; Binance requests retain the existing
-        # per-market pacing and only stale symbols are refreshed.
-        with ThreadPoolExecutor(
-            max_workers=self.warmup_workers,
-            thread_name_prefix="candle-refresh-" + market,
-        ) as pool:
-            futures = {pool.submit(refresh, symbol): symbol for symbol in stale}
-            for future in as_completed(futures):
-                symbol = futures[future]
-                try:
-                    if future.result():
-                        refreshed.append(symbol)
-                    else:
-                        with self._lock:
-                            self._status[market]["cache_warmup_last_error"] = (
-                                symbol + " 5m refresh: Binance response did not contain "
-                                "the exact closed cycle " + str(expected_open)
-                            )
-                except Exception as error:
-                    # Transport failures use the same bounded backoff as
-                    # incomplete successful responses to avoid REST retry storms.
-                    with self._lock:
-                        self._status[market]["cache_warmup_last_error"] = (
-                            symbol + " 5m refresh: " + str(error)
-                        )
-        return refreshed
 
     def _warm_market(self, market, symbols=None):
         """Keep one cache warmup loop aligned with the live registered universe."""
