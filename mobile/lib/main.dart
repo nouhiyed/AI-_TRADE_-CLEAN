@@ -610,7 +610,9 @@ class _TradeShellState extends State<TradeShell>
           final value = item is Map
               ? (item['symbol'] ?? item['s'] ?? item['pair'])
               : item;
-          if (value != null && '$value'.isNotEmpty) {
+          // Defensive UI cap: even a stale/misconfigured API cannot display
+          // more than the agreed top-30 universe for either market.
+          if (value != null && '$value'.isNotEmpty && symbols.length < 30) {
             final symbol = '$value';
             symbols.add(symbol);
             if (item is Map) {
