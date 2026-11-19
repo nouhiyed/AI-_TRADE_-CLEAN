@@ -449,10 +449,11 @@ class ImmediateBookTickerEntryTests(unittest.TestCase):
                     "reward_risk": 2.0, "setup": "PULLBACK_LONG",
                 },
             }
-            result = autopilot._execute_ws_entry(
+            autopilot._execute_ws_entry(
                 "futures", "BTCUSDT",
                 {"signal": signal, "immediate": True}, None,
             )
+            result = autopilot._last_execution_result
             self.assertEqual(result["status"], "COMPLETED")
             self.assertEqual(result["phase"], "opened")
             self.assertEqual(
@@ -492,10 +493,11 @@ class ImmediateBookTickerEntryTests(unittest.TestCase):
                     "reward_risk": 2.0, "setup": "PULLBACK_SHORT",
                 },
             }
-            result = autopilot._execute_ws_entry(
+            autopilot._execute_ws_entry(
                 "futures", "BTCUSDT",
                 {"signal": signal, "immediate": True}, None,
             )
+            result = autopilot._last_execution_result
             self.assertEqual(result["status"], "COMPLETED")
             self.assertEqual(
                 coordinator.open_request["kwargs"]["entry_reference_price"],
