@@ -1421,7 +1421,8 @@ class TradingCoordinator(SpotDemoMixin):
 
     def submit_chart_signal(
         self, domain, symbol, timeframe,
-        entry_price=None, take_profit=None, stop_loss=None, agent=None
+        entry_price=None, take_profit=None, stop_loss=None, agent=None,
+        profile="standard"
     ):
         """Review user-proposed chart levels; only an agent-approved plan can reach DEMO execution."""
         domain = str(domain).strip().lower()
@@ -1461,7 +1462,7 @@ class TradingCoordinator(SpotDemoMixin):
             return {**base, "success": False, "decision_status": "WAITING_FOR_CACHE",
                     "decision_reason": reason, "reason": reason}
         analysis = self.analyze_live_from_frames(
-            symbol, domain, frames, agent=agent, profile="standard"
+            symbol, domain, frames, agent=agent, profile=profile
         )
         signal = analysis.get("signals", {}).get(domain, {})
         if not isinstance(signal, dict) or signal.get("error"):
