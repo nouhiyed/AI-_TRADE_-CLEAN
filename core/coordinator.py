@@ -52,6 +52,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         self.last_signals = {}
         self._demo_lock = threading.RLock()
+        self.funnel_recorder = None
         self._demo_position_locks = {}
         self._demo_position_locks_guard = threading.Lock()
         self.mode = "DEMO"
@@ -434,9 +435,9 @@ class TradingCoordinator(SpotDemoMixin):
             price = Decimal(str(market_price))
             if not all(v.is_finite() and v > 0 for v in (entry, stop, target, atr, price)):
                 return False, "Invalid plan or execution price"
-            max_drift = max(atr * Decimal("0.10"), entry * Decimal("0.0002"))
+            max_drift = max(atr * Decimal("0.30"), entry * Decimal("0.0002"))
             if abs(price - entry) > max_drift:
-                return False, "Entry moved more than 0.10 ATR after confirmation; wait for a new setup"
+                return False, "Entry moved more than 0.30 ATR after confirmation; wait for a new setup"
             if str(direction).upper() == "SHORT":
                 if not target < price < stop:
                     return False, "Live price invalidated the SHORT structure"
@@ -1077,6 +1078,9 @@ class TradingCoordinator(SpotDemoMixin):
             )
             if not reservation.get("approved"):
                 return reservation
+            if callable(self.funnel_recorder):
+                self.funnel_recorder("futures",
+                    int(signal.get("signal_candle_open_time") or 0), "risk_approved")
 
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
