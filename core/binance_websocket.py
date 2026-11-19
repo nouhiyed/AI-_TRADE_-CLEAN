@@ -73,6 +73,7 @@ class BinanceKlineStream:
         # Exactly one long-lived cache warmup worker per market. WebSocket
         # reconnects must not spawn duplicate REST warmup pools.
         self._warmup_threads = {}
+        self._last_spot_4h_refresh = {}
         self._thread_factory = threading.Thread
         self._connection_threads = []
         self._connection_live = {}
@@ -535,34 +536,58 @@ class BinanceKlineStream:
     def _frame_healthy(self, market, interval, frame, now_ms=None):
         return self._frame_health_reason(market, interval, frame, now_ms) is None
 
+    @staticmethod
+    def _aggregate_5m(frame, minutes, expected_count, limit):
+        """Aggregate only complete, exactly aligned closed 5m groups."""
+        if frame is None or frame.empty:
+            return None
+        source = frame.copy()
+        source["open_time"] = pd.to_datetime(source["open_time"], utc=True)
+        source = source.sort_values("open_time").set_index("open_time")
+        rule = str(minutes) + "min"
+        grouped = source.resample(rule, origin="epoch", label="left", closed="left")
+        out = grouped.agg({
+            "open": "first", "high": "max", "low": "min", "close": "last",
+            "volume": "sum", "quote_volume": "sum", "trades": "sum",
+            "taker_buy_base": "sum", "taker_buy_quote": "sum",
+        })
+        counts = grouped["close"].count()
+        out = out.loc[counts == expected_count].tail(limit).reset_index()
+        if out.empty:
+            return None
+        interval_ms = minutes * 60_000
+        out["close_time"] = out["open_time"] + pd.to_timedelta(interval_ms - 1, unit="ms")
+        out["is_closed"] = True
+        out["ignore"] = 0.0
+        return out
+
     def _snapshot(self, market, symbol):
-        required = (
-            {"5m": self.REQUIRED_ROWS[market]["5m"]}
-            if self.fast_scan_mode else self.REQUIRED_ROWS[market]
-        )
-        frames = {}
         with self._cache_lock:
-            for interval, minimum in required.items():
-                frame = self._cache.get((market, symbol, interval))
-                if not self._frame_healthy(market, interval, frame):
-                    return None
-                copied = frame.copy()
-                copied.attrs.update({
-                    "market": market, "symbol": symbol,
-                    "interval": interval, "timeframe": interval,
-                    "source": "binance_websocket_cache",
-                })
-                frames[interval] = copied
-            if market == "spot" and not self.fast_scan_mode:
-                optional_four_hour = self._cache.get((market, symbol, "4h"))
-                if self._frame_healthy(market, "4h", optional_four_hour):
-                    copied = optional_four_hour.copy()
-                    copied.attrs.update({
-                        "market": market, "symbol": symbol,
-                        "interval": "4h", "timeframe": "4h",
-                        "source": "binance_websocket_cache",
-                    })
-                    frames["4h"] = copied
+            base = self._cache.get((market, symbol, "5m"))
+            if not self._frame_healthy(market, "5m", base):
+                return None
+            five = base.copy()
+            four = self._cache.get((market, symbol, "4h")) if market == "spot" else None
+            four = four.copy() if four is not None else None
+        frames = {"5m": five}
+        for interval, minutes, count in (("15m", 15, 3), ("1h", 60, 12)):
+            derived = self._aggregate_5m(five, minutes, count,
+                                         self.CACHE_LIMITS[market][interval])
+            if not self._frame_healthy(market, interval, derived):
+                return None
+            derived.attrs.update({"market": market, "symbol": symbol,
+                                  "interval": interval, "timeframe": interval,
+                                  "source": "derived_from_5m_websocket_cache"})
+            frames[interval] = derived
+        for interval, frame in (("5m", five),):
+            frame.attrs.update({"market": market, "symbol": symbol,
+                                 "interval": interval, "timeframe": interval,
+                                 "source": "binance_websocket_cache"})
+        if market == "spot" and self._frame_healthy(market, "4h", four):
+            four.attrs.update({"market": market, "symbol": symbol,
+                               "interval": "4h", "timeframe": "4h",
+                               "source": "binance_rest_hourly_cache"})
+            frames["4h"] = four
         return frames
 
     def _warm_symbol(self, market, symbol):
@@ -765,7 +790,22 @@ class BinanceKlineStream:
                     return
                 continue
 
-            self._refresh_stale_5m(market, current_symbols)
+            # No periodic REST repair of 5m candles: the analysis clock is
+            # exclusively WebSocket-driven after the initial cache warmup.
+            if market == "spot":
+                for symbol in current_symbols:
+                    last = self._last_spot_4h_refresh.get(symbol, 0.0)
+                    if time.monotonic() - last >= 3600:
+                        try:
+                            frame4h = self.feed.fetch_candles(
+                                "spot", symbol, "4h", limit=210, closed_only=True)
+                            self._merge_frame("spot", symbol, "4h", frame4h)
+                            self._last_spot_4h_refresh[symbol] = time.monotonic()
+                        except Exception as error:
+                            with self._lock:
+                                self._status[market]["last_error"] = (
+                                    symbol + " 4h hourly refresh: " + str(error))
+
             ready = {
                 symbol for symbol in current_symbols
                 if self._snapshot(market, symbol) is not None
