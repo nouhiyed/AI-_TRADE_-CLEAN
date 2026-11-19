@@ -512,6 +512,7 @@ def initialize_runtime():
         on_universe=autopilot.register_symbol_universe,
         on_cache_ready=autopilot.on_symbol_cache_ready,
     )
+    coordinator.market_stream = market_stream
     coordinator.market_frame_provider = (
         lambda domain, symbol: market_stream._snapshot(domain, symbol)
         if market_stream else None
