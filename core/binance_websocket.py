@@ -1162,6 +1162,7 @@ class BinanceKlineStream:
                     "close": float(kline.get("c", 0)),
                     "volume": float(kline.get("v", 0)),
                     "is_closed": is_closed, "event_time": event_time,
+                    "received_at_ms": int(time.time() * 1000),
                     "source": "binance_websocket",
                 }
                 self._status[market]["last_event"] = datetime.now(
