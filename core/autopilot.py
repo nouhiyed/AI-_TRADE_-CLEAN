@@ -620,6 +620,9 @@ class Autopilot:
                 previous = self._waiting_cache_events.get(key)
                 if previous is None or int(previous.get("close_time") or 0) < int(event.get("close_time") or 0):
                     self._waiting_cache_events[key] = dict(event)
+            self._record_funnel(
+                domain, open_time, reason="Closed 5m candle waiting for historical cache",
+            )
             self._record_symbol_audit(
                 domain, symbol, "waiting_cache", increment="events_received", also_increment="cache_waiting",
                 close_time_ms=int(event.get("close_time") or 0),
@@ -808,6 +811,7 @@ class Autopilot:
                 close_time_ms=int(candle.get("close_time") or 0),
             )
             if not self.c._agent_enabled(domain):
+                self._record_funnel(domain, cycle_open_time_ms, reason="The market agent is stopped")
                 self._record_symbol_audit(
                     domain, symbol, "agent_stopped",
                     reason="The market agent is stopped",
@@ -830,6 +834,7 @@ class Autopilot:
             if (close_time <= 0 or close_event_time < close_time
                     or close_event_time - close_time > 10000
                     or event_age_ms < -30000):
+                self._record_funnel(domain, cycle_open_time_ms, reason="Invalid closed-candle timestamps")
                 self._record_symbol_audit(
                     domain, symbol, "stale",
                     increment="stale",
@@ -837,6 +842,7 @@ class Autopilot:
                 )
                 return
             if event_age_ms > 10 * 60 * 1000:
+                self._record_funnel(domain, cycle_open_time_ms, reason="Closed-candle event exceeded 10-minute retention")
                 self._record_symbol_audit(
                     domain, symbol, "stale",
                     increment="stale",
@@ -853,6 +859,7 @@ class Autopilot:
                     "domain": domain, "symbol": symbol,
                     "reason": "Closed 5m candle cache is not ready",
                 }
+                self._record_funnel(domain, cycle_open_time_ms, reason="5m candle history is still warming")
                 self._record_symbol_audit(
                     domain, symbol, "waiting_cache",
                     reason="5m candle history is still warming",
@@ -869,6 +876,7 @@ class Autopilot:
                         raw_five, symbol, domain, "5m")
                     prefilter_info = agent.strategy.prefilter_5m(prepared_five)
                 except Exception as error:
+                    self._record_funnel(domain, cycle_open_time_ms, reason="5m prefilter error: " + str(error))
                     self._record_symbol_audit(
                         domain, symbol, "prefilter_error",
                         increment="errors", reason=str(error),
@@ -979,6 +987,10 @@ class Autopilot:
                 self.c.last_signals[domain] = signal
                 cfg = dict(self.config)
                 if audit_only:
+                    self._record_funnel(
+                        domain, cycle_open_time_ms,
+                        reason="Signal arrived outside the 90-second execution window",
+                    )
                     self._record_symbol_audit(
                         domain, symbol, "audit_only_candidate", increment="audit_only",
                         reason="Delayed cache/worker replay is audited but cannot open a late trade",
@@ -1023,6 +1035,7 @@ class Autopilot:
         except Exception as error:
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["failed"] += 1
+            self._record_funnel(domain, cycle_open_time_ms, reason="Analysis error: " + str(error))
             self._record_symbol_audit(
                 domain, symbol, "analysis_error",
                 increment="errors", reason=str(error),
