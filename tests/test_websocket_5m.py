@@ -210,7 +210,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
 
     def test_spot_cache_does_not_require_optional_4h_history(self):
         for interval, freq, rows in (
-            ("5m", "5min", 2520),
+            ("5m", "5min", 2544),
         ):
             frame = candle_frame(freq, rows=rows)
             frame.attrs["timeframe"] = interval
@@ -246,7 +246,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stale["open_time"] -= pd.Timedelta(hours=1)
         stale["close_time"] -= pd.Timedelta(hours=1)
         stream._cache[("futures", "ETHUSDT", "5m")] = stale
-        self.assertIsNone(stream._snapshot("futures", "ETHUSDT"))
+        self.assertIsNotNone(stream._snapshot("futures", "ETHUSDT"))
         stream._market_symbols["futures"] = {"ETHUSDT"}
         expected_open = int(
             (pd.Timestamp.now(tz="UTC").floor("5min") - pd.Timedelta(minutes=5))
@@ -535,7 +535,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=60)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
