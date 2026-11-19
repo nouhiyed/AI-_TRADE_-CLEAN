@@ -33,7 +33,7 @@ class SpotDemoMixin:
         else:
             ref = Decimal(str(reference_price))
             mid = ref
-            source = "BINANCE_WS_5M_OPEN"
+            source = "BINANCE_BOOK_TICKER"
         if not ref.is_finite() or ref <= 0 or not mid.is_finite() or mid <= 0:
             raise ValueError("Invalid market price")
         self.demo_execution.update_mark_price(symbol, "SPOT", mid, source=source)
