@@ -1479,7 +1479,7 @@ class TradingCoordinator(SpotDemoMixin):
             stream = getattr(self, "market_stream", None)
             snapshot = getattr(stream, "_snapshot", None)
             if callable(snapshot):
-                frames = snapshot(domain, symbol)
+                frames = snapshot(domain, symbol, max_age_seconds=90)
         if not isinstance(frames, dict) or not frames:
             reason = "Warmed WebSocket candle cache is not ready for this symbol"
             return {**base, "success": False, "decision_status": "WAITING_FOR_CACHE",
