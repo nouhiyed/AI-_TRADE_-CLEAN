@@ -169,6 +169,18 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
         self.assertGreaterEqual(len(snapshot["1h"]), 210)
 
+    def test_analysis_snapshot_rejects_stale_5m_cache(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=0)
+        frame = candle_frame("5min", rows=800)
+        frame.attrs["timeframe"] = "5m"
+        frame["open_time"] -= pd.Timedelta(minutes=10)
+        frame["close_time"] -= pd.Timedelta(minutes=10)
+        stream._merge_frame("futures", "STALEUSDT", "5m", frame)
+        self.assertIsNotNone(stream._snapshot("futures", "STALEUSDT"))
+        self.assertIsNone(stream._snapshot(
+            "futures", "STALEUSDT", max_age_seconds=90))
+
     def test_spot_4h_history_refreshes_once_per_hour(self):
         class FourHourFeed:
             def __init__(self):
