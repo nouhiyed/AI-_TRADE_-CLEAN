@@ -1123,6 +1123,7 @@ class Autopilot:
                 planned_entry = atr = actual_entry = Decimal("0")
                 signal_age_ms, drift_atr, max_drift = 10**12, None, Decimal("0")
                 drift = Decimal("0")
+                deviation_pct = 0.0
             if (not planned_entry.is_finite() or planned_entry <= 0
                     or not atr.is_finite() or atr <= 0
                     or not actual_entry.is_finite() or actual_entry <= 0):
