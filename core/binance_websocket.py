@@ -24,7 +24,7 @@ class BinanceKlineStream:
     }
     CACHE_LIMITS = {
         "futures": {"5m": 800, "15m": 267, "1h": 800},
-        "spot": {"5m": 2520, "15m": 840, "1h": 210, "4h": 210},
+        "spot": {"5m": 2544, "15m": 848, "1h": 212, "4h": 210},
     }
     REQUIRED_ROWS = {
         "futures": {"5m": 60, "15m": 60, "1h": 60},
