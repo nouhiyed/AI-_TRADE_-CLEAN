@@ -825,9 +825,11 @@ class _TradeShellState extends State<TradeShell>
         ? topRejectRaw.whereType<Map>()
             .map((item) => Map<String, dynamic>.from(item)).toList()
         : <Map<String, dynamic>>[];
-    final topReject = topRejects.isNotEmpty ? topRejects.first : <String, dynamic>{};
-    final topRejectReason = '${topReject['reason'] ?? ''}';
-    final topRejectCount = int.tryParse('${topReject['count'] ?? 0}') ?? 0;
+    final topRejectText = topRejects.take(5).map((item) {
+      final reason = '${item['reason'] ?? ''}';
+      final count = int.tryParse('${item['count'] ?? 0}') ?? 0;
+      return '$reason ($count)';
+    }).where((item) => item.trim().isNotEmpty).join(' | ');
     final scanning = !{'idle', 'error', 'waiting'}.contains(phase);
     final phaseLabel = switch (phase) {
       'loading_universe' => tr('تحميل قائمة العملات', 'Loading coin list'),
@@ -982,10 +984,10 @@ class _TradeShellState extends State<TradeShell>
                 fontWeight: FontWeight.w800,
               ),
             ),
-            if (topRejectReason.isNotEmpty)
+            if (topRejectText.isNotEmpty)
               Text(
-                '${tr('أكثر رفض:', 'TOP REJECT:')} $topRejectReason ($topRejectCount)',
-                maxLines: 1,
+                '${tr('أسباب الرفض:', 'TOP REJECTIONS:')} $topRejectText',
+                maxLines: 3,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(color: widget.muted, fontSize: 8),
               ),
