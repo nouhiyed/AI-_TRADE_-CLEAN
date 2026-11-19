@@ -878,7 +878,7 @@ class BinanceKlineStream:
                 for symbol in current_symbols:
                     if symbol in ready_after:
                         continue
-                    for interval in self._active_intervals(market):
+                    for interval in self.REQUIRED_ROWS[market]:
                         with self._cache_lock:
                             frame = self._cache.get((market, symbol, interval))
                         reason = self._frame_health_reason(market, interval, frame)
