@@ -1442,11 +1442,17 @@ class TradingCoordinator(SpotDemoMixin):
             return {**base, "decision_status": "REJECTED",
                     "decision_reason": reason, "reason": reason}
 
-        # A chart submission belongs to one selected market/agent. Do not
-        # fetch the other market or run its agent on this request.
-        analysis = self.analyze_live(
-            symbol, preferred_timeframe=timeframe, domains=[domain],
-            agent_overrides={domain: agent} if agent is not None else None,
+        # A chart submission belongs to one selected market/agent. Use the
+        # warmed cache only; never issue REST candle requests on this path.
+        stream = getattr(self, "market_stream", None)
+        frames = stream._snapshot(domain, symbol) if stream is not None else None
+        if frames is None:
+            reason = domain.title() + " candle cache is still warming"
+            return {**base, "success": True, "decision_status": "REJECTED",
+                    "decision_reason": reason, "reason": reason}
+        analysis = self.analyze_live_from_frames(
+            symbol, domain, frames,
+            agent=agent if agent is not None else self.agents[domain],
         )
         signal = analysis.get("signals", {}).get(domain, {})
         if not isinstance(signal, dict) or signal.get("error"):
@@ -1655,14 +1661,27 @@ class TradingCoordinator(SpotDemoMixin):
                 active = progress_state["active"]
             if callable(progress_callback):
                 progress_callback({
-                    "phase": "fetching_market_data",
+                    "phase": "reading_candle_cache",
                     "current_symbol": symbol,
                     "started_in_batch": started,
                     "active_workers": active,
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["futures"], include_orderbook=False)
+                stream = getattr(self, "market_stream", None)
+                if stream is None:
+                    return {
+                        "signals": {},
+                        "data_errors": {"cache": "Futures WebSocket cache is unavailable"},
+                    }
+                frames = stream._snapshot("futures", symbol)
+                if frames is None:
+                    return {
+                        "signals": {},
+                        "data_errors": {"cache": "Futures WebSocket candle cache is still warming"},
+                    }
+                return self.analyze_live_from_frames(
+                    symbol, "futures", frames, agent=self.agents["futures"])
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
@@ -1699,8 +1718,14 @@ class TradingCoordinator(SpotDemoMixin):
                     })
                 try:
                     signal = analysis.get("signals", {}).get("futures", {})
-                    if not isinstance(signal, dict):
-                        reject("Missing Futures analysis", symbol)
+                    if not isinstance(signal, dict) or not signal:
+                        data_errors = analysis.get("data_errors") or {}
+                        if data_errors:
+                            errors[symbol] = "; ".join(
+                                str(value) for value in data_errors.values())
+                            reject("Futures candle cache or analysis data unavailable", symbol)
+                        else:
+                            reject("Missing Futures analysis", symbol)
                         continue
 
                     direction = str(signal.get("direction", "WAIT")).upper()
