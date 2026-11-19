@@ -831,6 +831,9 @@ class BinanceKlineStream:
                             self._merge_frame("spot", symbol, "4h", frame4h)
                             self._last_spot_4h_refresh[symbol] = time.monotonic()
                         except Exception as error:
+                            # Respect the hourly refresh cadence even on a
+                            # failed request; do not create a REST retry loop.
+                            self._last_spot_4h_refresh[symbol] = time.monotonic()
                             with self._lock:
                                 self._status[market]["last_error"] = (
                                     symbol + " 4h hourly refresh: " + str(error))
