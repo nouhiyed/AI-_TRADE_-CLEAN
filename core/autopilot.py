@@ -60,6 +60,7 @@ class Autopilot:
         self._symbol_audits = {"futures": {}, "spot": {}}
         self._symbol_universes = {"futures": set(), "spot": set()}
         self._universe_initialized = {"futures": False, "spot": False}
+        self._funnel_cycles = {"futures": OrderedDict(), "spot": OrderedDict()}
         self._symbol_audit_totals = {
             domain: {
                 "events_received": 0, "cache_waiting": 0,
@@ -243,6 +244,53 @@ class Autopilot:
             with self._analysis_stats_lock:
                 self._analysis_agents_created[domain] += 1
         return current
+
+    def _record_funnel(self, domain, candle_open_ms, stage, reason=None):
+        domain = str(domain).strip().lower()
+        if domain not in self._funnel_cycles:
+            return
+        candle_open_ms = int(candle_open_ms or 0)
+        if candle_open_ms <= 0:
+            return
+        with self._event_lock:
+            cycles = self._funnel_cycles[domain]
+            cycle = cycles.setdefault(candle_open_ms, {
+                "candle_open_time_ms": candle_open_ms,
+                "events_received": 0, "filter_passed": 0,
+                "strategy_accepted": 0, "valid_plan": 0,
+                "risk_approved": 0, "trade_opened": 0,
+                "rejection_reasons": {},
+            })
+            if stage in ("events_received", "filter_passed", "strategy_accepted",
+                         "valid_plan", "risk_approved", "trade_opened"):
+                cycle[stage] = int(cycle.get(stage, 0)) + 1
+            if reason:
+                reasons = cycle["rejection_reasons"]
+                label = str(reason).strip()[:240] or "Unspecified rejection"
+                reasons[label] = int(reasons.get(label, 0)) + 1
+            while len(cycles) > 12:
+                cycles.popitem(last=False)
+
+    def funnel_status(self):
+        with self._event_lock:
+            result = {}
+            for domain, cycles in self._funnel_cycles.items():
+                snapshots = []
+                for cycle in cycles.values():
+                    reasons = sorted(
+                        cycle.get("rejection_reasons", {}).items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )[:5]
+                    snapshots.append({
+                        **{key: value for key, value in cycle.items()
+                           if key != "rejection_reasons"},
+                        "top_rejection_reasons": [
+                            {"reason": reason, "count": count}
+                            for reason, count in reasons
+                        ],
+                    })
+                result[domain] = snapshots[-6:]
+            return {"success": True, "markets": result}
 
     def _record_symbol_audit(self, domain, symbol, state, increment=None,
                              also_increment=None, **details):
@@ -558,6 +606,7 @@ class Autopilot:
             return False
 
         identity = (domain, symbol, open_time)
+        self._record_funnel(domain, open_time, "events_received")
         with self._event_lock:
             if identity in self._event_seen:
                 return False
@@ -787,6 +836,8 @@ class Autopilot:
 
             frames = candle.get("market_data")
             if not isinstance(frames, dict) or not frames:
+                self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                    "filter_passed", "Missing warmed candle cache")
                 self.last_result = {
                     "status": "WAITING_FOR_CACHE", "phase": "websocket_analysis",
                     "domain": domain, "symbol": symbol,
@@ -814,6 +865,9 @@ class Autopilot:
                     )
                     return
                 if not prefilter_info.get("candidate"):
+                    self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                        "filter_passed",
+                                        prefilter_info.get("reason") or "5m prefilter rejected")
                     with self._analysis_stats_lock:
                         self._analysis_stats[domain]["prefilter_rejected"] += 1
                     self._record_symbol_audit(
@@ -822,6 +876,8 @@ class Autopilot:
                         reason=prefilter_info.get("reason") or "No 5m-local setup",
                     )
                     return
+                self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                    "filter_passed")
                 with self._analysis_stats_lock:
                     self._analysis_stats[domain]["prefilter_passed"] += 1
                     self._analysis_stats[domain]["deep_analysis"] += 1
@@ -849,6 +905,8 @@ class Autopilot:
                     or (analysis.get("data_errors") or {}).get("market_data")
                     or "Agent returned no V3 signal"
                 )
+                self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                    "strategy_accepted", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                 )
@@ -885,11 +943,17 @@ class Autopilot:
                     or signal.get("reason")
                     or "V3 did not approve a valid 5m entry plan"
                 )
+                self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                    "strategy_accepted", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                 )
                 return
 
+            self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                "strategy_accepted")
+            self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                "valid_plan")
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["actionable"] += 1
             self._record_symbol_audit(
@@ -1096,6 +1160,10 @@ class Autopilot:
                     symbol, domain="spot", risk_pct=float(cfg["risk_pct"]),
                     signal_override=signal, entry_reference_price=entry_price)
             if trade.get("approved"):
+                self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
+                                    "risk_approved")
+                self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
+                                    "trade_opened")
                 self._cooldown[symbol] = self.clock() + float(cfg["cooldown_min"]) * 60
                 result["opened"].append({
                     "domain": domain, "symbol": symbol,
@@ -1105,8 +1173,11 @@ class Autopilot:
                 result["status"] = "COMPLETED"
                 result["phase"] = "opened"
             else:
+                reason = trade.get("reason", "Execution rejected")
+                self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
+                                    "risk_approved", reason=reason)
                 result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": trade.get("reason", "Execution rejected")})
+                result["skipped"].append({"reason": reason})
         except Exception as error:
             result["status"] = "ERROR"
             result["error"] = str(error)
@@ -1123,6 +1194,9 @@ class Autopilot:
                 )
             elif result.get("skipped"):
                 reasons = [str(item.get("reason", "")) for item in result["skipped"]]
+                for reason in reasons:
+                    self._record_funnel(domain, int((pending.get("signal") or {}).get(
+                        "signal_candle_open_time") or 0), "trade_opened", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "entry_skipped", increment="entry_skipped",
                     reason="; ".join(reason for reason in reasons if reason)[:500],
