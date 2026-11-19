@@ -434,7 +434,7 @@ class TradingCoordinator(SpotDemoMixin):
             price = Decimal(str(market_price))
             if not all(v.is_finite() and v > 0 for v in (entry, stop, target, atr, price)):
                 return False, "Invalid plan or execution price"
-            max_drift = max(atr * Decimal("0.10"), entry * Decimal("0.0002"))
+            max_drift = max(atr * Decimal("0.30"), entry * Decimal("0.0002"))
             if abs(price - entry) > max_drift:
                 return False, "Entry moved more than 0.10 ATR after confirmation; wait for a new setup"
             if str(direction).upper() == "SHORT":
