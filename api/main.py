@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.17.7"
+API_VERSION = "2026.11.19.1"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -122,13 +122,10 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
             overlap_symbols.update(bucket.intersection(other))
     accounted = set().union(*buckets) if buckets else set()
     unclassified = universe - accounted
+    successful_symbols = max(0, len(completed) - int(analysis_errors or 0))
+    required_successful_symbols = int(math.ceil(len(universe) * 0.95))
     complete = bool(universe) and (
-        completed == universe
-        and not pending_cache
-        and not pending_analysis
-        and not pending_reconcile
-        and not rejected
-        and int(analysis_errors or 0) == 0
+        successful_symbols >= required_successful_symbols
         and not overlap_symbols
         and not unclassified
     )
@@ -137,6 +134,13 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
         "expected_symbols": len(universe),
         "accepted_symbols": len(accepted),
         "completed_symbols": len(completed),
+        "successful_symbols": successful_symbols,
+        "failed_symbols": min(len(completed), int(analysis_errors or 0)),
+        "completion_threshold_percent": 95,
+        "required_successful_symbols": required_successful_symbols,
+        "completion_percent": round(
+            successful_symbols / len(universe) * 100, 2
+        ) if universe else 0.0,
         "pending_cache_symbols": len(pending_cache),
         "pending_analysis_symbols": len(pending_analysis),
         "pending_reconcile_symbols": len(pending_reconcile),
@@ -855,6 +859,11 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json(coordinator.learning.report())
             if path == "/autopilot":
                 return self.send_json(autopilot.status())
+            if path == "/funnel":
+                return self.send_json(
+                    autopilot.funnel_status() if autopilot is not None
+                    else {"success": False, "cycles": []}
+                )
             if path == "/agent/submission":
                 request_id = str(params.get("id", [""])[0]).strip()
                 with submission_jobs_lock:
@@ -901,8 +910,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     and int(coverage[domain].get("cycle_open_time_ms") or 0) == expected_cycle
                     and int(coverage[domain].get("expected_symbols") or 0)
                         == int((stream.get(domain) or {}).get("symbols") or 0)
-                    and int(coverage[domain].get("completed_symbols") or 0)
-                        == int(coverage[domain].get("expected_symbols") or 0)
+                    and int(coverage[domain].get("successful_symbols") or 0)
+                        >= int(coverage[domain].get("required_successful_symbols") or 0)
                     and time.time() - float(coverage[domain].get("updated_at") or 0) <= 30
                     for domain in ("futures", "spot")
                 )
@@ -959,6 +968,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 scan_snapshot["websocket"] = stream_snapshot
                 scan_snapshot["analysis"] = analysis_snapshot
                 scan_snapshot["symbol_auditors"] = auditor_snapshot
+                scan_snapshot["funnel"] = runtime_snapshot.get("funnel", {})
                 return self.send_json({
                     "api_version": API_VERSION,
                     "system": coordinator.get_system_status(),
@@ -969,6 +979,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "analysis_pools": analysis_snapshot,
                     "analysis_metrics": analysis_snapshot,
                     "symbol_auditors": auditor_snapshot,
+                    "funnel": runtime_snapshot.get("funnel", {}),
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
