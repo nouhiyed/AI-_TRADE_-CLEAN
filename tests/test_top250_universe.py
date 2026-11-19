@@ -298,7 +298,7 @@ class Top250UniverseTests(unittest.TestCase):
         self.assertEqual(stream.status()["latest_candle_symbols"]["spot"], 1)
         stream.stop()
 
-    def test_futures_scanner_never_exceeds_250(self):
+    def test_futures_scanner_never_exceeds_top_30(self):
         class Feed:
             def __init__(self):
                 self.requested = None
@@ -315,8 +315,8 @@ class Top250UniverseTests(unittest.TestCase):
 
         universe = scanner.scan_universe(limit=999)
 
-        self.assertEqual(feed.requested, ("futures", 250))
-        self.assertEqual(len(universe), 250)
+        self.assertEqual(feed.requested, ("futures", 30))
+        self.assertEqual(len(universe), 30)
         self.assertEqual(universe[0]["symbol"], "COIN000USDT")
 
 
