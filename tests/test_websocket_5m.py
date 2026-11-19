@@ -126,15 +126,15 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertEqual(full._active_intervals("futures"), ["5m"])
         self.assertEqual(full._active_intervals("spot"), ["5m"])
 
-    def test_full_universe_snapshot_requires_only_closed_5m_history(self):
+    def test_full_universe_snapshot_requires_derived_closed_context(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0)
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         snapshot = stream._snapshot("futures", "BTCUSDT")
         self.assertIsNotNone(snapshot)
-        self.assertEqual(set(snapshot), {"5m"})
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
 
     def test_800_cached_5m_bars_build_closed_15m_and_1h_without_rest(self):
         stream = BinanceKlineStream(
@@ -173,7 +173,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         frame["open_time"] -= pd.Timedelta(minutes=5)
         frame["close_time"] -= pd.Timedelta(minutes=5)
@@ -252,7 +252,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        gap = candle_frame("5min", rows=61)
+        gap = candle_frame("5min", rows=800)
         gap.attrs["timeframe"] = "5m"
         # Binance can omit no-trade intervals. Keep only actual returned bars;
         # no synthetic rows are inserted to fill the time gap.
@@ -270,7 +270,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
             "insufficient_rows",
         )
 
-        stale = candle_frame("5min")
+        stale = candle_frame("5min", rows=800)
         stale.attrs["timeframe"] = "5m"
         stale["open_time"] -= pd.Timedelta(hours=1)
         stale["close_time"] -= pd.Timedelta(hours=1)
@@ -686,7 +686,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=60)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
@@ -711,7 +711,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=61)
+        frame = candle_frame("5min", rows=801)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         expected_open = int(frame.iloc[-2]["open_time"].timestamp() * 1000)
@@ -923,7 +923,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         self.assertEqual(feed.calls, 2)
 
     def test_full_250_symbol_cycle_reaches_the_analysis_queue(self):
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
         symbols = ["COIN%03dUSDT" % index for index in range(250)]
@@ -1043,7 +1043,7 @@ class LateClosedCandleAuditTests(unittest.TestCase):
                     )},
                 )()
                 autopilot.c.last_signals = {}
-                autopilot.c.analyze_live = lambda *_args, **_kwargs: {
+                autopilot.c.analyze_live_from_frames = lambda *_args, **_kwargs: {
                     "signals": {
                         "futures": {
                             "symbol": "BTCUSDT",
