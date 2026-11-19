@@ -426,7 +426,7 @@ class Autopilot:
                     reason="Closed candle exceeded the 10-minute audit retention window",
                 )
                 continue
-            if age_ms > 30000:
+            if age_ms > 90000:
                 candle["audit_only"] = True
             self._analyze_ws_close(domain, symbol, candle, received_at_ms)
 
@@ -619,7 +619,7 @@ class Autopilot:
                 reason="Cache became ready after the 10-minute audit retention window",
             )
             return False
-        replay["audit_only"] = bool(replay.get("audit_only")) or age_ms > 30000
+        replay["audit_only"] = bool(replay.get("audit_only")) or age_ms > 90000
         accepted = self._queue_latest_analysis(domain, symbol, replay, count_event=False)
         if accepted:
             self._record_symbol_audit(
@@ -715,32 +715,18 @@ class Autopilot:
             return {"success": False, "reason": "The agent signal is not an approved V3 setup"}
         now_ms = int(self.clock() * 1000)
         generated_at = int(signal.get("signal_generated_at_ms") or 0)
-        if generated_at <= 0 or now_ms - generated_at > 30000 or generated_at > now_ms + 2000:
-            return {"success": False, "reason": "Agent signal is stale; request a fresh 5m analysis"}
-        next_open = ((now_ms // 300000) + 1) * 300000
-        key = (domain, symbol)
-        with self._event_lock:
-            latest = self._latest_open.get(key)
-            if latest and int(latest.get("open_time", 0)) >= next_open:
-                next_open = int(latest["open_time"]) + 300000
-            pending = {
-                "signal": dict(signal), "next_open_time": next_open,
-                "signal_open_time": int(signal.get("signal_candle_open_time") or 0),
-                "created_at": self.clock(), "manual": True,
-            }
-            self._pending_entries[key] = pending
-            current = self._latest_open.get(key)
-            ready = bool(current and int(current.get("open_time", 0)) == next_open)
-            if ready:
-                self._pending_entries.pop(key, None)
-        if ready:
-            self._event_executor.submit(self._execute_ws_entry, domain, symbol,
-                                        pending, current)
+        if generated_at <= 0 or now_ms - generated_at > 90000 or generated_at > now_ms + 2000:
+            return {"success": False, "reason": "Agent signal is older than the 90-second execution window"}
+        pending = {
+            "signal": dict(signal),
+            "signal_open_time": int(signal.get("signal_candle_open_time") or 0),
+            "created_at": self.clock(), "manual": True,
+        }
+        self._event_executor.submit(self._execute_ws_entry, domain, symbol, pending, None)
         return {
-            "success": True, "queued": True, "opened": False,
-            "decision_status": "QUEUED",
-            "decision_reason": "Agent approved; waiting for the next 5m candle open",
-            "next_entry_candle_open_ms": next_open,
+            "success": True, "queued": False, "opened": False,
+            "decision_status": "SUBMITTED",
+            "decision_reason": "Agent approved; immediate execution submitted with ATR drift guard",
         }
 
     def _analyze_ws_close(self, domain, symbol, candle, received_at_ms=None):
@@ -925,38 +911,32 @@ class Autopilot:
                 if not cfg.get("enabled") or not cfg.get("trade_" + domain):
                     return
                 key = (domain, symbol)
-                expected_open = int(candle["close_time"]) + 1
                 pending = {
                     "signal": signal,
                     "signal_open_time": int(candle["open_time"]),
-                    "next_open_time": expected_open,
                     "created_at": time.time(),
+                    "manual": False,
                 }
                 self._pending_entries[key] = pending
-                already_open = self._latest_open.get(key)
             self._record_symbol_audit(
                 domain, symbol, "entry_queued", increment="entry_queued",
-                next_open_time_ms=expected_open,
+                entry_timing="immediate_after_analysis",
             )
-            # If the next-candle event arrived during REST context analysis,
-            # consume it immediately, but execution still validates its age,
-            # exact candle, price deviation, risk and agent state.
-            if already_open and int(already_open.get("open_time", 0)) == expected_open:
+            try:
                 with self._event_lock:
                     current = self._pending_entries.pop(key, None)
                 if current:
-                    try:
-                        self._event_executor.submit(
-                            self._execute_ws_entry, domain, symbol, current, already_open)
-                        self._record_symbol_audit(
-                            domain, symbol, "entry_submitted", increment="entry_submitted",
-                            next_open_time_ms=expected_open,
-                        )
-                    except Exception as error:
-                        self._record_symbol_audit(
-                            domain, symbol, "execution_error", increment="errors",
-                            reason="Execution writer submission failed: " + str(error),
-                        )
+                    self._event_executor.submit(
+                        self._execute_ws_entry, domain, symbol, current, None)
+                    self._record_symbol_audit(
+                        domain, symbol, "entry_submitted", increment="entry_submitted",
+                        entry_timing="immediate_after_analysis",
+                    )
+            except Exception as error:
+                self._record_symbol_audit(
+                    domain, symbol, "execution_error", increment="errors",
+                    reason="Execution writer submission failed: " + str(error),
+                )
         except Exception as error:
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["failed"] += 1
@@ -1006,25 +986,16 @@ class Autopilot:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Agent is stopped"})
                 return
-            event_time = int(opening_candle.get("event_time") or 0)
-            open_time = int(opening_candle.get("open_time") or 0)
-            entry_price = float(opening_candle.get("open") or 0)
             local_now_ms = int(time.time() * 1000)
-            if (int(pending.get("next_open_time") or 0) != open_time
-                    or opening_candle.get("first_update") is not True
-                    or opening_candle.get("source") != "binance_websocket"
-                    or entry_price <= 0 or event_time < open_time
-                    or event_time - open_time > 10000
-                    or abs(local_now_ms - event_time) > 30000):
-                result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
-                return
             signal = dict(pending["signal"])
-            signal_close_time = int(signal.get("signal_candle_close_time") or 0)
-            if signal_close_time and signal_close_time + 1 != open_time:
+            generated_at = int(signal.get("signal_generated_at_ms") or 0)
+            age_ms = local_now_ms - generated_at
+            if generated_at <= 0 or age_ms < -2000 or age_ms > 90000:
                 result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": "Entry is not the immediate next 5m candle"})
+                result["skipped"].append({"reason": "Signal exceeded the 90-second execution window"})
                 return
+            if not isinstance(opening_candle, dict):
+                opening_candle = {}
             if str(signal.get("symbol", "")).upper() != symbol:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Signal symbol mismatch"})
@@ -1047,25 +1018,30 @@ class Autopilot:
                 return
             try:
                 planned_entry = float(plan.get("entry"))
-                max_deviation_pct = float(os.environ.get(
-                    "AI_TRADER_MAX_ENTRY_DEVIATION_PCT_FUTURES" if domain == "futures"
-                    else "AI_TRADER_MAX_ENTRY_DEVIATION_PCT_SPOT",
-                    "0.15" if domain == "futures" else "0.20"))
-            except (TypeError, ValueError):
-                planned_entry, max_deviation_pct = 0.0, 0.0
-            if (not math.isfinite(planned_entry) or planned_entry <= 0
-                    or not math.isfinite(max_deviation_pct) or max_deviation_pct <= 0):
+                atr = float(plan.get("atr"))
+                quote = self.c.market_feed.fetch_book_ticker(
+                    "spot" if domain == "spot" else "futures", symbol)
+                side = "ask" if normalized == "LONG" else "bid"
+                entry_price = float(quote.get(side) or 0)
+            except (TypeError, ValueError, KeyError, Exception) as error:
                 result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": "Invalid planned entry or deviation guard"})
+                result["skipped"].append({"reason": "Current executable bid/ask unavailable: " + str(error)})
                 return
-            deviation_pct = abs(entry_price - planned_entry) / planned_entry * 100.0
-            if deviation_pct > max_deviation_pct:
+            if (not math.isfinite(planned_entry) or planned_entry <= 0
+                    or not math.isfinite(atr) or atr <= 0
+                    or not math.isfinite(entry_price) or entry_price <= 0):
+                result["status"] = "SKIPPED"
+                result["skipped"].append({"reason": "Invalid signal entry, ATR or executable quote"})
+                return
+            drift = abs(entry_price - planned_entry)
+            max_drift = 0.3 * atr
+            deviation_pct = drift / planned_entry * 100.0
+            if drift > max_drift:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({
-                    "reason": "Entry price moved %.4f%% from the approved signal price (limit %.4f%%)"
-                              % (deviation_pct, max_deviation_pct),
-                    "entry_deviation_pct": deviation_pct,
-                    "max_entry_deviation_pct": max_deviation_pct,
+                    "reason": "Price drift %.4f exceeds 0.3 ATR guard %.4f" % (drift, max_drift),
+                    "entry_drift": drift, "max_entry_drift": max_drift,
+                    "atr": atr, "entry_deviation_pct": deviation_pct,
                 })
                 return
             confidence = float(signal.get("confidence") or 0)
@@ -1099,10 +1075,13 @@ class Autopilot:
                 result["skipped"].append({"reason": "Context veto: " + str(assessment["veto"])})
                 return
             signal["entry_origin"] = "MANUAL_AGENT_WS_5M" if manual else "AUTOPILOT_WS_5M"
-            signal["entry_open_time"] = open_time
+            signal["entry_open_time"] = int(signal.get("signal_candle_open_time") or 0)
             signal["entry_reference_price"] = entry_price
             signal["execution_sent_at_ms"] = int(time.time() * 1000)
             signal["entry_deviation_pct"] = deviation_pct
+            signal["entry_drift"] = drift
+            signal["entry_atr"] = atr
+            signal["entry_timing"] = "immediate_after_analysis"
             signal["setup_key"] = key
             signal["confidence_adjusted"] = confidence
             self.c.last_signals[domain] = signal
