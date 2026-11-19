@@ -922,7 +922,7 @@ class LateClosedCandleAuditTests(unittest.TestCase):
                     )},
                 )()
                 autopilot.c.last_signals = {}
-                autopilot.c.analyze_live = lambda *_args, **_kwargs: {
+                autopilot.c.analyze_live_from_frames = lambda *_args, **_kwargs: {
                     "signals": {
                         "futures": {
                             "symbol": "BTCUSDT",
