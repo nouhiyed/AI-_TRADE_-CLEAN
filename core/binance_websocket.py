@@ -794,11 +794,8 @@ class BinanceKlineStream:
                     return
                 continue
 
-            # After the one-time REST seed, 5m is WebSocket-only.
-            # Spot 4h is the sole scheduled REST refresh (hourly).
-            if market == "spot":
-                for symbol in current_symbols:
-                    self._refresh_spot_4h_if_due(symbol)
+            # The canonical 5m history is required for analysis. Never let
+            # optional Spot 4h macro refreshes delay the primary 5m bootstrap.
             ready = {
                 symbol for symbol in current_symbols
                 if self._snapshot(market, symbol) is not None
@@ -905,6 +902,15 @@ class BinanceKlineStream:
                     self._status[market]["cache_warmup_completed"] = len(ready_after)
                     self._status[market]["cache_not_ready_reasons"] = reasons_after
                     self._status[market]["cache_not_ready_samples"] = samples_after
+            # Refresh optional Spot 4h context only after the required 5m
+            # cache has had its warmup pass. A slow 4h REST request must never
+            # block the initial analysis cache from becoming ready.
+            if market == "spot" and not self._stop.is_set():
+                for symbol in current_symbols:
+                    if self._stop.is_set():
+                        return
+                    self._refresh_spot_4h_if_due(symbol)
+
             # Re-read the registered universe after each pass. This worker is
             # intentionally retained across WebSocket reconnects.
             if self._stop.wait(10):
