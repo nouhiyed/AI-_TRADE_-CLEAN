@@ -1578,10 +1578,9 @@ class TradingCoordinator(SpotDemoMixin):
         signal["trade_plan"] = plan
         self.last_signals[domain] = signal
 
-        # A chart submission is an agent decision, not an immediate market order.
-        # The API queues approved decisions and the WebSocket opens them only on
-        # the first update of the following 5m candle.
-        reason = "Agent approved the setup; waiting for the next 5m candle open"
+        # The API job queue is asynchronous, but execution itself is immediate
+        # after the current executable quote passes the 0.3 ATR drift guard.
+        reason = "Agent approved the setup; immediate execution will apply the 90-second and 0.3 ATR guards"
         return {
             **base, "success": True, "opened": False,
             "decision_status": "QUEUED", "decision_reason": reason,
