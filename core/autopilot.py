@@ -793,6 +793,7 @@ class Autopilot:
         """Run the 5m symbol gate, then route candidates to the full V3 worker."""
         analysis_started_at_ms = int(time.time() * 1000)
         received_at_ms = int(received_at_ms or candle.get("received_at_ms") or analysis_started_at_ms)
+        cycle_open_time_ms = int(candle.get("open_time") or 0)
         prefilter_info = None
         try:
             with self._analysis_stats_lock:
