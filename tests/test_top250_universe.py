@@ -43,6 +43,15 @@ class Top30UniverseTests(unittest.TestCase):
         self.assertEqual(stream._active_intervals("spot"), ["5m"])
         stream.stop()
 
+    def test_runtime_environment_cannot_expand_or_shrink_universe_accidentally(self):
+        for configured in ("250", "0", "-1", "invalid"):
+            with patch.dict("os.environ", {"AI_TRADER_WS_MAX_SYMBOLS": configured}):
+                stream = BinanceKlineStream(
+                    RankedMarketFeed(), lambda _market, _event: None
+                )
+                self.assertEqual(stream.max_symbols, 30, configured)
+                stream.stop()
+
     def test_spot_market_data_uses_official_market_data_only_rest_endpoint(self):
         self.assertEqual(
             BinanceMarketData.BASE_URLS["spot"],
