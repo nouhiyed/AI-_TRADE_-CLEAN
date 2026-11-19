@@ -1391,6 +1391,19 @@ class TradingCoordinator(SpotDemoMixin):
             signal["symbol"] = symbol
             signal["signal_timeframe"] = "5m"
             signal["signal_source"] = "BINANCE_WEBSOCKET_CACHE"
+            latest_5m = frames["5m"].iloc[-1]
+            open_value = latest_5m["open_time"]
+            close_value = latest_5m["close_time"]
+            signal["signal_candle_open_time"] = (
+                int(open_value.timestamp() * 1000)
+                if hasattr(open_value, "timestamp") else int(open_value)
+            )
+            signal["signal_candle_close_time"] = (
+                int(close_value.timestamp() * 1000)
+                if hasattr(close_value, "timestamp") else int(close_value)
+            )
+            signal.setdefault(
+                "signal_generated_at_ms", signal["signal_candle_close_time"])
             signal["strategy_tag"] = (
                 "v3_" + str(plan.get("setup", "no_setup")).lower())
             if plan.get("success") is True and self.market_context is not None:
@@ -1445,7 +1458,7 @@ class TradingCoordinator(SpotDemoMixin):
         # A chart submission belongs to one selected market/agent. Use the
         # warmed cache only; never issue REST candle requests on this path.
         stream = getattr(self, "market_stream", None)
-        frames = stream._snapshot(domain, symbol) if stream is not None else None
+        frames = stream._snapshot(domain, symbol, max_age_seconds=90) if stream is not None else None
         if frames is None:
             reason = domain.title() + " candle cache is still warming"
             return {**base, "success": True, "decision_status": "REJECTED",
@@ -1470,7 +1483,10 @@ class TradingCoordinator(SpotDemoMixin):
             return {**base, "success": True, "decision_status": "REJECTED",
                     "decision_reason": reason, "reason": reason, "signal": signal}
         signal["chart_market"] = domain
-        signal["signal_generated_at_ms"] = int(time.time() * 1000)
+        signal.setdefault(
+            "signal_generated_at_ms",
+            int(signal.get("signal_candle_close_time") or time.time() * 1000),
+        )
         direction = str(signal.get("direction", "WAIT")).strip().upper()
         if domain == "futures":
             is_long = direction == "LONG"
@@ -1674,7 +1690,7 @@ class TradingCoordinator(SpotDemoMixin):
                         "signals": {},
                         "data_errors": {"cache": "Futures WebSocket cache is unavailable"},
                     }
-                frames = stream._snapshot("futures", symbol)
+                frames = stream._snapshot("futures", symbol, max_age_seconds=90)
                 if frames is None:
                     return {
                         "signals": {},
@@ -1893,7 +1909,7 @@ class TradingCoordinator(SpotDemoMixin):
                         "signals": {},
                         "data_errors": {"cache": "Spot WebSocket cache is unavailable"},
                     }
-                frames = stream._snapshot("spot", symbol)
+                frames = stream._snapshot("spot", symbol, max_age_seconds=90)
                 if frames is None:
                     return {
                         "signals": {},
