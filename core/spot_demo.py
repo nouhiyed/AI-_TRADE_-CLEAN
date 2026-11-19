@@ -91,7 +91,15 @@ class SpotDemoMixin:
         for item in universe:
             symbol = item["symbol"]
             try:
-                analysis = self.analyze_live(symbol, domains=["spot"])
+                stream = getattr(self, "market_stream", None)
+                frames = (
+                    stream._snapshot("spot", symbol, max_age_seconds=90)
+                    if stream is not None else None
+                )
+                if frames is None:
+                    raise RuntimeError("Spot WebSocket candle cache is unavailable or stale")
+                analysis = self.analyze_live_from_frames(
+                    symbol, "spot", frames, agent=self.agents["spot"])
                 signal = analysis.get("signals", {}).get("spot", {})
                 opp = self._as_opportunity(item, signal, "spot")
                 if opp:
