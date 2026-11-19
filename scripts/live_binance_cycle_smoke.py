@@ -103,6 +103,33 @@ def main():
 
             stream.start()
             status, ready_markets = wait_for_stream(stream)
+            # GitHub-hosted runners can be geo-blocked by Binance (HTTP 451).
+            # This is an environment limitation, not an application regression:
+            # report it explicitly and let backend tests/APK build remain usable.
+            region_blocked = any(
+                "HTTP 451" in str(status.get(market, {}).get("last_error") or "")
+                or "legal/geographic restriction" in str(
+                    status.get(market, {}).get("last_error") or "").lower()
+                for market in ("futures", "spot")
+            )
+            if region_blocked:
+                print(json.dumps({
+                    "status": "skipped_hosted_runner_region_restriction",
+                    "success": None,
+                    "markets": {
+                        market: {
+                            "websocket_connected": bool(
+                                status.get(market, {}).get("fully_connected")),
+                            "symbols": int(status.get(market, {}).get("symbols", 0)),
+                            "cache_ready_symbols": int(
+                                status.get(market, {}).get("cache_ready_symbols", 0)),
+                            "last_error": status.get(market, {}).get("last_error"),
+                            "verified": False,
+                        } for market in ("futures", "spot")
+                    },
+                    "trading_enabled": False,
+                }, indent=2, sort_keys=True))
+                return
             coverage = {}
             if ready_markets:
                 coverage = wait_for_coverage(api_runtime, ready_markets)
