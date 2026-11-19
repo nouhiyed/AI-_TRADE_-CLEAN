@@ -44,11 +44,11 @@ class BinanceKlineStream:
         self.on_kline = on_kline
         self.on_universe = on_universe
         self.on_cache_ready = on_cache_ready
-        # Production defaults to the daily top-250 universe. Zero remains
+        # Production defaults to the daily top-30 universe. Zero remains
         # an explicit full-market setting for isolated cache tests only.
         raw_limit = (
             max_symbols if max_symbols is not None
-            else os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "250")
+            else os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "30")
         )
         try:
             self.max_symbols = max(0, int(raw_limit))
