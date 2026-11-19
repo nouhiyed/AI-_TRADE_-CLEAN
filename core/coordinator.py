@@ -512,7 +512,17 @@ class TradingCoordinator(SpotDemoMixin):
                 "features": self._learning_features(signal),
                 "timeframe": record["timeframe"],
                 "chart_timeframe": record["timeframe"],
+                "actual_risk": reservation.get("risk"),
+                "requested_risk": reservation.get("requested_risk"),
+                "size_capped": bool(reservation.get("size_capped")),
+                "margin_used": reservation.get("margin"),
+                "notional": reservation.get("notional"),
             }
+            record["risk_amount"] = reservation.get("risk")
+            record["requested_risk_amount"] = reservation.get("requested_risk")
+            record["size_capped"] = bool(reservation.get("size_capped"))
+            record["margin_used"] = reservation.get("margin")
+            record["notional"] = reservation.get("notional")
             confidence = float(signal.get("confidence") or 0)
             domain = record.get("domain", "futures")
             key = signal.get("setup_key") or make_setup_key(
