@@ -1057,7 +1057,10 @@ class Autopilot:
             try:
                 planned_entry = float(plan.get("entry"))
                 atr = float(plan.get("atr"))
-                quote = self.c.market_feed.fetch_book_ticker(
+                quote_feed = getattr(self.c, "execution_quote_feed", None)
+                if quote_feed is None:
+                    quote_feed = self.c.market_feed
+                quote = quote_feed.fetch_book_ticker(
                     "spot" if domain == "spot" else "futures", symbol)
                 side = "ask" if normalized == "LONG" else "bid"
                 entry_price = float(quote.get(side) or 0)
@@ -1070,6 +1073,11 @@ class Autopilot:
                     or not math.isfinite(entry_price) or entry_price <= 0):
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Invalid signal entry, ATR or executable quote"})
+                return
+            quote_received_at_ms = int(time.time() * 1000)
+            if quote_received_at_ms - generated_at > 90000:
+                result["status"] = "SKIPPED"
+                result["skipped"].append({"reason": "Signal exceeded 90 seconds while fetching executable quote"})
                 return
             drift = abs(entry_price - planned_entry)
             max_drift = 0.3 * atr
