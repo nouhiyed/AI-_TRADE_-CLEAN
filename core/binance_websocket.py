@@ -655,7 +655,7 @@ class BinanceKlineStream:
                     "source": "binance_websocket_cache",
                 })
                 frames[interval] = copied
-            if market == "spot" and not self.fast_scan_mode:
+            if market == "spot":
                 optional_four_hour = self._cache.get((market, symbol, "4h"))
                 if self._frame_healthy(market, "4h", optional_four_hour):
                     copied = optional_four_hour.copy()
