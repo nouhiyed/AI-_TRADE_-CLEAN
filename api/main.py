@@ -512,6 +512,10 @@ def initialize_runtime():
         on_universe=autopilot.register_symbol_universe,
         on_cache_ready=autopilot.on_symbol_cache_ready,
     )
+    coordinator.market_frame_provider = (
+        lambda domain, symbol: market_stream._snapshot(domain, symbol)
+        if market_stream else None
+    )
 
 
 submission_store_path = PROJECT_ROOT / "data" / "agent_submissions.json"
@@ -1034,7 +1038,25 @@ class APIHandler(BaseHTTPRequestHandler):
                         "success": False, "symbol": symbol,
                         "reason": "Symbol is outside the current daily top-30 Spot/Futures universes",
                     }, 403)
-                return self.send_json(coordinator.analyze_live(symbol))
+                signals = {}
+                errors = {}
+                for domain in ("futures", "spot"):
+                    if symbol not in selected_market_symbols(domain):
+                        continue
+                    frames = market_stream._snapshot(domain, symbol) if market_stream else None
+                    if not isinstance(frames, dict) or not frames:
+                        errors[domain] = "Warmed WebSocket candle cache is not ready"
+                        continue
+                    result = coordinator.analyze_live_from_frames(
+                        symbol, domain, frames, profile="standard"
+                    )
+                    signals[domain] = (result.get("signals") or {}).get(domain, {})
+                    errors.update(result.get("data_errors") or {})
+                return self.send_json({
+                    "symbol": symbol, "source": "binance_websocket_cache",
+                    "signals": signals, "data_errors": errors,
+                    "success": bool(signals) and not errors,
+                })
 
             if path == "/agent/submit":
                 domain = str(data.get("domain", "")).strip().lower()
