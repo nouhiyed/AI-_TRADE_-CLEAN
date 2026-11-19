@@ -434,6 +434,8 @@ class _TradeShellState extends State<TradeShell>
   final TextEditingController _telegramChatController = TextEditingController();
   Map<String, dynamic> _telegramStatus = {};
   bool _telegramBusy = false;
+  String _autopilotProfile = 'standard';
+  bool _profileBusy = false;
   Timer? _refreshTimer;
   Timer? _statusTimer;
   final Map<String, List<Map<String, double>>> _marketCandles = {};
@@ -466,6 +468,8 @@ class _TradeShellState extends State<TradeShell>
       if (!mounted) return;
       await _loadTelegramStatus();
       if (!mounted) return;
+      await _loadAutopilotProfile();
+      if (!mounted) return;
       await _refreshMarketData(loadSymbols: true);
     }();
     // Poll position state separately so automatic closes leave the live portfolio promptly.
@@ -477,6 +481,37 @@ class _TradeShellState extends State<TradeShell>
       if (!mounted) return;
       await _refreshMarketData();
     });
+  }
+
+  Future<void> _loadAutopilotProfile() async {
+    try {
+      final result = await ApiService.autopilot();
+      final config = result['config'];
+      if (mounted && config is Map) {
+        setState(() => _autopilotProfile =
+            '${config['profile'] ?? 'standard'}' == 'explore' ? 'explore' : 'standard');
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _changeAutopilotProfile(String value) async {
+    if (_profileBusy || !apiOnline) return;
+    setState(() => _profileBusy = true);
+    try {
+      final result = await ApiService.autopilotUpdate({'profile': value});
+      final config = result['config'];
+      if (mounted) {
+        setState(() => _autopilotProfile = config is Map
+            ? '${config['profile'] ?? value}' : value);
+        notify(value == 'explore'
+            ? tr('وضع الاستكشاف مفعّل: مخاطرة 0.10–0.25% وتجاوز فيتوات التأخر والهيكل لجمع البيانات فقط.', 'Explore enabled: 0.10–0.25% risk; late-entry and structure vetoes bypassed for data collection only.')
+            : tr('عاد النظام إلى الوضع القياسي.', 'Returned to Standard profile.'));
+      }
+    } catch (error) {
+      notify('${tr('تعذر تغيير الملف: ', 'Could not change profile: ')}$error');
+    } finally {
+      if (mounted) setState(() => _profileBusy = false);
+    }
   }
 
   Future<void> _refreshStatus() async {
@@ -801,35 +836,6 @@ class _TradeShellState extends State<TradeShell>
     final poolWorkers = int.tryParse('${pool['workers'] ?? 0}') ?? 0;
     final queueDepth = int.tryParse('${pool['queue_depth'] ?? 0}') ?? 0;
     final queueLimit = int.tryParse('${pool['queue_limit'] ?? 0}') ?? 0;
-    final funnelRootRaw = scanStatus['funnel'];
-    final funnelRoot = funnelRootRaw is Map
-        ? Map<String, dynamic>.from(funnelRootRaw)
-        : <String, dynamic>{};
-    final funnelCyclesRaw = funnelRoot['cycles'];
-    final funnelCycles = funnelCyclesRaw is List
-        ? funnelCyclesRaw.whereType<Map>()
-            .map((item) => Map<String, dynamic>.from(item)).toList()
-        : <Map<String, dynamic>>[];
-    final funnel = funnelCycles.firstWhere(
-      (item) => '${item['domain'] ?? ''}'.toLowerCase() == market,
-      orElse: () => <String, dynamic>{},
-    );
-    final funnelEvents = int.tryParse('${funnel['events_received'] ?? 0}') ?? 0;
-    final funnelFilter = int.tryParse('${funnel['filter_passed'] ?? 0}') ?? 0;
-    final funnelStrategy = int.tryParse('${funnel['strategy_accepted'] ?? 0}') ?? 0;
-    final funnelPlans = int.tryParse('${funnel['valid_plans'] ?? 0}') ?? 0;
-    final funnelRisk = int.tryParse('${funnel['risk_approved'] ?? 0}') ?? 0;
-    final funnelOpened = int.tryParse('${funnel['opened'] ?? 0}') ?? 0;
-    final topRejectRaw = funnel['top_rejections'];
-    final topRejects = topRejectRaw is List
-        ? topRejectRaw.whereType<Map>()
-            .map((item) => Map<String, dynamic>.from(item)).toList()
-        : <Map<String, dynamic>>[];
-    final topRejectText = topRejects.take(5).map((item) {
-      final reason = '${item['reason'] ?? ''}';
-      final count = int.tryParse('${item['count'] ?? 0}') ?? 0;
-      return '$reason ($count)';
-    }).where((item) => item.trim().isNotEmpty).join(' | ');
     final scanning = !{'idle', 'error', 'waiting'}.contains(phase);
     final phaseLabel = switch (phase) {
       'loading_universe' => tr('تحميل قائمة العملات', 'Loading coin list'),
@@ -971,26 +977,6 @@ class _TradeShellState extends State<TradeShell>
                 ),
               ],
             ),
-          ],
-          if (funnel.isNotEmpty) ...[
-            const SizedBox(height: 5),
-            Text(
-              '${tr('مسار الإشارات:', 'SIGNAL FUNNEL:')} $funnelEvents → $funnelFilter → $funnelStrategy → $funnelPlans → $funnelRisk → $funnelOpened',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: accent,
-                fontSize: 8,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            if (topRejectText.isNotEmpty)
-              Text(
-                '${tr('أسباب الرفض:', 'TOP REJECTIONS:')} $topRejectText',
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: widget.muted, fontSize: 8),
-              ),
           ],
         ],
       ),
@@ -1199,6 +1185,8 @@ class _TradeShellState extends State<TradeShell>
     scanStatus = scan is Map
         ? Map<String, dynamic>.from(scan)
         : <String, dynamic>{};
+    final funnel = data['funnel'];
+    if (funnel is Map) scanStatus['funnel'] = Map<String, dynamic>.from(funnel);
   }
 
   bool get allAgentsEnabled {
@@ -1705,6 +1693,114 @@ class _TradeShellState extends State<TradeShell>
     );
   }
 
+  Widget _funnelCard() {
+    final rootRaw = scanStatus['funnel'];
+    final root = rootRaw is Map ? Map<String, dynamic>.from(rootRaw) : <String, dynamic>{};
+    final marketsRaw = root['markets'];
+    final markets = marketsRaw is Map ? marketsRaw : const {};
+    Map<String, dynamic> latest(String market) {
+      final raw = markets[market];
+      if (raw is! List || raw.isEmpty || raw.last is! Map) return {};
+      return Map<String, dynamic>.from(raw.last as Map);
+    }
+    Widget marketFunnel(String market, Color accent) {
+      final cycle = latest(market);
+      final marketScanRaw = scanStatus[market];
+      final marketScan = marketScanRaw is Map ? marketScanRaw : const {};
+      final coverageRaw = marketScan['coverage'];
+      final coverage = coverageRaw is Map ? coverageRaw : const {};
+      final errorCount = int.tryParse('${coverage['analysis_errors'] ?? 0}') ?? 0;
+      final successPct = double.tryParse('${coverage['processed_pct'] ?? 0}') ?? 0;
+      final stages = [
+        ('وصلت', 'events_received'),
+        ('اجتازت فلتر البيانات', 'data filter passed'),
+        ('قبلتها الاستراتيجية', 'strategy_accepted'),
+        ('خطة صالحة', 'valid_plan'),
+        ('وافقت المخاطرة', 'risk_approved'),
+        ('صفقات مفتوحة', 'trade_opened'),
+      ];
+      final reasonsRaw = cycle['top_rejection_reasons'];
+      final reasons = reasonsRaw is List ? reasonsRaw.whereType<Map>().toList() : <Map>[];
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(market.toUpperCase(), style: TextStyle(
+            color: accent, fontSize: 11, fontWeight: FontWeight.w900,
+            letterSpacing: 1.1,
+          )),
+          const SizedBox(height: 7),
+          if (cycle.isEmpty)
+            Text(tr('بانتظار أول دورة شموع', 'Waiting for first candle cycle'),
+              style: TextStyle(color: widget.muted, fontSize: 11))
+          else ...[
+            Wrap(
+              spacing: 6, runSpacing: 6,
+              children: stages.map((stage) {
+                final value = int.tryParse('${cycle[stage.$2] ?? 0}') ?? 0;
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: accent.withOpacity(.08),
+                    borderRadius: BorderRadius.circular(9),
+                    border: Border.all(color: accent.withOpacity(.18)),
+                  ),
+                  child: Text('${stage.$1}: $value',
+                    style: TextStyle(color: widget.text, fontSize: 10,
+                      fontWeight: FontWeight.w700)),
+                );
+              }).toList(),
+            ),
+            Text(
+              '${tr('أخطاء التحليل: ', 'Analysis errors: ')}$errorCount  ·  ${tr('نجاح الدورة: ', 'Cycle success: ')}${successPct.toStringAsFixed(1)}%',
+              style: TextStyle(color: errorCount > 0 ? red : widget.muted,
+                fontSize: 10, fontWeight: FontWeight.w700),
+            ),
+            if (reasons.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(tr('أكثر أسباب الرفض', 'Top rejection reasons'),
+                style: TextStyle(color: widget.muted, fontSize: 10,
+                  fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              ...reasons.take(5).map((item) => Padding(
+                padding: const EdgeInsets.only(bottom: 3),
+                child: Text('• ${item['reason'] ?? ''} (${item['count'] ?? 0})',
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: widget.muted, fontSize: 10)),
+              )),
+            ],
+          ],
+        ],
+      );
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: widget.panel.withOpacity(.72),
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: widget.muted.withOpacity(.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.filter_alt_outlined, color: cyan, size: 17),
+            const SizedBox(width: 7),
+            Text(tr('مسار الإشارات — Funnel', 'SIGNAL FUNNEL'),
+              style: TextStyle(color: widget.text, fontSize: 11,
+                fontWeight: FontWeight.w900, letterSpacing: .8)),
+            const Spacer(),
+            Text('/funnel', style: TextStyle(color: widget.muted, fontSize: 9)),
+          ]),
+          const SizedBox(height: 12),
+          marketFunnel('futures', cyan),
+          const SizedBox(height: 12),
+          marketFunnel('spot', blue),
+        ],
+      ),
+    );
+  }
+
   Widget _home() => ListView(
         key: const PageStorageKey('home'),
         padding: const EdgeInsets.fromLTRB(15, 0, 15, 22),
@@ -1731,6 +1827,7 @@ class _TradeShellState extends State<TradeShell>
           const SizedBox(height: 9),
           _scanActivityRow('futures', cyan),
           _scanActivityRow('spot', blue),
+          _funnelCard(),
           const SizedBox(height: 12),
           _activityCard(),
         ],
@@ -2636,6 +2733,38 @@ class _TradeShellState extends State<TradeShell>
                   widget.mode,
                   const Icon(Icons.tune, color: cyan),
                 ),
+                _setting(
+                  Icons.tune,
+                  tr('ملف الاستراتيجية', 'Strategy profile'),
+                  _autopilotProfile == 'explore'
+                      ? tr('استكشاف — جمع بيانات', 'Explore — data only')
+                      : tr('قياسي', 'Standard'),
+                  DropdownButton<String>(
+                    value: _autopilotProfile,
+                    underline: const SizedBox.shrink(),
+                    dropdownColor: widget.panel,
+                    style: TextStyle(color: widget.text, fontSize: 11),
+                    items: [
+                      DropdownMenuItem(value: 'standard',
+                        child: Text(tr('قياسي', 'Standard'))),
+                      DropdownMenuItem(value: 'explore',
+                        child: Text(tr('استكشاف', 'Explore'))),
+                    ],
+                    onChanged: _profileBusy || !apiOnline
+                        ? null : (value) {
+                            if (value != null) _changeAutopilotProfile(value);
+                          },
+                  ),
+                ),
+                if (_autopilotProfile == 'explore')
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                    child: Text(
+                      tr('الاستكشاف للتجميع فقط: مخاطرة 0.10–0.25%، مع تجاوز فيتو الدخول المتأخر والهيكل. لا تدخل صفقاته في إحصاءات القياسي أو التعلم.',
+                         'Explore is data collection only: 0.10–0.25% risk, bypasses late-entry and structure vetoes, and is excluded from Standard stats and learning.'),
+                      style: TextStyle(color: widget.muted, fontSize: 10, height: 1.4),
+                    ),
+                  ),
                 _setting(
                   Icons.shield_outlined,
                   tr('محرك إدارة المخاطر', 'Risk management'),
