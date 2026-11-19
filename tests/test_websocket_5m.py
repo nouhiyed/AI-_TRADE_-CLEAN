@@ -333,7 +333,24 @@ class V3PrefilterTests(unittest.TestCase):
 
 
 class ManualEntryQueueTests(unittest.TestCase):
-    def test_stale_agent_signal_is_rejected(self):
+    def test_agent_signal_older_than_90_seconds_is_rejected(self):
+        now = 1_800_000_000
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json",
+                clock=lambda: now,
+            )
+            signal = {
+                "symbol": "BTCUSDT", "direction": "LONG",
+                "strategy_version": "v3", "signal_generated_at_ms": (now - 91) * 1000,
+                "trade_plan": {"success": True, "strategy_version": "v3", "timeframe": "5m", "direction": "LONG"},
+            }
+            result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
+            self.assertFalse(result["success"])
+            self.assertIn("90-second", result["reason"].lower())
+            autopilot._event_executor.shutdown(wait=True)
+
+    def test_agent_signal_within_90_seconds_is_accepted(self):
         now = 1_800_000_000
         with tempfile.TemporaryDirectory() as directory:
             autopilot = Autopilot(
@@ -346,8 +363,8 @@ class ManualEntryQueueTests(unittest.TestCase):
                 "trade_plan": {"success": True, "strategy_version": "v3", "timeframe": "5m", "direction": "LONG"},
             }
             result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
-            self.assertFalse(result["success"])
-            self.assertIn("stale", result["reason"].lower())
+            self.assertTrue(result["success"])
+            self.assertTrue(result["queued"])
             autopilot._event_executor.shutdown(wait=True)
 
 
