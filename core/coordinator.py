@@ -1488,15 +1488,14 @@ class TradingCoordinator(SpotDemoMixin):
             return {**base, "decision_status": "REJECTED",
                     "decision_reason": reason, "reason": reason}
 
-        # A chart submission belongs to one selected market/agent. Do not
-        # fetch the other market or run its agent on this request.
-        provider = getattr(self, "market_frame_provider", None)
-        frames = provider(domain, symbol) if callable(provider) else None
+        # A chart submission belongs to one selected market/agent. Use only
+        # a fresh, fully warmed WebSocket snapshot; never fall back to REST.
+        stream = getattr(self, "market_stream", None)
+        snapshot = getattr(stream, "_snapshot", None)
+        frames = snapshot(domain, symbol, max_age_seconds=90) if callable(snapshot) else None
         if not isinstance(frames, dict) or not frames:
-            stream = getattr(self, "market_stream", None)
-            snapshot = getattr(stream, "_snapshot", None)
-            if callable(snapshot):
-                frames = snapshot(domain, symbol)
+            provider = getattr(self, "market_frame_provider", None)
+            frames = provider(domain, symbol) if callable(provider) else None
         if not isinstance(frames, dict) or not frames:
             reason = "Warmed WebSocket candle cache is not ready for this symbol"
             return {**base, "success": False, "decision_status": "WAITING_FOR_CACHE",
