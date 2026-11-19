@@ -858,6 +858,10 @@ class Autopilot:
                     domain, symbol, "audit_only_delayed", increment="audit_only",
                     reason="Delayed WebSocket event is retained for coverage only",
                 )
+                self._record_funnel(
+                    domain, int(candle.get("open_time") or 0), "rejection",
+                    reason="Delayed event exceeded the 90-second entry window",
+                )
                 return
 
             self._record_funnel(domain, int(candle.get("open_time") or 0),
