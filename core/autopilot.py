@@ -766,30 +766,17 @@ class Autopilot:
         generated_at = int(signal.get("signal_generated_at_ms") or 0)
         if generated_at <= 0 or now_ms - generated_at > 90000 or generated_at > now_ms + 2000:
             return {"success": False, "reason": "Agent signal is older than the 90-second execution window"}
-        next_open = ((now_ms // 300000) + 1) * 300000
-        key = (domain, symbol)
-        with self._event_lock:
-            latest = self._latest_open.get(key)
-            if latest and int(latest.get("open_time", 0)) >= next_open:
-                next_open = int(latest["open_time"]) + 300000
-            pending = {
-                "signal": dict(signal), "next_open_time": next_open,
-                "signal_open_time": int(signal.get("signal_candle_open_time") or 0),
-                "created_at": self.clock(), "manual": True,
-            }
-            self._pending_entries[key] = pending
-            current = self._latest_open.get(key)
-            ready = bool(current and int(current.get("open_time", 0)) == next_open)
-            if ready:
-                self._pending_entries.pop(key, None)
-        if ready:
-            self._event_executor.submit(self._execute_ws_entry, domain, symbol,
-                                        pending, current)
+        pending = {
+            "signal": dict(signal),
+            "signal_open_time": int(signal.get("signal_candle_open_time") or 0),
+            "created_at": self.clock(), "manual": True, "immediate": True,
+        }
+        self._event_executor.submit(
+            self._execute_ws_entry, domain, symbol, pending, None)
         return {
             "success": True, "queued": True, "opened": False,
             "decision_status": "QUEUED",
-            "decision_reason": "Agent approved; waiting for the next 5m candle open",
-            "next_entry_candle_open_ms": next_open,
+            "decision_reason": "Agent approved; executing against the current Binance bid/ask",
         }
 
     def _analyze_ws_close(self, domain, symbol, candle, received_at_ms=None):
@@ -990,39 +977,28 @@ class Autopilot:
                     return
                 if not cfg.get("enabled") or not cfg.get("trade_" + domain):
                     return
-                key = (domain, symbol)
-                expected_open = int(candle["close_time"]) + 1
                 pending = {
                     "signal": signal,
                     "signal_open_time": int(candle["open_time"]),
-                    "next_open_time": expected_open,
                     "created_at": time.time(),
+                    "immediate": True,
                 }
-                self._pending_entries[key] = pending
-                already_open = self._latest_open.get(key)
             self._record_symbol_audit(
                 domain, symbol, "entry_queued", increment="entry_queued",
-                next_open_time_ms=expected_open,
+                reason="Valid V3 plan queued for immediate current bid/ask execution",
             )
-            # If the next-candle event arrived during REST context analysis,
-            # consume it immediately, but execution still validates its age,
-            # exact candle, price deviation, risk and agent state.
-            if already_open and int(already_open.get("open_time", 0)) == expected_open:
-                with self._event_lock:
-                    current = self._pending_entries.pop(key, None)
-                if current:
-                    try:
-                        self._event_executor.submit(
-                            self._execute_ws_entry, domain, symbol, current, already_open)
-                        self._record_symbol_audit(
-                            domain, symbol, "entry_submitted", increment="entry_submitted",
-                            next_open_time_ms=expected_open,
-                        )
-                    except Exception as error:
-                        self._record_symbol_audit(
-                            domain, symbol, "execution_error", increment="errors",
-                            reason="Execution writer submission failed: " + str(error),
-                        )
+            try:
+                self._event_executor.submit(
+                    self._execute_ws_entry, domain, symbol, pending, None)
+                self._record_symbol_audit(
+                    domain, symbol, "entry_submitted", increment="entry_submitted",
+                    execution_mode="current_book_ticker",
+                )
+            except Exception as error:
+                self._record_symbol_audit(
+                    domain, symbol, "execution_error", increment="errors",
+                    reason="Execution writer submission failed: " + str(error),
+                )
         except Exception as error:
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["failed"] += 1
@@ -1052,10 +1028,12 @@ class Autopilot:
                         "waiting_cache", "agent_stopped"
                     }
 
-    def _execute_ws_entry(self, domain, symbol, pending, opening_candle):
-        """Execute DEMO at the observed next 5m candle open, never on 1m."""
+    def _execute_ws_entry(self, domain, symbol, pending, opening_candle=None):
+        """Execute DEMO at the next 5m open or current bid/ask after analysis."""
+        immediate = bool(pending.get("immediate"))
         result = {
-            "status": "RUNNING", "phase": "next_5m_open",
+            "status": "RUNNING",
+            "phase": "immediate_book_ticker" if immediate else "next_5m_open",
             "domain": domain, "symbol": symbol, "opened": [], "skipped": [],
         }
         try:
@@ -1073,22 +1051,35 @@ class Autopilot:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Agent is stopped"})
                 return
-            event_time = int(opening_candle.get("event_time") or 0)
-            open_time = int(opening_candle.get("open_time") or 0)
-            entry_price = float(opening_candle.get("open") or 0)
-            local_now_ms = int(time.time() * 1000)
-            if (int(pending.get("next_open_time") or 0) != open_time
-                    or opening_candle.get("first_update") is not True
-                    or opening_candle.get("source") != "binance_websocket"
-                    or entry_price <= 0 or event_time < open_time
-                    or event_time - open_time > 10000
-                    or abs(local_now_ms - event_time) > 90000):
-                result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
-                return
             signal = dict(pending["signal"])
+            local_now_ms = int(time.time() * 1000)
+            direction_hint = str(signal.get("direction", "WAIT")).upper()
+            normalized_hint = "LONG" if direction_hint == "BUY" else direction_hint
+            if immediate:
+                market = "spot" if domain == "spot" else "futures"
+                quote = self.c.market_feed.fetch_book_ticker(market, symbol)
+                quote_side = "ask" if normalized_hint == "LONG" else "bid"
+                entry_price = float(quote.get(quote_side) or 0)
+                open_time = int(
+                    signal.get("signal_candle_open_time")
+                    or (local_now_ms // 300000) * 300000
+                )
+                event_time = local_now_ms
+            else:
+                event_time = int(opening_candle.get("event_time") or 0)
+                open_time = int(opening_candle.get("open_time") or 0)
+                entry_price = float(opening_candle.get("open") or 0)
+                if (int(pending.get("next_open_time") or 0) != open_time
+                        or opening_candle.get("first_update") is not True
+                        or opening_candle.get("source") != "binance_websocket"
+                        or entry_price <= 0 or event_time < open_time
+                        or event_time - open_time > 10000
+                        or abs(local_now_ms - event_time) > 90000):
+                    result["status"] = "SKIPPED"
+                    result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
+                    return
             signal_close_time = int(signal.get("signal_candle_close_time") or 0)
-            if signal_close_time and signal_close_time + 1 != open_time:
+            if not immediate and signal_close_time and signal_close_time + 1 != open_time:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Entry is not the immediate next 5m candle"})
                 return
@@ -1120,8 +1111,14 @@ class Autopilot:
                 generated_at_ms = int(signal.get("signal_generated_at_ms") or 0)
                 signal_age_ms = local_now_ms - generated_at_ms
                 drift = abs(actual_entry - planned_entry)
-                max_drift = atr * Decimal("0.30")
+                max_drift = max(
+                    atr * Decimal("0.30"),
+                    planned_entry * Decimal("0.0002"),
+                )
                 drift_atr = float(drift / atr) if atr > 0 else None
+                deviation_pct = float(
+                    abs(actual_entry - planned_entry) / planned_entry * Decimal("100")
+                ) if planned_entry > 0 else 0.0
             except (TypeError, ValueError, ArithmeticError):
                 planned_entry = atr = actual_entry = Decimal("0")
                 signal_age_ms, drift_atr, max_drift = 10**12, None, Decimal("0")
@@ -1180,6 +1177,7 @@ class Autopilot:
             signal["entry_origin"] = "MANUAL_AGENT_WS_5M" if manual else "AUTOPILOT_WS_5M"
             signal["entry_open_time"] = open_time
             signal["entry_reference_price"] = entry_price
+            signal["entry_price_source"] = "BINANCE_BOOK_TICKER" if immediate else "BINANCE_WS_5M_OPEN"
             signal["execution_sent_at_ms"] = int(time.time() * 1000)
             signal["entry_deviation_pct"] = deviation_pct
             signal["setup_key"] = key
