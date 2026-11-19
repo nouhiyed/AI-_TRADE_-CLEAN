@@ -251,7 +251,7 @@ class Autopilot:
                 self._analysis_agents_created[domain] += 1
         return current
 
-    def _record_funnel(self, domain, candle_open_ms, stage, reason=None):
+    def _record_funnel(self, domain, candle_open_ms, stage=None, reason=None):
         domain = str(domain).strip().lower()
         if domain not in self._funnel_cycles:
             return
