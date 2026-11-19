@@ -516,9 +516,16 @@ class TradingCoordinator(SpotDemoMixin):
             record["risk_amount"] = reservation.get("risk")
             record["actual_risk_pct"] = reservation.get("actual_risk_pct")
             record["sizing_capped"] = bool(reservation.get("sizing_capped"))
+            record["margin_used"] = reservation.get("margin")
+            record["notional"] = reservation.get("notional")
             record["profile"] = str(signal.get("profile") or "standard")
             record["learning_eligible"] = record["profile"] != "explore"
             context["profile"] = record["profile"]
+            context["actual_risk_pct"] = reservation.get("actual_risk_pct")
+            context["risk_amount"] = reservation.get("risk")
+            context["sizing_capped"] = bool(reservation.get("sizing_capped"))
+            context["margin_used"] = reservation.get("margin")
+            context["notional"] = reservation.get("notional")
             record["context"] = context
             self.journal.record_open(
                 record["trade_id"], record.get("domain", "futures"),
