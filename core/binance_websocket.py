@@ -902,10 +902,12 @@ class BinanceKlineStream:
                     self._status[market]["cache_warmup_completed"] = len(ready_after)
                     self._status[market]["cache_not_ready_reasons"] = reasons_after
                     self._status[market]["cache_not_ready_samples"] = samples_after
-            # Refresh optional Spot 4h context only after the required 5m
-            # cache has had its warmup pass. A slow 4h REST request must never
-            # block the initial analysis cache from becoming ready.
-            if market == "spot" and not self._stop.is_set():
+            # Optional Spot 4h context must never compete with required
+            # 5m/15m/1h warmup. Refresh it only after every registered Spot
+            # symbol has a healthy required cache; otherwise a slow optional
+            # request can delay retries for symbols still missing core frames.
+            if (market == "spot" and not self._stop.is_set()
+                    and len(ready_after) == len(current_symbols)):
                 for symbol in current_symbols:
                     if self._stop.is_set():
                         return
