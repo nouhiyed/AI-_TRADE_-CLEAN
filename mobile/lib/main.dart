@@ -434,6 +434,8 @@ class _TradeShellState extends State<TradeShell>
   final TextEditingController _telegramChatController = TextEditingController();
   Map<String, dynamic> _telegramStatus = {};
   bool _telegramBusy = false;
+  String _autopilotProfile = 'standard';
+  bool _profileBusy = false;
   Timer? _refreshTimer;
   Timer? _statusTimer;
   final Map<String, List<Map<String, double>>> _marketCandles = {};
@@ -466,6 +468,8 @@ class _TradeShellState extends State<TradeShell>
       if (!mounted) return;
       await _loadTelegramStatus();
       if (!mounted) return;
+      await _loadAutopilotProfile();
+      if (!mounted) return;
       await _refreshMarketData(loadSymbols: true);
     }();
     // Poll position state separately so automatic closes leave the live portfolio promptly.
@@ -477,6 +481,37 @@ class _TradeShellState extends State<TradeShell>
       if (!mounted) return;
       await _refreshMarketData();
     });
+  }
+
+  Future<void> _loadAutopilotProfile() async {
+    try {
+      final result = await ApiService.autopilot();
+      final config = result['config'];
+      if (mounted && config is Map) {
+        setState(() => _autopilotProfile =
+            '${config['profile'] ?? 'standard'}' == 'explore' ? 'explore' : 'standard');
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _changeAutopilotProfile(String value) async {
+    if (_profileBusy || !apiOnline) return;
+    setState(() => _profileBusy = true);
+    try {
+      final result = await ApiService.autopilotUpdate({'profile': value});
+      final config = result['config'];
+      if (mounted) {
+        setState(() => _autopilotProfile = config is Map
+            ? '${config['profile'] ?? value}' : value);
+        notify(value == 'explore'
+            ? tr('وضع الاستكشاف مفعّل: مخاطرة 0.10–0.25% وتجاوز فيتوات التأخر والهيكل لجمع البيانات فقط.', 'Explore enabled: 0.10–0.25% risk; late-entry and structure vetoes bypassed for data collection only.')
+            : tr('عاد النظام إلى الوضع القياسي.', 'Returned to Standard profile.'));
+      }
+    } catch (error) {
+      notify('${tr('تعذر تغيير الملف: ', 'Could not change profile: ')}$error');
+    } finally {
+      if (mounted) setState(() => _profileBusy = false);
+    }
   }
 
   Future<void> _refreshStatus() async {
@@ -2687,6 +2722,38 @@ class _TradeShellState extends State<TradeShell>
                   widget.mode,
                   const Icon(Icons.tune, color: cyan),
                 ),
+                _setting(
+                  Icons.tune,
+                  tr('ملف الاستراتيجية', 'Strategy profile'),
+                  _autopilotProfile == 'explore'
+                      ? tr('استكشاف — جمع بيانات', 'Explore — data only')
+                      : tr('قياسي', 'Standard'),
+                  DropdownButton<String>(
+                    value: _autopilotProfile,
+                    underline: const SizedBox.shrink(),
+                    dropdownColor: widget.panel,
+                    style: TextStyle(color: widget.text, fontSize: 11),
+                    items: [
+                      DropdownMenuItem(value: 'standard',
+                        child: Text(tr('قياسي', 'Standard'))),
+                      DropdownMenuItem(value: 'explore',
+                        child: Text(tr('استكشاف', 'Explore'))),
+                    ],
+                    onChanged: _profileBusy || !apiOnline
+                        ? null : (value) {
+                            if (value != null) _changeAutopilotProfile(value);
+                          },
+                  ),
+                ),
+                if (_autopilotProfile == 'explore')
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                    child: Text(
+                      tr('الاستكشاف للتجميع فقط: مخاطرة 0.10–0.25%، مع تجاوز فيتو الدخول المتأخر والهيكل. لا تدخل صفقاته في إحصاءات القياسي أو التعلم.',
+                         'Explore is data collection only: 0.10–0.25% risk, bypasses late-entry and structure vetoes, and is excluded from Standard stats and learning.'),
+                      style: TextStyle(color: widget.muted, fontSize: 10, height: 1.4),
+                    ),
+                  ),
                 _setting(
                   Icons.shield_outlined,
                   tr('محرك إدارة المخاطر', 'Risk management'),
