@@ -828,6 +828,8 @@ class BinanceKlineStream:
                                     "cache-ready replay callback: " + str(error)
                                 )
             pending = [symbol for symbol in current_symbols if symbol not in ready]
+            # Also defined when the initial snapshot is already fully ready.
+            ready_after = set(ready)
             reason_counts = {}
             reason_samples = []
             for symbol in pending:
