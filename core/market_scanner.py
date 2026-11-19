@@ -2,15 +2,15 @@ from core.binance_market_data import BinanceMarketData
 
 
 class FuturesMarketScanner:
-    TOP_SYMBOL_LIMIT = 250
+    TOP_SYMBOL_LIMIT = 30
 
     def __init__(self, timeout=6, market=None):
-        # Share the coordinator's market feed so the daily top-250 selection
+        # Share the coordinator's market feed so the daily top-30 selection
         # is fetched once and reused by WebSocket and scanner workers.
         self.market = market or BinanceMarketData(timeout=timeout, total_timeout=timeout)
 
     def scan_universe(self, limit=None, min_quote_volume=None):
-        """Return only the current daily top-250 liquid USDT perpetuals."""
+        """Return only the current daily top-30 liquid USDT perpetuals."""
         if limit is not None:
             try:
                 limit = min(self.TOP_SYMBOL_LIMIT, max(1, int(limit)))
