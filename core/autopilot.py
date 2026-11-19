@@ -867,55 +867,46 @@ class Autopilot:
                 return
 
             agent = self.worker_agent(domain)
-            if set(frames) == {"5m"}:
-                # Full-universe stream: cheap V3-local 5m gate first. Only
-                # candidates pay for REST retrieval of closed 15m/1h(/4h) context.
-                raw_five = frames.get("5m")
-                try:
-                    prepared_five = self.c.market_engine._prepare_frame(
-                        raw_five, symbol, domain, "5m")
-                    prefilter_info = agent.strategy.prefilter_5m(prepared_five)
-                except Exception as error:
-                    self._record_funnel(domain, cycle_open_time_ms, reason="5m prefilter error: " + str(error))
-                    self._record_symbol_audit(
-                        domain, symbol, "prefilter_error",
-                        increment="errors", reason=str(error),
-                    )
-                    return
-                if not prefilter_info.get("candidate"):
-                    self._record_funnel(
-                        domain, cycle_open_time_ms,
-                        reason=prefilter_info.get("reason") or "5m filter rejected",
-                    )
-                    with self._analysis_stats_lock:
-                        self._analysis_stats[domain]["prefilter_rejected"] += 1
-                    self._record_symbol_audit(
-                        domain, symbol, "prefilter_rejected",
-                        increment="prefilter_rejected",
-                        reason=prefilter_info.get("reason") or "No 5m-local setup",
-                    )
-                    return
-                self._record_funnel(domain, cycle_open_time_ms, "filter_passed")
-                with self._analysis_stats_lock:
-                    self._analysis_stats[domain]["prefilter_passed"] += 1
-                    self._analysis_stats[domain]["deep_analysis"] += 1
+            raw_five = frames.get("5m")
+            try:
+                prepared_five = self.c.market_engine._prepare_frame(
+                    raw_five, symbol, domain, "5m")
+                prefilter_info = agent.strategy.prefilter_5m(prepared_five)
+            except Exception as error:
+                self._record_funnel(domain, cycle_open_time_ms, reason="5m prefilter error: " + str(error))
                 self._record_symbol_audit(
-                    domain, symbol, "deep_analysis",
-                    increment="prefilter_passed", also_increment="deep_analysis",
-                    candidate_setups=prefilter_info.get("setups", []),
+                    domain, symbol, "prefilter_error",
+                    increment="errors", reason=str(error),
                 )
-                analysis = self.c.analyze_live(
-                    symbol, domains=[domain], include_orderbook=False,
-                    agent_overrides={domain: agent},
+                return
+            if not prefilter_info.get("candidate"):
+                self._record_funnel(
+                    domain, cycle_open_time_ms,
+                    reason=prefilter_info.get("reason") or "5m filter rejected",
                 )
-                signal_source = "BINANCE_WEBSOCKET_5M_PREFILTER_REST_CONTEXT"
-            else:
-                self._record_funnel(domain, cycle_open_time_ms, "filter_passed")
-                # Explicit top-N mode retains the original multi-timeframe cache path.
-                analysis = self.c.analyze_live_from_frames(
-                    symbol, domain, frames, agent=agent
+                with self._analysis_stats_lock:
+                    self._analysis_stats[domain]["prefilter_rejected"] += 1
+                self._record_symbol_audit(
+                    domain, symbol, "prefilter_rejected",
+                    increment="prefilter_rejected",
+                    reason=prefilter_info.get("reason") or "No 5m-local setup",
                 )
-                signal_source = "BINANCE_WEBSOCKET_CACHE"
+                return
+            self._record_funnel(domain, cycle_open_time_ms, "filter_passed")
+            with self._analysis_stats_lock:
+                self._analysis_stats[domain]["prefilter_passed"] += 1
+                self._analysis_stats[domain]["deep_analysis"] += 1
+            self._record_symbol_audit(
+                domain, symbol, "deep_analysis",
+                increment="prefilter_passed", also_increment="deep_analysis",
+                candidate_setups=prefilter_info.get("setups", []),
+            )
+            # No REST is permitted on this analysis path. The 5m trigger and
+            # every required context frame must already exist in the warmed cache.
+            analysis = self.c.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent
+            )
+            signal_source = "BINANCE_WEBSOCKET_CACHE"
 
             signal = (analysis.get("signals") or {}).get(domain)
             if not isinstance(signal, dict):
