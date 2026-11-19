@@ -1326,6 +1326,20 @@ class TradingCoordinator(SpotDemoMixin):
         }
 
 
+    def analyze_cached(self, symbol, domain, profile="standard", agent=None):
+        """Analyze exclusively from the warmed local WebSocket candle cache."""
+        domain = str(domain).strip().lower()
+        frames = (
+            self.market_frame_provider(domain, str(symbol).strip().upper())
+            if callable(self.market_frame_provider) else None
+        )
+        if not isinstance(frames, dict) or not frames:
+            return {"symbol": str(symbol).strip().upper(), "signals": {},
+                    "data_errors": {domain: "Warmed WebSocket candle cache is not ready"}}
+        return self.analyze_live_from_frames(
+            symbol, domain, frames, agent=agent, profile=profile
+        )
+
     def analyze_live_from_frames(self, symbol, domain, frames, agent=None, profile="standard"):
         """Run V3 against the closed multi-timeframe WebSocket cache (no REST I/O)."""
         symbol = str(symbol).strip().upper()
@@ -1663,7 +1677,7 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["futures"], include_orderbook=False)
+                return self.analyze_cached(scan_item["symbol"], "futures")
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
@@ -1869,7 +1883,7 @@ class TradingCoordinator(SpotDemoMixin):
                     "universe_total": len(universe),
                 })
             try:
-                return self.analyze_live(scan_item["symbol"], domains=["spot"], include_orderbook=False)
+                return self.analyze_cached(scan_item["symbol"], "spot")
             finally:
                 with progress_lock:
                     progress_state["active"] = max(0, progress_state["active"] - 1)
