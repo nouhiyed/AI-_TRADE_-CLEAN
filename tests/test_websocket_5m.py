@@ -156,18 +156,16 @@ class BinanceCandleCacheTests(unittest.TestCase):
     def test_spot_keeps_seeded_210_hour_history_and_includes_optional_4h(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=30)
-        five = candle_frame("5min", rows=800)
+        five = candle_frame("5min", rows=2544)
         five.attrs["timeframe"] = "5m"
-        one_hour = candle_frame("1h", rows=210)
-        one_hour.attrs["timeframe"] = "1h"
         four_hour = candle_frame("4h", rows=210)
         four_hour.attrs["timeframe"] = "4h"
         stream._merge_frame("spot", "BTCUSDT", "5m", five)
-        stream._merge_frame("spot", "BTCUSDT", "1h", one_hour)
         stream._merge_frame("spot", "BTCUSDT", "4h", four_hour)
         snapshot = stream._snapshot("spot", "BTCUSDT")
         self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
         self.assertGreaterEqual(len(snapshot["1h"]), 210)
+        self.assertEqual(snapshot["1h"].attrs["source"], "derived_from_binance_5m_cache")
 
     def test_analysis_snapshot_rejects_stale_5m_cache(self):
         stream = BinanceKlineStream(
@@ -256,11 +254,12 @@ class BinanceCandleCacheTests(unittest.TestCase):
         )
 
     def test_snapshot_requires_all_closed_context_frames(self):
-        for interval in ("5m", "15m", "1h"):
-            frame = candle_frame("5min" if interval == "5m" else "15min" if interval == "15m" else "1h")
-            frame.attrs["timeframe"] = interval
-            self.stream._merge_frame("futures", "BTCUSDT", interval, frame)
-        self.assertIsNotNone(self.stream._snapshot("futures", "BTCUSDT"))
+        frame = candle_frame("5min", rows=800)
+        frame.attrs["timeframe"] = "5m"
+        self.stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        snapshot = self.stream._snapshot("futures", "BTCUSDT")
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
 
         open_frame = candle_frame("5min")
         open_frame.attrs["timeframe"] = "5m"
@@ -269,12 +268,9 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNone(self.stream._snapshot("futures", "BTCUSDT"))
 
     def test_spot_cache_does_not_require_optional_4h_history(self):
-        for interval, freq, rows in (
-            ("5m", "5min", 60), ("15m", "15min", 60), ("1h", "1h", 210),
-        ):
-            frame = candle_frame(freq, rows=rows)
-            frame.attrs["timeframe"] = interval
-            self.stream._merge_frame("spot", "NEWUSDT", interval, frame)
+        frame = candle_frame("5min", rows=2544)
+        frame.attrs["timeframe"] = "5m"
+        self.stream._merge_frame("spot", "NEWUSDT", "5m", frame)
         snapshot = self.stream._snapshot("spot", "NEWUSDT")
         self.assertIsNotNone(snapshot)
         self.assertNotIn("4h", snapshot)
@@ -428,7 +424,8 @@ class ManualEntryQueueTests(unittest.TestCase):
             }
             result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
             self.assertTrue(result["success"])
-            self.assertTrue(result["queued"])
+            self.assertFalse(result["queued"])
+            self.assertEqual(result["decision_status"], "SUBMITTED")
             autopilot._event_executor.shutdown(wait=True)
 
 
