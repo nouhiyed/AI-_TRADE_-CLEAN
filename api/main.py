@@ -503,6 +503,7 @@ def initialize_runtime():
                                    news_max_age_h=12)
     coordinator.market_context = market_context
     autopilot = Autopilot(coordinator, context=market_context)
+    coordinator.funnel_recorder = autopilot._record_funnel
     market_stream = BinanceKlineStream(
         coordinator.market_feed, autopilot.on_market_kline,
         max_symbols=30,
@@ -975,7 +976,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
-                        "entry_timing": "next_5m_candle_open",
+                        "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                         "live_mode_locked": True,
                     },
                 })
