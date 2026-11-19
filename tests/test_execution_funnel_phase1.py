@@ -38,25 +38,24 @@ class FunnelCoverageTests(unittest.TestCase):
     def test_funnel_counts_stages_and_returns_top_five_rejections(self):
         autopilot = object.__new__(Autopilot)
         autopilot._event_lock = threading.RLock()
-        from collections import OrderedDict
-        autopilot._funnel_cycles = {"futures": OrderedDict(), "spot": OrderedDict()}
+        autopilot._cycle_funnels = {}
         autopilot.clock = lambda: 123.0
         for stage in ("events_received", "filter_passed",
-                      "strategy_accepted", "valid_plan",
-                      "risk_approved", "trade_opened"):
+                      "strategy_accepted", "valid_plans",
+                      "risk_approved", "opened"):
             autopilot._record_funnel("spot", 300000, stage)
         for index in range(7):
             autopilot._record_funnel("spot", 300000, reason="reject-%d" % index)
         result = autopilot.funnel_status()
-        self.assertEqual(len(result["markets"]["spot"]), 1)
-        cycle = result["markets"]["spot"][0]
+        self.assertEqual(len(result["cycles"]), 1)
+        cycle = result["cycles"][0]
         self.assertEqual(cycle["events_received"], 1)
         self.assertEqual(cycle["filter_passed"], 1)
         self.assertEqual(cycle["strategy_accepted"], 1)
-        self.assertEqual(cycle["valid_plan"], 1)
+        self.assertEqual(cycle["valid_plans"], 1)
         self.assertEqual(cycle["risk_approved"], 1)
-        self.assertEqual(cycle["trade_opened"], 1)
-        self.assertEqual(len(cycle["top_rejection_reasons"]), 5)
+        self.assertEqual(cycle["opened"], 1)
+        self.assertEqual(len(cycle["top_rejections"]), 5)
 
 
 class RiskSizeCapTests(unittest.TestCase):

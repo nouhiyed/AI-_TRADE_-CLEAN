@@ -251,7 +251,7 @@ class Autopilot:
                 self._analysis_agents_created[domain] += 1
         return current
 
-    def _record_funnel(self, domain, candle_open_ms, stage=None, reason=None):
+    def _record_funnel(self, domain, candle_open_ms, stage, reason=None):
         domain = str(domain).strip().lower()
         if domain not in self._funnel_cycles:
             return
@@ -1130,7 +1130,6 @@ class Autopilot:
             signal["entry_origin"] = "MANUAL_AGENT_WS_5M" if manual else "AUTOPILOT_WS_5M"
             signal["entry_open_time"] = int(signal.get("signal_candle_open_time") or 0)
             signal["entry_reference_price"] = entry_price
-            signal["entry_price_source"] = "BINANCE_BOOK_TICKER"
             signal["execution_sent_at_ms"] = int(time.time() * 1000)
             signal["entry_deviation_pct"] = deviation_pct
             signal["entry_drift"] = drift

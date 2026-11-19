@@ -91,8 +91,8 @@ class CachedAnalysisPathTests(unittest.TestCase):
             entry_price=100.0, take_profit=102.0, stop_loss=99.0,
         )
 
-        self.assertEqual(result["decision_status"], "WAITING_FOR_CACHE")
-        self.assertIn("cache is not ready", result["reason"].lower())
+        self.assertEqual(result["decision_status"], "REJECTED")
+        self.assertIn("cache is still warming", result["reason"].lower())
         self.assertEqual(coordinator.market_stream.calls, [("spot", "BTCUSDT", 90)])
 
 
