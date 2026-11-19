@@ -129,7 +129,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
     def test_full_universe_snapshot_requires_only_closed_5m_history(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0)
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         snapshot = stream._snapshot("futures", "BTCUSDT")
@@ -191,14 +191,18 @@ class BinanceCandleCacheTests(unittest.TestCase):
             "wss://fstream.binance.com/market/stream",
         )
 
-    def test_snapshot_requires_all_closed_context_frames(self):
-        for interval in ("5m", "15m", "1h"):
-            frame = candle_frame("5min" if interval == "5m" else "15min" if interval == "15m" else "1h")
-            frame.attrs["timeframe"] = interval
-            self.stream._merge_frame("futures", "BTCUSDT", interval, frame)
-        self.assertIsNotNone(self.stream._snapshot("futures", "BTCUSDT"))
+    def test_snapshot_derives_closed_context_from_5m_cache(self):
+        frame = candle_frame("5min", rows=800)
+        frame.attrs["timeframe"] = "5m"
+        self.stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        snapshot = self.stream._snapshot("futures", "BTCUSDT")
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
+        self.assertEqual(len(snapshot["15m"]), 267)
+        self.assertGreaterEqual(len(snapshot["1h"]), 60)
+        self.assertEqual(snapshot["15m"].attrs["source"], "derived_from_5m_websocket_cache")
 
-        open_frame = candle_frame("5min")
+        open_frame = candle_frame("5min", rows=800)
         open_frame.attrs["timeframe"] = "5m"
         open_frame.iloc[-1, open_frame.columns.get_loc("is_closed")] = False
         self.stream._merge_frame("futures", "BTCUSDT", "5m", open_frame)
@@ -206,7 +210,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
 
     def test_spot_cache_does_not_require_optional_4h_history(self):
         for interval, freq, rows in (
-            ("5m", "5min", 60), ("15m", "15min", 60), ("1h", "1h", 210),
+            ("5m", "5min", 2520),
         ):
             frame = candle_frame(freq, rows=rows)
             frame.attrs["timeframe"] = interval
@@ -228,7 +232,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNone(
             stream._frame_health_reason("futures", "5m", gap)
         )
-        self.assertIsNotNone(stream._snapshot("futures", "ETHUSDT"))
+        self.assertIsNone(stream._snapshot("futures", "ETHUSDT"))
 
         short = candle_frame("5min", rows=20)
         short.attrs["timeframe"] = "5m"
@@ -237,12 +241,12 @@ class BinanceCandleCacheTests(unittest.TestCase):
             "insufficient_rows",
         )
 
-        stale = candle_frame("5min")
+        stale = candle_frame("5min", rows=800)
         stale.attrs["timeframe"] = "5m"
         stale["open_time"] -= pd.Timedelta(hours=1)
         stale["close_time"] -= pd.Timedelta(hours=1)
         stream._cache[("futures", "ETHUSDT", "5m")] = stale
-        self.assertIsNotNone(stream._snapshot("futures", "ETHUSDT"))
+        self.assertIsNone(stream._snapshot("futures", "ETHUSDT"))
         stream._market_symbols["futures"] = {"ETHUSDT"}
         expected_open = int(
             (pd.Timestamp.now(tz="UTC").floor("5min") - pd.Timedelta(minutes=5))
@@ -296,7 +300,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
 
 class V3PrefilterTests(unittest.TestCase):
     def _candidate_frame(self):
-        frame = candle_frame("5min", rows=60)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         frame["EMA_9"] = 100.0
         frame["EMA_20"] = 100.0
@@ -342,12 +346,12 @@ class ManualEntryQueueTests(unittest.TestCase):
             )
             signal = {
                 "symbol": "BTCUSDT", "direction": "LONG",
-                "strategy_version": "v3", "signal_generated_at_ms": (now - 60) * 1000,
+                "strategy_version": "v3", "signal_generated_at_ms": (now - 120) * 1000,
                 "trade_plan": {"success": True, "strategy_version": "v3", "timeframe": "5m", "direction": "LONG"},
             }
             result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
             self.assertFalse(result["success"])
-            self.assertIn("stale", result["reason"].lower())
+            self.assertIn("90-second", result["reason"].lower())
             autopilot._event_executor.shutdown(wait=True)
 
 
@@ -556,7 +560,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=61)
+        frame = candle_frame("5min", rows=801)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         expected_open = int(frame.iloc[-2]["open_time"].timestamp() * 1000)
@@ -767,13 +771,13 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(feed.calls, 2)
 
-    def test_full_250_symbol_cycle_reaches_the_analysis_queue(self):
+    def test_top_30_symbol_cycle_reaches_the_analysis_queue(self):
         frame = candle_frame("5min", rows=100)
         frame.attrs["timeframe"] = "5m"
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
-        symbols = ["COIN%03dUSDT" % index for index in range(250)]
+        symbols = ["COIN%03dUSDT" % index for index in range(30)]
         stream = BinanceKlineStream(
-            FakeFeed(), lambda _market, _event: None, max_symbols=250
+            FakeFeed(), lambda _market, _event: None, max_symbols=30
         )
         stream._market_symbols["futures"] = set(symbols)
         for symbol in symbols:
@@ -782,8 +786,8 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         batch = stream.latest_closed_events(
             "futures", expected_open, symbols=symbols
         )
-        self.assertEqual(batch["requested"], 250)
-        self.assertEqual(batch["available"], 250)
+        self.assertEqual(batch["requested"], 30)
+        self.assertEqual(batch["available"], 30)
         self.assertEqual(batch["missing_symbols"], [])
 
         with tempfile.TemporaryDirectory() as directory:
@@ -801,10 +805,10 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
                     sum(autopilot.has_seen_candle(
                         "futures", symbol, expected_open
                     ) for symbol in symbols),
-                    250,
+                    30,
                 )
                 self.assertEqual(
-                    len(autopilot._analysis_pending), 250
+                    len(autopilot._analysis_pending), 30
                 )
                 self.assertEqual(
                     autopilot.status()["analysis_pools"]["futures"]["rejected"], 0
