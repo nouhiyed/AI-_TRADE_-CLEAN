@@ -32,7 +32,8 @@ class LearningEngine:
         return key not in self.journal.disabled_setups()
 
     def evaluate(self):
-        trades = self.journal.closed_trades()
+        trades = [trade for trade in self.journal.closed_trades()
+                  if (trade.get("context") or {}).get("profile", "standard") != "explore"]
         disabled_now = []
         already = self.journal.disabled_setups()
         by_setup = performance.compute(trades)["by_setup"]
@@ -69,7 +70,8 @@ class LearningEngine:
             (x["expectancy"] or 0)), reverse=True)
 
     def report(self):
-        trades = self.journal.closed_trades()
+        trades = [trade for trade in self.journal.closed_trades()
+                  if (trade.get("context") or {}).get("profile", "standard") != "explore"]
         stats = performance.compute(trades)
         disabled = self.journal.disabled_setups()
         setups = []
