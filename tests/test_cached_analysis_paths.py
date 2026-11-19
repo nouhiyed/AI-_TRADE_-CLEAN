@@ -25,8 +25,8 @@ class FakeCache:
         self.ready = ready
         self.calls = []
 
-    def _snapshot(self, market, symbol):
-        self.calls.append((market, symbol))
+    def _snapshot(self, market, symbol, max_age_seconds=None):
+        self.calls.append((market, symbol, max_age_seconds))
         if not self.ready:
             return None
         return {"5m": "5m", "15m": "15m", "1h": "1h"}
@@ -93,7 +93,7 @@ class CachedAnalysisPathTests(unittest.TestCase):
 
         self.assertEqual(result["decision_status"], "REJECTED")
         self.assertIn("cache is still warming", result["reason"].lower())
-        self.assertEqual(coordinator.market_stream.calls, [("spot", "BTCUSDT")])
+        self.assertEqual(coordinator.market_stream.calls, [("spot", "BTCUSDT", 90)])
 
 
 if __name__ == "__main__":
