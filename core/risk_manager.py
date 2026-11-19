@@ -248,13 +248,26 @@ class RiskManager:
             if stop_distance <= 0:
                 return {"approved": False, "reason": "Invalid stop distance"}
 
-            notional = risk_amount / stop_distance
-            margin = notional / leverage
+            requested_risk = risk_amount
+            requested_notional = risk_amount / stop_distance
+            requested_margin = requested_notional / leverage
 
-            if margin > self.get_available_balance():
+            # Cap each position at the lower of available margin and 25% of
+            # current equity. Preserve all risk/daily-loss limits by reducing
+            # the actual risk in proportion to the capped notional.
+            margin_cap = min(
+                self.get_available_balance(),
+                max(0.0, self.equity * 0.25),
+            )
+            notional_cap = margin_cap * leverage
+            size_capped = requested_notional > notional_cap
+            notional = min(requested_notional, notional_cap)
+            margin = notional / leverage
+            risk_amount = notional * stop_distance
+            if notional <= 0 or margin <= 0 or risk_amount <= 0:
                 return {
                     "approved": False,
-                    "reason": "Insufficient shared balance"
+                    "reason": "Insufficient available margin after position-size cap"
                 }
 
             quantity = notional / entry
@@ -276,6 +289,11 @@ class RiskManager:
                 "notional": notional,
                 "margin": margin,
                 "risk": risk_amount,
+                "requested_risk": requested_risk,
+                "requested_notional": requested_notional,
+                "requested_margin": requested_margin,
+                "size_capped": bool(size_capped),
+                "margin_cap": margin_cap,
                 "leverage": leverage,
                 "status": "RESERVED"
             }
