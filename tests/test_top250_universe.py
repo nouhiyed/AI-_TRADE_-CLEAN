@@ -35,7 +35,7 @@ class RankedMarketFeed(BinanceMarketData):
         raise AssertionError("Unexpected endpoint: " + endpoint)
 
 
-class Top250UniverseTests(unittest.TestCase):
+class Top30UniverseTests(unittest.TestCase):
     def test_production_websocket_default_is_top_30_liquid_pairs(self):
         stream = BinanceKlineStream(
             RankedMarketFeed(), lambda _market, _event: None)
@@ -232,13 +232,13 @@ class Top250UniverseTests(unittest.TestCase):
 
         feed = Feed()
         stream = BinanceKlineStream(
-            feed, lambda _market, _event: None, max_symbols=250
+            feed, lambda _market, _event: None, max_symbols=30
         )
         symbols = stream._load_symbols("spot")
 
-        self.assertEqual(len(symbols), 250)
-        self.assertEqual(len(set(symbols)), 250)
-        self.assertEqual(feed.requested, [("spot", 250)])
+        self.assertEqual(len(symbols), 30)
+        self.assertEqual(len(set(symbols)), 30)
+        self.assertEqual(feed.requested, [("spot", 30)])
         self.assertEqual(stream.status()["spot"]["ranking_day"], "2026-11-17")
         self.assertTrue(stream.status()["fast_scan_mode"])
         self.assertEqual(stream._active_intervals("spot"), ["5m"])
@@ -253,15 +253,15 @@ class Top250UniverseTests(unittest.TestCase):
                 ]
 
         stream = BinanceKlineStream(
-            Feed(), lambda _market, _event: None, max_symbols=250
+            Feed(), lambda _market, _event: None, max_symbols=30
         )
-        with self.assertRaisesRegex(RuntimeError, "exactly 250"):
+        with self.assertRaisesRegex(RuntimeError, "exactly 30"):
             stream._load_symbols("futures")
         stream.stop()
 
     def test_daily_universe_prunes_removed_symbols_from_live_cache(self):
         stream = BinanceKlineStream(
-            object(), lambda _market, _event: None, max_symbols=250
+            object(), lambda _market, _event: None, max_symbols=30
         )
         stream._cache = {
             ("spot", "KEEPUSDT", "5m"): "current",
@@ -307,7 +307,7 @@ class Top250UniverseTests(unittest.TestCase):
                 self.requested = (market, limit)
                 return [
                     {"symbol": "COIN%03dUSDT" % index, "quote_volume": 1000 - index}
-                    for index in range(250)
+                    for index in range(30)
                 ]
 
         feed = Feed()
