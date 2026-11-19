@@ -51,10 +51,11 @@ class BinanceKlineStream:
             else os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "30")
         )
         try:
-            self.max_symbols = max(0, int(raw_limit))
+            self.max_symbols = min(30, max(1, int(raw_limit)))
         except (TypeError, ValueError):
             self.max_symbols = 30
-        self.full_universe = self.max_symbols == 0
+        # Production cannot be switched to an unbounded universe by env config.
+        self.full_universe = False
         # Every symbol streams only 5m. Higher timeframes are derived locally
         # from the 5m cache; Spot's long 1h seed and optional 4h macro frame
         # are bootstrapped/refreshed separately, never fetched per signal.
