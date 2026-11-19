@@ -122,7 +122,9 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
             overlap_symbols.update(bucket.intersection(other))
     accounted = set().union(*buckets) if buckets else set()
     unclassified = universe - accounted
-    successful_count = max(0, len(completed) - int(analysis_errors or 0))
+    failed_count = min(len(completed), int(analysis_errors or 0))
+    successful_count = max(0, len(completed) - failed_count)
+    required_successful = int(math.ceil(len(universe) * 0.95))
     processed_ratio = (successful_count / len(universe)) if universe else 0.0
     # A cycle is operationally successful once at least 95% of its symbols
     # completed analysis. Fatal errors and the unprocessed remainder stay
@@ -134,8 +136,12 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
         "accepted_symbols": len(accepted),
         "completed_symbols": len(completed),
         "successful_symbols": successful_count,
+        "failed_symbols": failed_count,
+        "completion_threshold_percent": 95,
+        "required_successful_symbols": required_successful,
         "processed_ratio": round(processed_ratio, 4),
         "processed_pct": round(processed_ratio * 100, 2),
+        "completion_percent": round(processed_ratio * 100, 2),
         "pending_cache_symbols": len(pending_cache),
         "pending_analysis_symbols": len(pending_analysis),
         "pending_reconcile_symbols": len(pending_reconcile),
