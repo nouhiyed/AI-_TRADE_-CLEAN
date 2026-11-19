@@ -1584,10 +1584,9 @@ class TradingCoordinator(SpotDemoMixin):
         signal["trade_plan"] = plan
         self.last_signals[domain] = signal
 
-        # A chart submission is an agent decision, not an immediate market order.
-        # The API queues approved decisions and the WebSocket opens them only on
-        # the first update of the following 5m candle.
-        reason = "Agent approved the setup; waiting for the next 5m candle open"
+        # Queue one execution-writer task; it fetches the current bid/ask and
+        # applies the 90-second, 0.30 ATR, risk and agent-state guards immediately.
+        reason = "Agent approved; queued for current Binance bid/ask execution"
         return {
             **base, "success": True, "opened": False,
             "decision_status": "QUEUED", "decision_reason": reason,
