@@ -35,13 +35,22 @@ class RankedMarketFeed(BinanceMarketData):
         raise AssertionError("Unexpected endpoint: " + endpoint)
 
 
-class Top250UniverseTests(unittest.TestCase):
+class Top30UniverseTests(unittest.TestCase):
     def test_production_websocket_default_is_top_30_liquid_pairs(self):
         stream = BinanceKlineStream(
             RankedMarketFeed(), lambda _market, _event: None)
         self.assertEqual(stream.max_symbols, 30)
         self.assertEqual(stream._active_intervals("spot"), ["5m"])
         stream.stop()
+
+    def test_runtime_environment_cannot_expand_or_shrink_universe_accidentally(self):
+        for configured in ("250", "0", "-1", "invalid"):
+            with patch.dict("os.environ", {"AI_TRADER_WS_MAX_SYMBOLS": configured}):
+                stream = BinanceKlineStream(
+                    RankedMarketFeed(), lambda _market, _event: None
+                )
+                self.assertEqual(stream.max_symbols, 30, configured)
+                stream.stop()
 
     def test_spot_market_data_uses_official_market_data_only_rest_endpoint(self):
         self.assertEqual(
@@ -232,17 +241,66 @@ class Top250UniverseTests(unittest.TestCase):
 
         feed = Feed()
         stream = BinanceKlineStream(
-            feed, lambda _market, _event: None, max_symbols=250
+            feed, lambda _market, _event: None, max_symbols=30
         )
         symbols = stream._load_symbols("spot")
 
-        self.assertEqual(len(symbols), 250)
-        self.assertEqual(len(set(symbols)), 250)
-        self.assertEqual(feed.requested, [("spot", 250)])
+        self.assertEqual(len(symbols), 30)
+        self.assertEqual(len(set(symbols)), 30)
+        self.assertEqual(feed.requested, [("spot", 30)])
         self.assertEqual(stream.status()["spot"]["ranking_day"], "2026-11-17")
         self.assertTrue(stream.status()["fast_scan_mode"])
         self.assertEqual(stream._active_intervals("spot"), ["5m"])
         stream.stop()
+
+    def test_explicit_250_websocket_configuration_is_clamped_to_30(self):
+        class Feed:
+            def __init__(self):
+                self.requested = []
+
+            def fetch_top_symbols(self, market, limit):
+                self.requested.append((market, limit))
+                return [
+                    {"symbol": "COIN%03dUSDT" % index, "ranking_day": "2026-11-19"}
+                    for index in range(limit)
+                ]
+
+        feed = Feed()
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=250
+        )
+        self.assertEqual(stream.max_symbols, 30)
+        self.assertEqual(len(stream._load_symbols("spot")), 30)
+        self.assertEqual(feed.requested, [("spot", 30)])
+        stream.stop()
+
+    def test_rest_universe_default_is_30_and_explicit_250_is_capped(self):
+        import inspect
+
+        self.assertEqual(
+            inspect.signature(BinanceMarketData.fetch_top_symbols)
+            .parameters["limit"].default,
+            30,
+        )
+
+        class FortySymbolFeed(RankedMarketFeed):
+            def __init__(self):
+                super().__init__()
+                self.symbols = ["COIN%02dUSDT" % index for index in range(40)]
+                self.tickers = [
+                    {"symbol": symbol, "quoteVolume": "1000000",
+                     "lastPrice": "10", "priceChangePercent": "1"}
+                    for symbol in self.symbols
+                ]
+                self.books = [
+                    {"symbol": symbol, "bidPrice": "9.99", "askPrice": "10.00",
+                     "bidQty": "100", "askQty": "100"}
+                    for symbol in self.symbols
+                ]
+
+        ranked = FortySymbolFeed().fetch_top_symbols("spot", limit=250)
+        self.assertEqual(len(ranked), 30)
+        self.assertEqual(len({item["symbol"] for item in ranked}), 30)
 
     def test_websocket_rejects_a_partial_top_n_selection(self):
         class Feed:
@@ -253,15 +311,15 @@ class Top250UniverseTests(unittest.TestCase):
                 ]
 
         stream = BinanceKlineStream(
-            Feed(), lambda _market, _event: None, max_symbols=250
+            Feed(), lambda _market, _event: None, max_symbols=30
         )
-        with self.assertRaisesRegex(RuntimeError, "exactly 250"):
+        with self.assertRaisesRegex(RuntimeError, "exactly 30"):
             stream._load_symbols("futures")
         stream.stop()
 
     def test_daily_universe_prunes_removed_symbols_from_live_cache(self):
         stream = BinanceKlineStream(
-            object(), lambda _market, _event: None, max_symbols=250
+            object(), lambda _market, _event: None, max_symbols=30
         )
         stream._cache = {
             ("spot", "KEEPUSDT", "5m"): "current",
@@ -307,7 +365,7 @@ class Top250UniverseTests(unittest.TestCase):
                 self.requested = (market, limit)
                 return [
                     {"symbol": "COIN%03dUSDT" % index, "quote_volume": 1000 - index}
-                    for index in range(250)
+                    for index in range(30)
                 ]
 
         feed = Feed()

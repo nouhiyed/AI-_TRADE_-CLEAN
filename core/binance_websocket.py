@@ -46,15 +46,23 @@ class BinanceKlineStream:
         self.on_cache_ready = on_cache_ready
         # Production defaults to the 30 most liquid USDT pairs per market.
         # Zero remains an explicit full-market setting for isolated tests only.
+        explicit_test_limit = max_symbols is not None
         raw_limit = (
-            max_symbols if max_symbols is not None
+            max_symbols if explicit_test_limit
             else os.environ.get("AI_TRADER_WS_MAX_SYMBOLS", "30")
         )
         try:
-            self.max_symbols = max(0, int(raw_limit))
+            parsed_limit = int(raw_limit)
+            # An explicit zero is retained only for isolated unit fixtures.
+            # Environment/runtime configuration is always bounded to top 30.
+            self.max_symbols = (
+                0 if explicit_test_limit and parsed_limit == 0
+                else 30 if parsed_limit <= 0
+                else min(30, parsed_limit)
+            )
         except (TypeError, ValueError):
             self.max_symbols = 30
-        self.full_universe = self.max_symbols == 0
+        self.full_universe = explicit_test_limit and self.max_symbols == 0
         # Every symbol streams only 5m. Higher timeframes are derived locally
         # from the 5m cache; Spot's long 1h seed and optional 4h macro frame
         # are bootstrapped/refreshed separately, never fetched per signal.
