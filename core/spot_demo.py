@@ -105,7 +105,7 @@ class SpotDemoMixin:
         if limit is None:
             from core.scan_rotation import next_scan_batch
             universe, scan_meta = next_scan_batch(
-                "spot", universe, batch_size=20
+                "spot", universe, batch_size=30
             )
 
         opportunities, errors = [], {}
