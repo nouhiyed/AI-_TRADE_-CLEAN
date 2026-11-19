@@ -1705,6 +1705,12 @@ class _TradeShellState extends State<TradeShell>
     }
     Widget marketFunnel(String market, Color accent) {
       final cycle = latest(market);
+      final marketScanRaw = scanStatus[market];
+      final marketScan = marketScanRaw is Map ? marketScanRaw : const {};
+      final coverageRaw = marketScan['coverage'];
+      final coverage = coverageRaw is Map ? coverageRaw : const {};
+      final errorCount = int.tryParse('${coverage['analysis_errors'] ?? 0}') ?? 0;
+      final successPct = double.tryParse('${coverage['processed_pct'] ?? 0}') ?? 0;
       final stages = [
         ('وصلت', 'events_received'),
         ('اجتازت فلتر البيانات', 'data filter passed'),
@@ -1743,6 +1749,11 @@ class _TradeShellState extends State<TradeShell>
                       fontWeight: FontWeight.w700)),
                 );
               }).toList(),
+            ),
+            Text(
+              '${tr('أخطاء التحليل: ', 'Analysis errors: ')}$errorCount  ·  ${tr('نجاح الدورة: ', 'Cycle success: ')}${successPct.toStringAsFixed(1)}%',
+              style: TextStyle(color: errorCount > 0 ? red : widget.muted,
+                fontSize: 10, fontWeight: FontWeight.w700),
             ),
             if (reasons.isNotEmpty) ...[
               const SizedBox(height: 8),
