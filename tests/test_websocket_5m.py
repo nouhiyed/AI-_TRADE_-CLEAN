@@ -169,6 +169,25 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
         self.assertGreaterEqual(len(snapshot["1h"]), 210)
 
+    def test_spot_4h_history_refreshes_once_per_hour(self):
+        class FourHourFeed:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_candles(self, market, symbol, interval, **kwargs):
+                self.calls.append((market, symbol, interval, kwargs))
+                return candle_frame("4h", rows=210)
+
+        feed = FourHourFeed()
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=30)
+        self.assertTrue(stream._refresh_spot_4h_if_due("BTCUSDT"))
+        self.assertFalse(stream._refresh_spot_4h_if_due("BTCUSDT"))
+        self.assertEqual(len(feed.calls), 1)
+        self.assertEqual(feed.calls[0][0:3], ("spot", "BTCUSDT", "4h"))
+        self.assertEqual(feed.calls[0][3]["limit"], 210)
+
+
     def test_historical_cache_can_be_ready_when_latest_trade_is_old(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
