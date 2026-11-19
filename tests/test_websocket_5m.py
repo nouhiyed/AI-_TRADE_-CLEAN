@@ -136,6 +136,39 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m"})
 
+    def test_800_cached_5m_bars_build_closed_15m_and_1h_without_rest(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=250)
+        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 800)
+        self.assertEqual(stream._active_intervals("futures"), ["5m"])
+        frame = candle_frame("5min", rows=800)
+        frame.attrs["timeframe"] = "5m"
+        stream._merge_frame("futures", "BTCUSDT", "5m", frame)
+        snapshot = stream._snapshot("futures", "BTCUSDT")
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
+        self.assertGreaterEqual(len(snapshot["15m"]), 60)
+        self.assertGreaterEqual(len(snapshot["1h"]), 60)
+        self.assertTrue(snapshot["15m"]["is_closed"].all())
+        self.assertTrue(snapshot["1h"]["is_closed"].all())
+        self.assertEqual(snapshot["15m"].iloc[-1]["close"], frame.iloc[-1]["close"])
+        self.assertEqual(snapshot["1h"].iloc[-1]["close"], frame.iloc[-1]["close"])
+
+    def test_spot_keeps_seeded_210_hour_history_and_includes_optional_4h(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None, max_symbols=30)
+        five = candle_frame("5min", rows=800)
+        five.attrs["timeframe"] = "5m"
+        one_hour = candle_frame("1h", rows=210)
+        one_hour.attrs["timeframe"] = "1h"
+        four_hour = candle_frame("4h", rows=210)
+        four_hour.attrs["timeframe"] = "4h"
+        stream._merge_frame("spot", "BTCUSDT", "5m", five)
+        stream._merge_frame("spot", "BTCUSDT", "1h", one_hour)
+        stream._merge_frame("spot", "BTCUSDT", "4h", four_hour)
+        snapshot = stream._snapshot("spot", "BTCUSDT")
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
+        self.assertGreaterEqual(len(snapshot["1h"]), 210)
+
     def test_historical_cache_can_be_ready_when_latest_trade_is_old(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
@@ -366,6 +399,111 @@ class ManualEntryQueueTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertTrue(result["queued"])
             autopilot._event_executor.shutdown(wait=True)
+
+
+class ImmediateBookTickerEntryTests(unittest.TestCase):
+    class Coordinator(FakeCoordinator):
+        def __init__(self, quote):
+            self.market_feed = type(
+                "Feed", (), {"fetch_book_ticker": staticmethod(
+                    lambda _market, _symbol: dict(quote)
+                )}
+            )()
+            self.demo_positions = {}
+            self.last_signals = {}
+            self.open_request = None
+
+        def select_futures_leverage(self, _signal, _plan):
+            return 1
+
+        def request_demo_futures_trade(self, *args, **kwargs):
+            self.open_request = {"args": args, "kwargs": kwargs}
+            return {
+                "approved": True, "trade_id": "demo-test-1",
+                "entry_price": kwargs.get("entry_reference_price"),
+            }
+
+    def test_approved_signal_executes_at_current_ask_without_waiting_for_next_candle(self):
+        coordinator = self.Coordinator({"bid": "100.05", "ask": "100.10"})
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                coordinator, config_path=directory + "/autopilot.json"
+            )
+            autopilot.update({
+                "enabled": True, "trade_futures": True,
+                "min_confidence": 60, "risk_pct": 0.5,
+            }, persist=False)
+            now_ms = int(time.time() * 1000)
+            candle_open = (now_ms // 300000) * 300000
+            signal = {
+                "symbol": "BTCUSDT", "direction": "LONG",
+                "strategy_version": "v3", "confidence": 90,
+                "signal_generated_at_ms": now_ms,
+                "signal_candle_open_time": candle_open,
+                "signal_candle_close_time": candle_open + 299999,
+                "trade_plan": {
+                    "success": True, "strategy_version": "v3",
+                    "timeframe": "5m", "direction": "LONG",
+                    "entry": 100.0, "stop_loss": 99.0,
+                    "take_profit": 102.0, "atr": 1.0,
+                    "reward_risk": 2.0, "setup": "PULLBACK_LONG",
+                },
+            }
+            result = autopilot._execute_ws_entry(
+                "futures", "BTCUSDT",
+                {"signal": signal, "immediate": True}, None,
+            )
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(result["phase"], "opened")
+            self.assertEqual(
+                coordinator.open_request["kwargs"]["entry_reference_price"],
+                100.10,
+            )
+            executed_signal = coordinator.open_request["kwargs"]["signal_override"]
+            self.assertEqual(executed_signal["entry_price_source"], "BINANCE_BOOK_TICKER")
+            self.assertAlmostEqual(executed_signal["entry_deviation_pct"], 0.1, places=5)
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
+
+    def test_short_signal_uses_current_bid(self):
+        coordinator = self.Coordinator({"bid": "99.90", "ask": "100.00"})
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                coordinator, config_path=directory + "/autopilot.json"
+            )
+            autopilot.update({
+                "enabled": True, "trade_futures": True,
+                "min_confidence": 60,
+            }, persist=False)
+            now_ms = int(time.time() * 1000)
+            candle_open = (now_ms // 300000) * 300000
+            signal = {
+                "symbol": "BTCUSDT", "direction": "SHORT",
+                "strategy_version": "v3", "confidence": 90,
+                "signal_generated_at_ms": now_ms,
+                "signal_candle_open_time": candle_open,
+                "signal_candle_close_time": candle_open + 299999,
+                "trade_plan": {
+                    "success": True, "strategy_version": "v3",
+                    "timeframe": "5m", "direction": "SHORT",
+                    "entry": 100.0, "stop_loss": 101.0,
+                    "take_profit": 98.0, "atr": 1.0,
+                    "reward_risk": 2.0, "setup": "PULLBACK_SHORT",
+                },
+            }
+            result = autopilot._execute_ws_entry(
+                "futures", "BTCUSDT",
+                {"signal": signal, "immediate": True}, None,
+            )
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(
+                coordinator.open_request["kwargs"]["entry_reference_price"],
+                99.90,
+            )
+            autopilot._event_executor.shutdown(wait=True)
+            for pool in autopilot._analysis_pools.values():
+                pool.shutdown(wait=True)
 
 
 class LatestEventQueueTests(unittest.TestCase):
