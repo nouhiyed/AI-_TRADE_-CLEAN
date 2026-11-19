@@ -653,7 +653,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "market": market,
                     "symbols": symbols,
                     "count": len(symbols),
-                    "limit": 250,
+                    "limit": 30,
                     "ranking_day": stream_state.get("ranking_day") or (
                         ranked[0].get("ranking_day") if ranked else None
                     ),
@@ -936,7 +936,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json({
                     "success": True,
                     "strategy_timeframe": "5m",
-                    "entry_timing": "next_5m_candle_open",
+                    "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                     "websocket": market_stream.status() if market_stream else {},
                 })
             if path == "/scan/status":
