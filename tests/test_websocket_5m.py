@@ -141,7 +141,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
 
     def test_2412_cached_5m_bars_build_200_closed_hourly_bars_without_rest(self):
         stream = BinanceKlineStream(
-            FakeFeed(), lambda _market, _event: None, max_symbols=250)
+            FakeFeed(), lambda _market, _event: None, max_symbols=30)
         self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 2412)
         self.assertEqual(stream._active_intervals("futures"), ["5m"])
         frame = candle_frame("5min", rows=2412)
@@ -159,7 +159,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
     def test_spot_derives_hourly_history_from_5m_and_includes_optional_4h(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=30)
-        five = candle_frame("5min", rows=2400)
+        five = candle_frame("5min", rows=2412)
         five.attrs["timeframe"] = "5m"
         four_hour = candle_frame("4h", rows=210)
         four_hour.attrs["timeframe"] = "4h"
