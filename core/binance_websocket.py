@@ -23,8 +23,8 @@ class BinanceKlineStream:
         "futures": "wss://fstream.binance.com/market/stream",
     }
     CACHE_LIMITS = {
-        "futures": {"5m": 800, "15m": 280, "1h": 60},
-        "spot": {"5m": 800, "15m": 280, "1h": 210, "4h": 210},
+        "futures": {"5m": 800, "15m": 266, "1h": 66},
+        "spot": {"5m": 2544, "15m": 848, "1h": 212, "4h": 210},
     }
     REQUIRED_ROWS = {
         "futures": {"5m": 60, "15m": 60, "1h": 60},
@@ -505,7 +505,10 @@ class BinanceKlineStream:
                 continue
             if group["open_time"].iloc[0] > bucket_open + pd.Timedelta(minutes=5):
                 continue
-            if len(group) < (2 if timeframe == "15m" else 8):
+            expected_slices = 3 if timeframe == "15m" else 12
+            if (len(group) != expected_slices
+                    or group["open_time"].iloc[0] != bucket_open
+                    or group["open_time"].iloc[-1] != bucket_end - pd.Timedelta(minutes=5)):
                 continue
             row = {
                 "open_time": bucket_open,
@@ -676,7 +679,7 @@ class BinanceKlineStream:
     def _warm_symbol(self, market, symbol):
         # 5m is the canonical stream/cache. Spot additionally seeds its long
         # 1h EMA history and optional 4h macro frame at startup.
-        bootstrap_intervals = ["5m"] + (["1h", "4h"] if market == "spot" else [])
+        bootstrap_intervals = ["5m"] + (["4h"] if market == "spot" else [])
         for interval in bootstrap_intervals:
             limit = self.CACHE_LIMITS[market][interval]
             if interval == "4h":
@@ -694,8 +697,30 @@ class BinanceKlineStream:
                 if self._stop.is_set():
                     return False
                 try:
-                    frame = self.feed.fetch_candles(
-                        market, symbol, interval, limit=limit, closed_only=True)
+                    if limit <= 1000:
+                        frame = self.feed.fetch_candles(
+                            market, symbol, interval, limit=limit, closed_only=True)
+                    else:
+                        # Binance caps each kline page at 1000 rows. Page only
+                        # during the one-time 5m cache warmup, then use WS.
+                        pages = []
+                        remaining = limit
+                        end_time = None
+                        while remaining > 0 and not self._stop.is_set():
+                            page_limit = min(1000, remaining)
+                            page = self.feed.fetch_candles(
+                                market, symbol, interval, limit=page_limit,
+                                closed_only=True, end_time=end_time)
+                            if page is None or page.empty:
+                                break
+                            pages.insert(0, page)
+                            end_time = self._row_key(page["open_time"].iloc[0]) - 1
+                            remaining -= len(page)
+                            if len(page) < page_limit:
+                                break
+                        frame = pd.concat(pages, ignore_index=True) if pages else None
+                    if frame is None or frame.empty:
+                        raise RuntimeError("Binance returned insufficient 5m warmup candles")
                     self._merge_frame(market, symbol, interval, frame)
                     last_error = None
                     break
@@ -880,7 +905,8 @@ class BinanceKlineStream:
                     return
                 continue
 
-            self._refresh_stale_5m(market, current_symbols)
+            # After the one-time 5m REST warmup, all 5m analysis data
+            # arrives only over WebSocket. Do not repair analysis candles via REST.
             if market == "spot":
                 for symbol in current_symbols:
                     self._refresh_spot_4h_if_due(symbol)
