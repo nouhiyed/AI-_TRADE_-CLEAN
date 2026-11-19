@@ -1,8 +1,8 @@
 """Conservative learning from completed DEMO trades.
 
-The first 20 trades are an observation window, not a claim of statistical
+The first 150 Standard trades are an observation window, not a claim of statistical
 certainty. Reports rank setups and recorded signal features by net outcomes;
-automatic disabling only applies to a setup after the 20-trade minimum.
+automatic disabling only applies to a setup after the 150-trade minimum.
 """
 from core import performance
 
@@ -23,7 +23,7 @@ def setup_key(direction, confidence, reward_risk, domain="futures", strategy="mo
 
 
 class LearningEngine:
-    def __init__(self, journal, min_samples=20, disable_below_r=0.1):
+    def __init__(self, journal, min_samples=150, disable_below_r=0.1):
         self.journal = journal
         self.min_samples = int(min_samples)
         self.disable_below_r = float(disable_below_r)
@@ -49,7 +49,7 @@ class LearningEngine:
         return disabled_now
 
     @staticmethod
-    def _feature_groups(trades):
+    def _feature_groups(trades, min_samples=150):
         groups = {}
         for trade in trades:
             context = trade.get("context") or {}
@@ -64,7 +64,7 @@ class LearningEngine:
         for name, items in groups.items():
             summary = performance.summarize(items)
             rows.append({"feature": name, **summary,
-                         "mature": len(items) >= 20})
+                         "mature": len(items) >= min_samples})
         return sorted(rows, key=lambda x: (
             x["expectancy_r"] if x["expectancy_r"] is not None else
             (x["expectancy"] or 0)), reverse=True)
@@ -84,10 +84,10 @@ class LearningEngine:
         suggestions = []
         if len(trades) < self.min_samples:
             suggestions.append(
-                f"Only {len(trades)} closed trades: collect {self.min_samples} before changing strategy.")
+                f"Only {len(trades)} closed trades: collect {self.min_samples} before judging profitability or changing strategy.")
         return {
             "min_samples": self.min_samples, "closed_trades": len(trades),
-            "setups": setups, "features": self._feature_groups(trades),
+            "setups": setups, "features": self._feature_groups(trades, self.min_samples),
             "disabled": disabled, "suggestions": suggestions,
-            "learning_policy": "Observe first 20 closed trades; rank features by net expectancy; no automatic indicator deletion.",
+            "learning_policy": "Observe first 150 closed trades; rank features by net expectancy; no automatic indicator deletion.",
         }
