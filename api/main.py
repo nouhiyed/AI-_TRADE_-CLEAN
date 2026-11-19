@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.19.1"
+API_VERSION = "2026.11.19.2"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -966,7 +966,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 snapshot["analysis"] = runtime.get("analysis_pools", {})
                 snapshot["symbol_auditors"] = runtime.get("symbol_auditors", {})
                 snapshot["strategy_timeframe"] = "5m"
-                snapshot["entry_timing"] = "next_5m_candle_open"
+                snapshot["entry_timing"] = "immediate_after_analysis_with_atr_drift_guard"
                 return self.send_json(snapshot)
             if path == "/status":
                 with scan_status_lock:
