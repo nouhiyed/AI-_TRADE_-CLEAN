@@ -836,8 +836,6 @@ class Autopilot:
 
             frames = candle.get("market_data")
             if not isinstance(frames, dict) or not frames:
-                self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                    "filter_passed", "Missing warmed candle cache")
                 self.last_result = {
                     "status": "WAITING_FOR_CACHE", "phase": "websocket_analysis",
                     "domain": domain, "symbol": symbol,
@@ -849,6 +847,8 @@ class Autopilot:
                 )
                 return
 
+            self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                "filter_passed")
             agent = self.worker_agent(domain)
             if set(frames) == {"5m"}:
                 # Full-universe stream: cheap V3-local 5m gate first. Only
@@ -866,7 +866,7 @@ class Autopilot:
                     return
                 if not prefilter_info.get("candidate"):
                     self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                        "filter_passed",
+                                        "rejection",
                                         prefilter_info.get("reason") or "5m prefilter rejected")
                     with self._analysis_stats_lock:
                         self._analysis_stats[domain]["prefilter_rejected"] += 1
@@ -906,7 +906,7 @@ class Autopilot:
                     or "Agent returned no V3 signal"
                 )
                 self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                    "strategy_accepted", reason=reason)
+                                    "rejection", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                 )
@@ -1175,7 +1175,7 @@ class Autopilot:
             else:
                 reason = trade.get("reason", "Execution rejected")
                 self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
-                                    "risk_approved", reason=reason)
+                                    "rejection", reason=reason)
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": reason})
         except Exception as error:
@@ -1196,7 +1196,7 @@ class Autopilot:
                 reasons = [str(item.get("reason", "")) for item in result["skipped"]]
                 for reason in reasons:
                     self._record_funnel(domain, int((pending.get("signal") or {}).get(
-                        "signal_candle_open_time") or 0), "trade_opened", reason=reason)
+                        "signal_candle_open_time") or 0), "rejection", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "entry_skipped", increment="entry_skipped",
                     reason="; ".join(reason for reason in reasons if reason)[:500],
