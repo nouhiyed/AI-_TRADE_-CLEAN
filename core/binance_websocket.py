@@ -23,8 +23,8 @@ class BinanceKlineStream:
         "futures": "wss://fstream.binance.com/market/stream",
     }
     CACHE_LIMITS = {
-        "futures": {"5m": 100, "15m": 60, "1h": 60},
-        "spot": {"5m": 100, "15m": 60, "1h": 210, "4h": 210},
+        "futures": {"5m": 800, "15m": 280, "1h": 60},
+        "spot": {"5m": 800, "15m": 280, "1h": 210, "4h": 210},
     }
     REQUIRED_ROWS = {
         "futures": {"5m": 60, "15m": 60, "1h": 60},
@@ -55,9 +55,10 @@ class BinanceKlineStream:
         except (TypeError, ValueError):
             self.max_symbols = 250
         self.full_universe = self.max_symbols == 0
-        # Large top-N lists use only 5m trigger streams; higher-timeframe
-        # context is fetched on demand after the local 5m prefilter passes.
-        self.fast_scan_mode = self.full_universe or self.max_symbols >= 100
+        # Every symbol streams only 5m. Higher timeframes are derived locally
+        # from the 5m cache; Spot's long 1h seed and optional 4h macro frame
+        # are bootstrapped/refreshed separately, never fetched per signal.
+        self.fast_scan_mode = True
         try:
             warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "6"))
         except (TypeError, ValueError):
@@ -80,6 +81,8 @@ class BinanceKlineStream:
         self._market_symbols = {"spot": set(), "futures": set()}
         self._cache = {}
         self._cache_ready = set()
+        self._last_4h_refresh_at = {}
+        self._last_4h_refresh_attempt_at = {}
         self._last_open = {}
         self._closed_seen = set()
         self._latest_candles = {}
@@ -297,12 +300,9 @@ class BinanceKlineStream:
         }
 
     def _active_intervals(self, market):
-        # Large universes stream only the fast trigger timeframe for every
-        # symbol. Higher-timeframe context is fetched only after a 5m candidate
-        # passes the V3 local prefilter, avoiding thousands of idle candle streams.
-        if self.fast_scan_mode:
-            return ["5m"]
-        return list(self.CACHE_LIMITS[market])
+        # One canonical 5m stream per symbol. Higher timeframes are aggregated
+        # from the local cache, so websocket subscriptions do not duplicate data.
+        return ["5m"]
 
     def start(self):
         if any(thread.is_alive() for thread in self._threads.values()):
@@ -476,6 +476,110 @@ class BinanceKlineStream:
                 "source": "binance_websocket_cache",
             })
             self._cache[key] = merged
+        if interval == "5m":
+            self._rebuild_derived_frames(market, symbol)
+
+    def _aggregate_5m_frame(self, market, symbol, timeframe, frame):
+        """Aggregate confirmed 5m bars into completed 15m/1h bars without REST."""
+        if frame is None or frame.empty or timeframe not in ("15m", "1h"):
+            return pd.DataFrame()
+        frequency = "15min" if timeframe == "15m" else "1h"
+        duration = self.INTERVAL_MS[timeframe]
+        source = frame.loc[frame["is_closed"].astype(bool)].copy()
+        if source.empty:
+            return pd.DataFrame()
+        source["open_time"] = pd.to_datetime(source["open_time"], utc=True)
+        source["close_time"] = pd.to_datetime(source["close_time"], utc=True)
+        source = source.sort_values("open_time")
+        current_bucket = pd.Timestamp.now(tz="UTC").floor(frequency)
+        source = source.loc[source["open_time"] < current_bucket]
+        if source.empty:
+            return pd.DataFrame()
+        source["bucket_open"] = source["open_time"].dt.floor(frequency)
+        rows = []
+        for bucket_open, group in source.groupby("bucket_open", sort=True):
+            bucket_end = bucket_open + pd.Timedelta(milliseconds=duration)
+            # Require the final 5m slice to be present and closed. Missing
+            # no-trade bars inside a bucket are not fabricated as zero candles.
+            if group.empty or group["open_time"].iloc[-1] < bucket_end - pd.Timedelta(minutes=5):
+                continue
+            if group["open_time"].iloc[0] > bucket_open + pd.Timedelta(minutes=5):
+                continue
+            if len(group) < (2 if timeframe == "15m" else 8):
+                continue
+            row = {
+                "open_time": bucket_open,
+                "open": float(group["open"].iloc[0]),
+                "high": float(group["high"].max()),
+                "low": float(group["low"].min()),
+                "close": float(group["close"].iloc[-1]),
+                "volume": float(group["volume"].sum()),
+                "close_time": bucket_end - pd.Timedelta(milliseconds=1),
+                "is_closed": True,
+            }
+            for column in ("quote_volume", "trades", "taker_buy_base", "taker_buy_quote"):
+                if column in group.columns:
+                    row[column] = float(group[column].sum())
+            rows.append(row)
+        if not rows:
+            return pd.DataFrame()
+        result = pd.DataFrame(rows)
+        result.attrs.update({
+            "market": market, "symbol": symbol,
+            "interval": timeframe, "timeframe": timeframe,
+            "source": "derived_from_binance_5m_cache",
+        })
+        return result
+
+    def _rebuild_derived_frames(self, market, symbol):
+        """Merge locally aggregated 15m/1h bars into the existing history cache."""
+        with self._cache_lock:
+            base = self._cache.get((market, symbol, "5m"))
+            if base is None or base.empty:
+                return
+            base = base.copy()
+        for timeframe in ("15m", "1h"):
+            derived = self._aggregate_5m_frame(market, symbol, timeframe, base)
+            if derived.empty:
+                continue
+            key = (market, symbol, timeframe)
+            with self._cache_lock:
+                current = self._cache.get(key)
+                merged = derived if current is None else pd.concat(
+                    [current, derived], ignore_index=True)
+                merged = merged.drop_duplicates(
+                    subset=["open_time"], keep="last")
+                merged = merged.sort_values("open_time").tail(
+                    self.CACHE_LIMITS[market][timeframe]).reset_index(drop=True)
+                merged.attrs.update({
+                    "market": market, "symbol": symbol,
+                    "interval": timeframe, "timeframe": timeframe,
+                    "source": "derived_from_binance_5m_cache",
+                })
+                self._cache[key] = merged
+
+    def _refresh_spot_4h_if_due(self, symbol, force=False):
+        """Refresh the optional Spot 4h macro context at most once per hour."""
+        now = time.monotonic()
+        last = self._last_4h_refresh_at.get(symbol)
+        last_attempt = self._last_4h_refresh_attempt_at.get(symbol)
+        if not force and last is not None and now - last < 3600:
+            return False
+        if not force and last_attempt is not None and now - last_attempt < 60:
+            return False
+        self._last_4h_refresh_attempt_at[symbol] = now
+        try:
+            frame = self.feed.fetch_candles(
+                "spot", symbol, "4h", limit=self.CACHE_LIMITS["spot"]["4h"],
+                closed_only=True)
+            self._merge_frame("spot", symbol, "4h", frame)
+            self._last_4h_refresh_at[symbol] = now
+            return True
+        except Exception as error:
+            with self._lock:
+                self._status["spot"]["cache_warmup_last_error"] = (
+                    symbol + " 4h refresh: " + str(error))
+            return False
 
     def _merge_event_candle(self, market, symbol, interval, kline):
         try:
@@ -536,10 +640,8 @@ class BinanceKlineStream:
         return self._frame_health_reason(market, interval, frame, now_ms) is None
 
     def _snapshot(self, market, symbol):
-        required = (
-            {"5m": self.REQUIRED_ROWS[market]["5m"]}
-            if self.fast_scan_mode else self.REQUIRED_ROWS[market]
-        )
+        self._rebuild_derived_frames(market, symbol)
+        required = self.REQUIRED_ROWS[market]
         frames = {}
         with self._cache_lock:
             for interval, minimum in required.items():
@@ -566,8 +668,14 @@ class BinanceKlineStream:
         return frames
 
     def _warm_symbol(self, market, symbol):
-        for interval in self._active_intervals(market):
+        # 5m is the canonical stream/cache. Spot additionally seeds its long
+        # 1h EMA history and optional 4h macro frame at startup.
+        bootstrap_intervals = ["5m"] + (["1h", "4h"] if market == "spot" else [])
+        for interval in bootstrap_intervals:
             limit = self.CACHE_LIMITS[market][interval]
+            if interval == "4h":
+                self._refresh_spot_4h_if_due(symbol)
+                continue
             if self._stop.is_set():
                 return False
             with self._cache_lock:
@@ -598,6 +706,7 @@ class BinanceKlineStream:
             else:
                 with self._lock:
                     self._warm_errors.pop((market, symbol, interval), None)
+        self._rebuild_derived_frames(market, symbol)
         frames = self._snapshot(market, symbol)
         ready = frames is not None
         with self._lock:
@@ -766,6 +875,9 @@ class BinanceKlineStream:
                 continue
 
             self._refresh_stale_5m(market, current_symbols)
+            if market == "spot":
+                for symbol in current_symbols:
+                    self._refresh_spot_4h_if_due(symbol)
             ready = {
                 symbol for symbol in current_symbols
                 if self._snapshot(market, symbol) is not None
