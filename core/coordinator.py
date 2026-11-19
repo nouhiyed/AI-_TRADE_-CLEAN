@@ -304,7 +304,7 @@ class TradingCoordinator(SpotDemoMixin):
             source = "BINANCE"
         else:
             price = Decimal(str(reference_price))
-            source = "BINANCE_WS_5M_OPEN"
+            source = "BINANCE_BOOK_TICKER"
         if not price.is_finite() or price <= 0:
             raise ValueError("Invalid live market price")
         market_type = "SPOT" if str(market).lower() == "spot" else "FUTURES"
