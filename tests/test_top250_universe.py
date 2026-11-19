@@ -36,6 +36,13 @@ class RankedMarketFeed(BinanceMarketData):
 
 
 class Top250UniverseTests(unittest.TestCase):
+    def test_production_websocket_default_is_top_30_liquid_pairs(self):
+        stream = BinanceKlineStream(
+            RankedMarketFeed(), lambda _market, _event: None)
+        self.assertEqual(stream.max_symbols, 30)
+        self.assertEqual(stream._active_intervals("spot"), ["5m"])
+        stream.stop()
+
     def test_spot_market_data_uses_official_market_data_only_rest_endpoint(self):
         self.assertEqual(
             BinanceMarketData.BASE_URLS["spot"],
