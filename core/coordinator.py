@@ -35,6 +35,9 @@ class TradingCoordinator(SpotDemoMixin):
     def __init__(self, initial_balance=1000):
         self.risk = RiskManager(initial_balance=initial_balance)
         self.market_feed = BinanceMarketData(timeout=240, total_timeout=240)
+        # Execution quotes must fail fast; candle warmup has a separate longer
+        # timeout and never runs in the entry writer.
+        self.execution_quote_feed = BinanceMarketData(timeout=3, total_timeout=5)
         self.market_engine = MarketDataEngine(timeout=6)
         self.market_scanner = FuturesMarketScanner(timeout=6, market=self.market_feed)
         # Injected by the API runtime; kept optional for offline/unit-test use.
