@@ -237,7 +237,7 @@ class SpotDemoMixin:
 
             reservation = self.risk.reserve_trade(
                 domain=domain, symbol=symbol, direction="LONG",
-                entry=float(entry), stop_loss=float(stop),
+                entry=float(price), stop_loss=float(stop),
                 risk_pct=float(risk_pct), leverage=1)
             if not reservation.get("approved"):
                 return reservation
