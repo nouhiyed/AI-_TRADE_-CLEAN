@@ -26,8 +26,8 @@ class FakeSpotCache:
         self.ready = ready
         self.calls = []
 
-    def _snapshot(self, market, symbol):
-        self.calls.append((market, symbol))
+    def _snapshot(self, market, symbol, max_age_seconds=None):
+        self.calls.append((market, symbol, max_age_seconds))
         return {"5m": "5m", "15m": "15m", "1h": "1h"} if self.ready else None
 
 
