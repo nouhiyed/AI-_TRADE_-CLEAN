@@ -812,12 +812,10 @@ class Autopilot:
             local_now_ms = int(time.time() * 1000)
             audit_only = bool(candle.get("audit_only"))
 
-            # A reconnect can deliver a valid closed kline long after its
-            # Binance event timestamp. It is still useful for cycle coverage,
-            # but must never be allowed to create a late entry. Keep recent
-            # delayed events as audit-only instead of incorrectly marking the
-            # symbol as an analysis error. Truly expired (>10m), malformed, or
-            # future-dated events remain stale and fail the coverage check.
+            # A reconnect or slow cache bootstrap can delay a valid closed
+            # kline by more than ten minutes. Preserve valid events for audit
+            # and coverage, but mark anything beyond the 90-second live-entry
+            # window audit-only. Malformed or future-dated events remain stale.
             event_age_ms = local_now_ms - close_event_time
             if (close_time <= 0 or close_event_time < close_time
                     or close_event_time - close_time > 10000
