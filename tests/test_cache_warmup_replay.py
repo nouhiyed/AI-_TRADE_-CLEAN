@@ -111,6 +111,19 @@ class CacheWarmupReplayTests(unittest.TestCase):
         queued = self.autopilot._analysis_pending[("spot", "SOLUSDT")]
         self.assertTrue(queued["audit_only"])
 
+    def test_optional_spot_4h_does_not_block_5m_cache_readiness(self):
+        stream = BinanceKlineStream(
+            FakeFeed(), lambda _market, _event: None,
+        )
+        stream.feed.fetch_candles = lambda *_args, **_kwargs: object()
+        stream._merge_frame = lambda *_args, **_kwargs: None
+        stream._rebuild_derived_frames = lambda *_args, **_kwargs: None
+        snapshot = {"5m": object()}
+        with patch.object(stream, "_snapshot", return_value=snapshot):
+            with patch.object(stream, "_refresh_spot_4h_if_due") as refresh:
+                self.assertTrue(stream._warm_symbol("spot", "BTCUSDT"))
+                refresh.assert_not_called()
+
     def test_stream_calls_auditor_when_symbol_cache_becomes_ready(self):
         calls = []
         stream = BinanceKlineStream(

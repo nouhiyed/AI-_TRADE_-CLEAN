@@ -675,12 +675,11 @@ class BinanceKlineStream:
     def _warm_symbol(self, market, symbol):
         # One REST bootstrap: 5m only, plus Spot 4h macro context.
         # 15m/1h are derived from the canonical 5m history.
-        bootstrap_intervals = ["5m"] + (["4h"] if market == "spot" else [])
+        # Only canonical 5m history participates in cache readiness.
+        # Optional Spot 4h context is refreshed independently by _warm_market.
+        bootstrap_intervals = ["5m"]
         for interval in bootstrap_intervals:
             limit = self.CACHE_LIMITS[market][interval]
-            if interval == "4h":
-                self._refresh_spot_4h_if_due(symbol)
-                continue
             if self._stop.is_set():
                 return False
             with self._cache_lock:
