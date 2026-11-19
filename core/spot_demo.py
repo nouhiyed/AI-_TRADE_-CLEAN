@@ -47,6 +47,9 @@ class SpotDemoMixin:
                     "opportunities": []}
         # Volume ranks the universe but does not exclude eligible USDT pairs.
         # A volume floor is applied only when explicitly requested by a caller.
+        requested_limit = (
+            30 if limit is None else min(30, max(1, int(limit)))
+        )
         minimum = (float(min_quote_volume)
                    if min_quote_volume is not None else None)
         try:
@@ -94,7 +97,7 @@ class SpotDemoMixin:
             })
 
         ranked.sort(key=lambda item: item["quote_volume"], reverse=True)
-        universe = ranked if limit is None else ranked[:max(1, int(limit))]
+        universe = ranked[:requested_limit]
 
         scan_meta = {
             "universe_total": len(universe),
