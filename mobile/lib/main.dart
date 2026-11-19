@@ -1707,7 +1707,7 @@ class _TradeShellState extends State<TradeShell>
       final cycle = latest(market);
       final stages = [
         ('وصلت', 'events_received'),
-        ('اجتازت الفلتر', 'filter_passed'),
+        ('اجتازت فلتر البيانات', 'data filter passed'),
         ('قبلتها الاستراتيجية', 'strategy_accepted'),
         ('خطة صالحة', 'valid_plan'),
         ('وافقت المخاطرة', 'risk_approved'),
