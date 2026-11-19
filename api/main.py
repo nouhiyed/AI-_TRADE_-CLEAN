@@ -945,7 +945,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json({
                     "success": True,
                     "strategy_timeframe": "5m",
-                    "entry_timing": "next_5m_candle_open",
+                    "entry_timing": "immediate_current_bid_ask",
                     "websocket": market_stream.status() if market_stream else {},
                 })
             if path == "/scan/status":
@@ -984,7 +984,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
-                        "entry_timing": "next_5m_candle_open",
+                        "entry_timing": "immediate_current_bid_ask",
                         "live_mode_locked": True,
                     },
                 })
