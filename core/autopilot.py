@@ -187,6 +187,7 @@ class Autopilot:
         return {"config": dict(self.config), "last_run": self.last_run,
                 "last_result": self.last_result,
                 "last_execution_result": dict(self._last_execution_result),
+                "funnel": self.funnel_status(),
                 "pending_entries": pending_entries,
                 "recent_entry_audits": recent_entry_audits[:30],
                 "analysis_pools": analysis,
