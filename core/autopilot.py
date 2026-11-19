@@ -839,6 +839,10 @@ class Autopilot:
                 return
             if event_age_ms > 90000:
                 audit_only = True
+                self._record_symbol_audit(
+                    domain, symbol, "audit_only_delayed", increment="audit_only",
+                    reason="Delayed WebSocket event is retained for coverage only",
+                )
 
             frames = candle.get("market_data")
             if not isinstance(frames, dict) or not frames:
@@ -934,7 +938,7 @@ class Autopilot:
                 cfg = dict(self.config)
                 if audit_only:
                     self._record_symbol_audit(
-                        domain, symbol, "audit_only_candidate", increment="audit_only",
+                        domain, symbol, "audit_only_candidate",
                         reason="Delayed cache/worker replay is audited but cannot open a late trade",
                         direction=direction, setup=plan.get("setup"),
                     )
