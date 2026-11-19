@@ -801,6 +801,33 @@ class _TradeShellState extends State<TradeShell>
     final poolWorkers = int.tryParse('${pool['workers'] ?? 0}') ?? 0;
     final queueDepth = int.tryParse('${pool['queue_depth'] ?? 0}') ?? 0;
     final queueLimit = int.tryParse('${pool['queue_limit'] ?? 0}') ?? 0;
+    final funnelRootRaw = scanStatus['funnel'];
+    final funnelRoot = funnelRootRaw is Map
+        ? Map<String, dynamic>.from(funnelRootRaw)
+        : <String, dynamic>{};
+    final funnelCyclesRaw = funnelRoot['cycles'];
+    final funnelCycles = funnelCyclesRaw is List
+        ? funnelCyclesRaw.whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item)).toList()
+        : <Map<String, dynamic>>[];
+    final funnel = funnelCycles.firstWhere(
+      (item) => '${item['domain'] ?? ''}'.toLowerCase() == market,
+      orElse: () => <String, dynamic>{},
+    );
+    final funnelEvents = int.tryParse('${funnel['events_received'] ?? 0}') ?? 0;
+    final funnelFilter = int.tryParse('${funnel['filter_passed'] ?? 0}') ?? 0;
+    final funnelStrategy = int.tryParse('${funnel['strategy_accepted'] ?? 0}') ?? 0;
+    final funnelPlans = int.tryParse('${funnel['valid_plans'] ?? 0}') ?? 0;
+    final funnelRisk = int.tryParse('${funnel['risk_approved'] ?? 0}') ?? 0;
+    final funnelOpened = int.tryParse('${funnel['opened'] ?? 0}') ?? 0;
+    final topRejectRaw = funnel['top_rejections'];
+    final topRejects = topRejectRaw is List
+        ? topRejectRaw.whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item)).toList()
+        : <Map<String, dynamic>>[];
+    final topReject = topRejects.isNotEmpty ? topRejects.first : <String, dynamic>{};
+    final topRejectReason = '${topReject['reason'] ?? ''}';
+    final topRejectCount = int.tryParse('${topReject['count'] ?? 0}') ?? 0;
     final scanning = !{'idle', 'error', 'waiting'}.contains(phase);
     final phaseLabel = switch (phase) {
       'loading_universe' => tr('تحميل قائمة العملات', 'Loading coin list'),
@@ -942,6 +969,26 @@ class _TradeShellState extends State<TradeShell>
                 ),
               ],
             ),
+          ],
+          if (funnel.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Text(
+              '${tr('مسار الإشارات:', 'SIGNAL FUNNEL:')} $funnelEvents → $funnelFilter → $funnelStrategy → $funnelPlans → $funnelRisk → $funnelOpened',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: accent,
+                fontSize: 8,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            if (topRejectReason.isNotEmpty)
+              Text(
+                '${tr('أكثر رفض:', 'TOP REJECT:')} $topRejectReason ($topRejectCount)',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: widget.muted, fontSize: 8),
+              ),
           ],
         ],
       ),
