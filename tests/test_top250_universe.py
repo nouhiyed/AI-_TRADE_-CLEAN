@@ -35,7 +35,7 @@ class RankedMarketFeed(BinanceMarketData):
         raise AssertionError("Unexpected endpoint: " + endpoint)
 
 
-class Top250UniverseTests(unittest.TestCase):
+class Top30UniverseTests(unittest.TestCase):
     def test_spot_market_data_uses_official_market_data_only_rest_endpoint(self):
         self.assertEqual(
             BinanceMarketData.BASE_URLS["spot"],
@@ -225,13 +225,13 @@ class Top250UniverseTests(unittest.TestCase):
 
         feed = Feed()
         stream = BinanceKlineStream(
-            feed, lambda _market, _event: None, max_symbols=250
+            feed, lambda _market, _event: None, max_symbols=30
         )
         symbols = stream._load_symbols("spot")
 
-        self.assertEqual(len(symbols), 250)
-        self.assertEqual(len(set(symbols)), 250)
-        self.assertEqual(feed.requested, [("spot", 250)])
+        self.assertEqual(len(symbols), 30)
+        self.assertEqual(len(set(symbols)), 30)
+        self.assertEqual(feed.requested, [("spot", 30)])
         self.assertEqual(stream.status()["spot"]["ranking_day"], "2026-11-17")
         self.assertTrue(stream.status()["fast_scan_mode"])
         self.assertEqual(stream._active_intervals("spot"), ["5m"])
@@ -246,15 +246,15 @@ class Top250UniverseTests(unittest.TestCase):
                 ]
 
         stream = BinanceKlineStream(
-            Feed(), lambda _market, _event: None, max_symbols=250
+            Feed(), lambda _market, _event: None, max_symbols=30
         )
-        with self.assertRaisesRegex(RuntimeError, "exactly 250"):
+        with self.assertRaisesRegex(RuntimeError, "exactly 30"):
             stream._load_symbols("futures")
         stream.stop()
 
     def test_daily_universe_prunes_removed_symbols_from_live_cache(self):
         stream = BinanceKlineStream(
-            object(), lambda _market, _event: None, max_symbols=250
+            object(), lambda _market, _event: None, max_symbols=30
         )
         stream._cache = {
             ("spot", "KEEPUSDT", "5m"): "current",
@@ -291,7 +291,7 @@ class Top250UniverseTests(unittest.TestCase):
         self.assertEqual(stream.status()["latest_candle_symbols"]["spot"], 1)
         stream.stop()
 
-    def test_futures_scanner_never_exceeds_250(self):
+    def test_futures_scanner_never_exceeds_30(self):
         class Feed:
             def __init__(self):
                 self.requested = None
@@ -300,7 +300,7 @@ class Top250UniverseTests(unittest.TestCase):
                 self.requested = (market, limit)
                 return [
                     {"symbol": "COIN%03dUSDT" % index, "quote_volume": 1000 - index}
-                    for index in range(250)
+                    for index in range(30)
                 ]
 
         feed = Feed()
@@ -308,8 +308,8 @@ class Top250UniverseTests(unittest.TestCase):
 
         universe = scanner.scan_universe(limit=999)
 
-        self.assertEqual(feed.requested, ("futures", 250))
-        self.assertEqual(len(universe), 250)
+        self.assertEqual(feed.requested, ("futures", 30))
+        self.assertEqual(len(universe), 30)
         self.assertEqual(universe[0]["symbol"], "COIN000USDT")
 
 
