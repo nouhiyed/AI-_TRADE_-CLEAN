@@ -39,6 +39,7 @@ class TradingCoordinator(SpotDemoMixin):
         self.market_scanner = FuturesMarketScanner(timeout=6, market=self.market_feed)
         # Injected by the API runtime; kept optional for offline/unit-test use.
         self.market_context = None
+        self.market_frame_provider = None
 
         self.agents = {
             "futures": FuturesAgent(),
@@ -1437,9 +1438,16 @@ class TradingCoordinator(SpotDemoMixin):
 
         # A chart submission belongs to one selected market/agent. Do not
         # fetch the other market or run its agent on this request.
-        analysis = self.analyze_live(
-            symbol, preferred_timeframe=timeframe, domains=[domain],
-            agent_overrides={domain: agent} if agent is not None else None,
+        frames = (
+            self.market_frame_provider(domain, symbol)
+            if callable(self.market_frame_provider) else None
+        )
+        if not isinstance(frames, dict) or not frames:
+            reason = "Warmed WebSocket candle cache is not ready for this symbol"
+            return {**base, "success": False, "decision_status": "WAITING_FOR_CACHE",
+                    "decision_reason": reason, "reason": reason}
+        analysis = self.analyze_live_from_frames(
+            symbol, domain, frames, agent=agent, profile="standard"
         )
         signal = analysis.get("signals", {}).get(domain, {})
         if not isinstance(signal, dict) or signal.get("error"):
