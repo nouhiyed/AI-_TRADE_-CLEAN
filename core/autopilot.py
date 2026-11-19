@@ -26,6 +26,7 @@ DEFAULTS = {
     "use_context": True,
     "trade_futures": True,
     "trade_spot": True,
+    "profile": "standard",
 
 }
 LIMITS = {
@@ -130,6 +131,11 @@ class Autopilot:
             if key not in DEFAULTS:
                 continue
             default = DEFAULTS[key]
+            if key == "profile":
+                profile = str(value or "standard").strip().lower()
+                if profile in ("standard", "explore"):
+                    self.config[key] = profile
+                continue
             if isinstance(default, bool):
                 if isinstance(value, bool):
                     self.config[key] = value
@@ -849,6 +855,7 @@ class Autopilot:
 
             self._record_funnel(domain, int(candle.get("open_time") or 0),
                                 "filter_passed")
+            profile = str(self.config.get("profile", "standard"))
             agent = self.worker_agent(domain)
             if set(frames) == {"5m"}:
                 # Full-universe stream: cheap V3-local 5m gate first. Only
@@ -894,7 +901,7 @@ class Autopilot:
             else:
                 # Explicit top-N mode retains the original multi-timeframe cache path.
                 analysis = self.c.analyze_live_from_frames(
-                    symbol, domain, frames, agent=agent
+                    symbol, domain, frames, agent=agent, profile=profile
                 )
                 signal_source = "BINANCE_WEBSOCKET_CACHE"
 
@@ -929,6 +936,7 @@ class Autopilot:
             signal["analysis_queue_wait_ms"] = max(0, analysis_started_at_ms - received_at_ms)
             signal["analysis_duration_ms"] = max(0, analysis_completed_at_ms - analysis_started_at_ms)
             signal["signal_source"] = signal_source
+            signal["profile"] = profile
 
             plan = signal.get("trade_plan")
             direction = str(signal.get("direction", "WAIT")).upper()
@@ -1146,13 +1154,19 @@ class Autopilot:
             signal["entry_drift"] = drift
             signal["entry_atr"] = atr
             signal["entry_timing"] = "immediate_after_analysis"
+            signal["profile"] = str(cfg.get("profile", "standard"))
+            execution_risk_pct = (
+                min(0.25, max(0.10, float(cfg.get("risk_pct", 0.2))))
+                if signal["profile"] == "explore"
+                else float(cfg["risk_pct"])
+            )
             signal["setup_key"] = key
             signal["confidence_adjusted"] = confidence
             self.c.last_signals[domain] = signal
             if domain == "futures":
                 leverage = self.c.select_futures_leverage(signal, plan)
                 trade = self.c.request_demo_futures_trade(
-                    symbol, normalized, risk_pct=float(cfg["risk_pct"]),
+                    symbol, normalized, risk_pct=execution_risk_pct,
                     leverage=leverage, signal_override=signal,
                     entry_reference_price=entry_price)
             else:
