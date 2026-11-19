@@ -602,8 +602,31 @@ class BinanceKlineStream:
                 if self._stop.is_set():
                     return False
                 try:
-                    frame = self.feed.fetch_candles(
-                        market, symbol, interval, limit=limit, closed_only=True)
+                    if limit <= 1000:
+                        frame = self.feed.fetch_candles(
+                            market, symbol, interval, limit=limit, closed_only=True)
+                    else:
+                        # Binance caps each kline request at 1000 rows. Page
+                        # backwards during the one-time warmup, then merge once.
+                        pages = []
+                        remaining = limit
+                        end_time = None
+                        while remaining > 0 and not self._stop.is_set():
+                            page_limit = min(1000, remaining)
+                            page = self.feed.fetch_candles(
+                                market, symbol, interval, limit=page_limit,
+                                closed_only=True, end_time=end_time)
+                            if page is None or page.empty:
+                                break
+                            pages.insert(0, page)
+                            oldest_ms = self._row_key(page["open_time"].iloc[0])
+                            end_time = oldest_ms - 1
+                            remaining -= len(page)
+                            if len(page) < page_limit:
+                                break
+                        frame = pd.concat(pages, ignore_index=True) if pages else None
+                    if frame is None or frame.empty:
+                        raise RuntimeError("Binance returned insufficient warmup candles")
                     self._merge_frame(market, symbol, interval, frame)
                     last_error = None
                     break
