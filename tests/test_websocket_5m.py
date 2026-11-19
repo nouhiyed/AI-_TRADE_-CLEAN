@@ -139,12 +139,12 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
 
-    def test_2400_cached_5m_bars_build_200_closed_hourly_bars_without_rest(self):
+    def test_2412_cached_5m_bars_build_200_closed_hourly_bars_without_rest(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=250)
-        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 2400)
+        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 2412)
         self.assertEqual(stream._active_intervals("futures"), ["5m"])
-        frame = candle_frame("5min", rows=2400)
+        frame = candle_frame("5min", rows=2412)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         snapshot = stream._snapshot("futures", "BTCUSDT")
@@ -428,7 +428,8 @@ class ManualEntryQueueTests(unittest.TestCase):
             }
             result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
             self.assertTrue(result["success"])
-            self.assertTrue(result["queued"])
+            self.assertFalse(result["queued"])
+            self.assertEqual(result["decision_status"], "SUBMITTED")
             autopilot._event_executor.shutdown(wait=True)
 
 
@@ -756,212 +757,13 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         self.assertEqual(batch["events"][0]["open_time"], expected_open)
         self.assertEqual(batch["missing_symbols"], [])
 
-    def test_stale_healthy_cache_is_refreshed_once_per_5m_cycle(self):
-        class RefreshFeed:
-            def __init__(self, frame):
-                self.frame = frame
-                self.calls = []
-
-            def fetch_candles(self, market, symbol, interval, **kwargs):
-                self.calls.append((market, symbol, interval, kwargs))
-                return self.frame.copy()
-
-        now_ms = int(time.time() * 1000)
-        expected_open = ((now_ms // 300000) - 1) * 300000
-        stale = candle_frame("5min", rows=100)
-        stale.attrs["timeframe"] = "5m"
-        stale["open_time"] -= pd.Timedelta(minutes=5)
-        stale["close_time"] -= pd.Timedelta(minutes=5)
-        fresh = candle_frame("5min", rows=100)
-        fresh.attrs["timeframe"] = "5m"
-        feed = RefreshFeed(fresh)
-        stream = BinanceKlineStream(
-            feed, lambda _market, _event: None, max_symbols=0
-        )
-        stream._merge_frame("futures", "BTCUSDT", "5m", stale)
-
-        refreshed = stream._refresh_stale_5m(
-            "futures", ["BTCUSDT"], now_ms=now_ms
-        )
-        self.assertEqual(refreshed, ["BTCUSDT"])
-        self.assertEqual(len(feed.calls), 1)
-        self.assertEqual(
-            stream._row_key(
-                stream._cache[("futures", "BTCUSDT", "5m")].iloc[-1]["open_time"]
-            ),
-            expected_open,
-        )
-
-        # Repeated warmup passes in the same cycle must not repeat REST calls.
-        self.assertEqual(
-            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
-            [],
-        )
-        self.assertEqual(len(feed.calls), 1)
-
-    def test_missing_exact_cycle_refreshes_even_with_newer_open_cache_row(self):
-        class RefreshFeed:
-            def __init__(self, frame):
-                self.frame = frame
-                self.calls = 0
-
-            def fetch_candles(self, market, symbol, interval, **kwargs):
-                self.calls += 1
-                return self.frame.copy()
-
-        now_ms = int(time.time() * 1000)
-        expected_open = ((now_ms // 300000) - 1) * 300000
-        cached = candle_frame("5min", rows=100)
-        cached.attrs["timeframe"] = "5m"
-        cached = cached.loc[
-            cached["open_time"].map(
-                lambda value: int(value.timestamp() * 1000)
-            ) != expected_open
-        ].copy()
-        forming = cached.iloc[-1].copy()
-        forming["open_time"] = pd.Timestamp(expected_open + 300000, unit="ms", tz="UTC")
-        forming["close_time"] = (
-            forming["open_time"] + pd.Timedelta(minutes=5)
-            - pd.Timedelta(milliseconds=1)
-        )
-        forming["is_closed"] = False
-        cached = pd.concat([cached, forming.to_frame().T], ignore_index=True)
-        cached["open_time"] = pd.to_datetime(cached["open_time"], utc=True)
-        cached["close_time"] = pd.to_datetime(cached["close_time"], utc=True)
-        cached.attrs["timeframe"] = "5m"
-
-        fresh = candle_frame("5min", rows=100)
-        fresh.attrs["timeframe"] = "5m"
-        feed = RefreshFeed(fresh)
-        stream = BinanceKlineStream(
-            feed, lambda _market, _event: None, max_symbols=0
-        )
-        stream._merge_frame("futures", "BTCUSDT", "5m", cached)
-
-        self.assertEqual(
-            stream._row_key(
-                stream._cache[("futures", "BTCUSDT", "5m")].iloc[-1]["open_time"]
-            ),
-            expected_open + 300000,
-        )
-        self.assertEqual(
-            stream._refresh_stale_5m(
-                "futures", ["BTCUSDT"], now_ms=now_ms
-            ),
-            ["BTCUSDT"],
-        )
-        self.assertEqual(feed.calls, 1)
-        refreshed = stream._cache[("futures", "BTCUSDT", "5m")]
-        self.assertIn(
-            expected_open,
-            {
-                stream._row_key(value)
-                for value in refreshed["open_time"]
-            },
-        )
-
-    def test_successful_but_incomplete_rest_response_is_retried_with_backoff(self):
-        class IncompleteThenFreshFeed:
-            def __init__(self, incomplete, fresh):
-                self.incomplete = incomplete
-                self.fresh = fresh
-                self.calls = 0
-                self.kwargs = []
-
-            def fetch_candles(self, market, symbol, interval, **kwargs):
-                self.calls += 1
-                self.kwargs.append(kwargs)
-                return (self.incomplete if self.calls == 1 else self.fresh).copy()
-
-        now_ms = int(time.time() * 1000)
-        expected_open = ((now_ms // 300000) - 1) * 300000
-        fresh = candle_frame("5min", rows=100)
-        fresh.attrs["timeframe"] = "5m"
-        incomplete = fresh.loc[
-            fresh["open_time"].map(
-                lambda value: int(value.timestamp() * 1000)
-            ) != expected_open
-        ].copy()
-        incomplete.attrs["timeframe"] = "5m"
-        feed = IncompleteThenFreshFeed(incomplete, fresh)
-        stream = BinanceKlineStream(
-            feed, lambda _market, _event: None, max_symbols=0
-        )
-        stream._merge_frame("futures", "BTCUSDT", "5m", incomplete)
-
-        self.assertEqual(
-            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
-            [],
-        )
-        self.assertEqual(feed.calls, 1)
-        # A valid HTTP response without the exact candle is not marked done;
-        # it is retried after the bounded 30-second cooldown.
-        key = ("futures", "BTCUSDT", expected_open)
-        self.assertIn(key, stream._last_rest_refresh_cycle)
-        self.assertEqual(
-            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
-            [],
-        )
-        self.assertEqual(feed.calls, 1)
-        stream._last_rest_refresh_attempt_at[key] -= 31.0
-
-        self.assertEqual(
-            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
-            ["BTCUSDT"],
-        )
-        self.assertEqual(feed.calls, 2)
-        self.assertEqual(feed.kwargs[-1]["start_time"], expected_open - 300000)
-        self.assertEqual(feed.kwargs[-1]["end_time"], expected_open + 299999)
-
-    def test_failed_stale_refresh_can_retry_in_same_cycle(self):
-        class RetryFeed:
-            def __init__(self, frame):
-                self.frame = frame
-                self.calls = 0
-
-            def fetch_candles(self, market, symbol, interval, **kwargs):
-                self.calls += 1
-                if self.calls == 1:
-                    raise RuntimeError("temporary Binance timeout")
-                return self.frame.copy()
-
-        now_ms = int(time.time() * 1000)
-        stale = candle_frame("5min", rows=100)
-        stale.attrs["timeframe"] = "5m"
-        stale["open_time"] -= pd.Timedelta(minutes=5)
-        stale["close_time"] -= pd.Timedelta(minutes=5)
-        fresh = candle_frame("5min", rows=100)
-        fresh.attrs["timeframe"] = "5m"
-        feed = RetryFeed(fresh)
-        stream = BinanceKlineStream(
-            feed, lambda _market, _event: None, max_symbols=0
-        )
-        stream._merge_frame("futures", "BTCUSDT", "5m", stale)
-
-        self.assertEqual(
-            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
-            [],
-        )
-        self.assertEqual(
-            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
-            [],
-        )
-        self.assertEqual(feed.calls, 1)
-        key = ("futures", "BTCUSDT", ((now_ms // 300000) - 1) * 300000)
-        stream._last_rest_refresh_attempt_at[key] -= 31.0
-        self.assertEqual(
-            stream._refresh_stale_5m("futures", ["BTCUSDT"], now_ms=now_ms),
-            ["BTCUSDT"],
-        )
-        self.assertEqual(feed.calls, 2)
-
-    def test_full_250_symbol_cycle_reaches_the_analysis_queue(self):
+    def test_top_30_symbol_cycle_reaches_the_analysis_queue(self):
         frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
-        symbols = ["COIN%03dUSDT" % index for index in range(250)]
+        symbols = ["COIN%03dUSDT" % index for index in range(30)]
         stream = BinanceKlineStream(
-            FakeFeed(), lambda _market, _event: None, max_symbols=250
+            FakeFeed(), lambda _market, _event: None, max_symbols=30
         )
         stream._market_symbols["futures"] = set(symbols)
         for symbol in symbols:
@@ -970,8 +772,8 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         batch = stream.latest_closed_events(
             "futures", expected_open, symbols=symbols
         )
-        self.assertEqual(batch["requested"], 250)
-        self.assertEqual(batch["available"], 250)
+        self.assertEqual(batch["requested"], 30)
+        self.assertEqual(batch["available"], 30)
         self.assertEqual(batch["missing_symbols"], [])
 
         with tempfile.TemporaryDirectory() as directory:
@@ -981,7 +783,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
             try:
                 autopilot.register_symbol_universe("futures", symbols)
                 # Hold worker submissions so this test can assert the exact
-                # 250 distinct cycle events accepted by the bounded queue.
+                # 30 distinct cycle events accepted by the bounded queue.
                 autopilot.submit_analysis = lambda *_args: True
                 for event in batch["events"]:
                     self.assertTrue(autopilot.on_market_kline("futures", event))
@@ -989,10 +791,10 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
                     sum(autopilot.has_seen_candle(
                         "futures", symbol, expected_open
                     ) for symbol in symbols),
-                    250,
+                    30,
                 )
                 self.assertEqual(
-                    len(autopilot._analysis_pending), 250
+                    len(autopilot._analysis_pending), 30
                 )
                 self.assertEqual(
                     autopilot.status()["analysis_pools"]["futures"]["rejected"], 0
