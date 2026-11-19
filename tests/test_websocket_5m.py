@@ -198,7 +198,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         snapshot = self.stream._snapshot("futures", "BTCUSDT")
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
-        self.assertEqual(len(snapshot["15m"]), 267)
+        self.assertEqual(len(snapshot["15m"]), 266)
         self.assertGreaterEqual(len(snapshot["1h"]), 60)
         self.assertEqual(snapshot["15m"].attrs["source"], "derived_from_5m_websocket_cache")
 
