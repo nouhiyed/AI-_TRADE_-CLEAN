@@ -472,15 +472,15 @@ class Autopilot:
                     )
             received_at_ms = int(candle.get("received_at_ms") or 0)
             age_ms = int(time.time() * 1000) - received_at_ms if received_at_ms > 0 else 10**12
-            if age_ms > 10 * 60 * 1000:
-                with self._analysis_stats_lock:
-                    self._analysis_stats[domain]["dropped_stale"] += 1
-                self._record_symbol_audit(
-                    domain, symbol, "stale", increment="stale",
-                    reason="Closed candle exceeded the 10-minute audit retention window",
-                )
-                continue
-            if age_ms > 90000:
+            # Queue wait and market-event age are different clocks. A cache
+            # replay is newly queued even when its original Binance event is old.
+            # Keep such events for coverage/audit, never for live execution.
+            event_time_ms = int(candle.get("event_time") or 0)
+            event_age_ms = (
+                int(time.time() * 1000) - event_time_ms
+                if event_time_ms > 0 else age_ms
+            )
+            if event_age_ms > 90000:
                 candle["audit_only"] = True
             self._analyze_ws_close(domain, symbol, candle, received_at_ms)
 
@@ -669,12 +669,9 @@ class Autopilot:
         replay["market_data"] = frames
         replay["cache_ready"] = True
         age_ms = int(time.time() * 1000) - int(replay.get("event_time") or 0)
-        if age_ms > 10 * 60 * 1000:
-            self._record_symbol_audit(
-                domain, symbol, "stale", increment="stale",
-                reason="Cache became ready after the 10-minute audit retention window",
-            )
-            return False
+        # Cache warmup latency must not erase a valid closed-candle event.
+        # Replays older than the live-entry window are retained for audit only;
+        # the execution path independently rejects signals older than 90 seconds.
         replay["audit_only"] = bool(replay.get("audit_only")) or age_ms > 90000
         accepted = self._queue_latest_analysis(domain, symbol, replay, count_event=False)
         if accepted:
@@ -815,12 +812,10 @@ class Autopilot:
             local_now_ms = int(time.time() * 1000)
             audit_only = bool(candle.get("audit_only"))
 
-            # A reconnect can deliver a valid closed kline long after its
-            # Binance event timestamp. It is still useful for cycle coverage,
-            # but must never be allowed to create a late entry. Keep recent
-            # delayed events as audit-only instead of incorrectly marking the
-            # symbol as an analysis error. Truly expired (>10m), malformed, or
-            # future-dated events remain stale and fail the coverage check.
+            # A reconnect or slow cache bootstrap can delay a valid closed
+            # kline by more than ten minutes. Preserve valid events for audit
+            # and coverage, but mark anything beyond the 90-second live-entry
+            # window audit-only. Malformed or future-dated events remain stale.
             event_age_ms = local_now_ms - close_event_time
             if (close_time <= 0 or close_event_time < close_time
                     or close_event_time - close_time > 10000
@@ -829,13 +824,6 @@ class Autopilot:
                     domain, symbol, "stale",
                     increment="stale",
                     reason="Closed-candle event has invalid close/event timestamps",
-                )
-                return
-            if event_age_ms > 10 * 60 * 1000:
-                self._record_symbol_audit(
-                    domain, symbol, "stale",
-                    increment="stale",
-                    reason="Closed-candle event exceeded the 10-minute audit retention window",
                 )
                 return
             if event_age_ms > 90000:

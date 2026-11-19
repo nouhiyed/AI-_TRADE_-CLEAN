@@ -95,8 +95,8 @@ class CacheWarmupReplayTests(unittest.TestCase):
             self.autopilot.symbol_auditor_status()["futures"]["events_received"], 1
         )
 
-    def test_delayed_cache_replay_is_audit_only_and_cannot_be_traded(self):
-        old_open = (int(time.time() * 1000) // 300000) * 300000 - 600000
+    def test_delayed_cache_replay_over_ten_minutes_is_retained_audit_only(self):
+        old_open = (int(time.time() * 1000) // 300000) * 300000 - 1500000
         event = {
             "symbol": "SOLUSDT", "interval": "5m",
             "open_time": old_open, "close_time": old_open + 299999,
@@ -110,6 +110,31 @@ class CacheWarmupReplayTests(unittest.TestCase):
         ))
         queued = self.autopilot._analysis_pending[("spot", "SOLUSDT")]
         self.assertTrue(queued["audit_only"])
+        self.assertEqual(
+            self.autopilot.symbol_auditor_status()["spot"]["stale"], 0
+        )
+
+    def test_replay_over_ten_minutes_completes_audit_only_without_strategy(self):
+        now_ms = int(time.time() * 1000)
+        old_open = (now_ms // 300000) * 300000 - 1500000
+        event = {
+            "symbol": "SOLUSDT", "interval": "5m",
+            "open_time": old_open, "close_time": old_open + 299999,
+            "event_time": old_open + 300000, "is_closed": True,
+            "market_data": {"5m": object()}, "cache_ready": True,
+            "audit_only": True,
+        }
+
+        self.autopilot._analyze_ws_close(
+            "spot", "SOLUSDT", event, received_at_ms=now_ms
+        )
+
+        record = self.autopilot._symbol_audits["spot"]["SOLUSDT"]
+        self.assertEqual(record["state"], "audit_only_delayed")
+        self.assertFalse(record["analysis_completed_error"])
+        self.assertEqual(record["analysis_completed_open_time_ms"], old_open)
+        self.assertNotIn(("spot", "SOLUSDT"), self.autopilot._pending_entries)
+
 
     def test_optional_spot_4h_does_not_block_5m_cache_readiness(self):
         stream = BinanceKlineStream(
