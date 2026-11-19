@@ -126,7 +126,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertEqual(full._active_intervals("futures"), ["5m"])
         self.assertEqual(full._active_intervals("spot"), ["5m"])
 
-    def test_full_universe_snapshot_requires_only_closed_5m_history(self):
+    def test_full_universe_snapshot_derives_higher_timeframes_from_5m(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0)
         frame = candle_frame("5min", rows=800)
@@ -134,13 +134,13 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         snapshot = stream._snapshot("futures", "BTCUSDT")
         self.assertIsNotNone(snapshot)
-        self.assertEqual(set(snapshot), {"5m"})
+        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
 
     def test_historical_cache_can_be_ready_when_latest_trade_is_old(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0
         )
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         frame["open_time"] -= pd.Timedelta(minutes=5)
         frame["close_time"] -= pd.Timedelta(minutes=5)
@@ -772,7 +772,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
         self.assertEqual(feed.calls, 2)
 
     def test_top_30_symbol_cycle_reaches_the_analysis_queue(self):
-        frame = candle_frame("5min", rows=100)
+        frame = candle_frame("5min", rows=800)
         frame.attrs["timeframe"] = "5m"
         expected_open = int(frame.iloc[-1]["open_time"].timestamp() * 1000)
         symbols = ["COIN%03dUSDT" % index for index in range(30)]
@@ -797,7 +797,7 @@ class FullUniverseCacheReconciliationTests(unittest.TestCase):
             try:
                 autopilot.register_symbol_universe("futures", symbols)
                 # Hold worker submissions so this test can assert the exact
-                # 250 distinct cycle events accepted by the bounded queue.
+                # 30 distinct cycle events accepted by the bounded queue.
                 autopilot.submit_analysis = lambda *_args: True
                 for event in batch["events"]:
                     self.assertTrue(autopilot.on_market_kline("futures", event))
