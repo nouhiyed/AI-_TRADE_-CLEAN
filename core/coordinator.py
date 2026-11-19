@@ -1762,7 +1762,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         try:
             universe = self.market_feed.fetch_top_symbols(
-                "spot", limit=250
+                "spot", limit=30
             )
             minimum = (
                 float(min_quote_volume)
