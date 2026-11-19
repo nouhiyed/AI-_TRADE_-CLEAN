@@ -1085,11 +1085,13 @@ class TradingCoordinator(SpotDemoMixin):
             if direction == "SHORT" and not target < entry < stop:
                 raise ValueError("Invalid SHORT trade plan levels")
 
+            market_price = self._demo_market_price(
+                symbol, reference_price=entry_reference_price)
             reservation = self.risk.reserve_trade(
                 domain="futures",
                 symbol=symbol,
                 direction=direction,
-                entry=float(entry),
+                entry=float(market_price),
                 stop_loss=float(stop),
                 risk_pct=float(risk_pct),
                 leverage=int(leverage),
@@ -1101,7 +1103,6 @@ class TradingCoordinator(SpotDemoMixin):
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
 
-            market_price = self._demo_market_price(symbol, reference_price=entry_reference_price)
             valid_entry, entry_reason = self._validate_demo_entry_price(
                 plan, direction, market_price, min_net_rr=1.5, market="futures"
             )
