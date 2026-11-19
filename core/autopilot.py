@@ -1161,8 +1161,6 @@ class Autopilot:
                     signal_override=signal, entry_reference_price=entry_price)
             if trade.get("approved"):
                 self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
-                                    "risk_approved")
-                self._record_funnel(domain, int(signal.get("signal_candle_open_time") or 0),
                                     "trade_opened")
                 self._cooldown[symbol] = self.clock() + float(cfg["cooldown_min"]) * 60
                 result["opened"].append({
