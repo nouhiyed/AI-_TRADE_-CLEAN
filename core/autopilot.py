@@ -857,53 +857,12 @@ class Autopilot:
                                 "filter_passed")
             profile = str(self.config.get("profile", "standard"))
             agent = self.worker_agent(domain)
-            if set(frames) == {"5m"}:
-                # Full-universe stream: cheap V3-local 5m gate first. Only
-                # candidates pay for REST retrieval of closed 15m/1h(/4h) context.
-                raw_five = frames.get("5m")
-                try:
-                    prepared_five = self.c.market_engine._prepare_frame(
-                        raw_five, symbol, domain, "5m")
-                    prefilter_info = agent.strategy.prefilter_5m(prepared_five)
-                except Exception as error:
-                    self._record_symbol_audit(
-                        domain, symbol, "prefilter_error",
-                        increment="errors", reason=str(error),
-                    )
-                    return
-                if not prefilter_info.get("candidate"):
-                    self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                        "rejection",
-                                        prefilter_info.get("reason") or "5m prefilter rejected")
-                    with self._analysis_stats_lock:
-                        self._analysis_stats[domain]["prefilter_rejected"] += 1
-                    self._record_symbol_audit(
-                        domain, symbol, "prefilter_rejected",
-                        increment="prefilter_rejected",
-                        reason=prefilter_info.get("reason") or "No 5m-local setup",
-                    )
-                    return
-                self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                    "filter_passed")
-                with self._analysis_stats_lock:
-                    self._analysis_stats[domain]["prefilter_passed"] += 1
-                    self._analysis_stats[domain]["deep_analysis"] += 1
-                self._record_symbol_audit(
-                    domain, symbol, "deep_analysis",
-                    increment="prefilter_passed", also_increment="deep_analysis",
-                    candidate_setups=prefilter_info.get("setups", []),
-                )
-                analysis = self.c.analyze_live(
-                    symbol, domains=[domain], include_orderbook=False,
-                    agent_overrides={domain: agent},
-                )
-                signal_source = "BINANCE_WEBSOCKET_5M_PREFILTER_REST_CONTEXT"
-            else:
-                # Explicit top-N mode retains the original multi-timeframe cache path.
-                analysis = self.c.analyze_live_from_frames(
-                    symbol, domain, frames, agent=agent, profile=profile
-                )
-                signal_source = "BINANCE_WEBSOCKET_CACHE"
+            # Every production decision uses only the warmed WebSocket cache.
+            # Higher timeframes are locally aggregated before reaching this worker.
+            analysis = self.c.analyze_live_from_frames(
+                symbol, domain, frames, agent=agent, profile=profile
+            )
+            signal_source = "BINANCE_WEBSOCKET_CACHE"
 
             signal = (analysis.get("signals") or {}).get(domain)
             if not isinstance(signal, dict):
