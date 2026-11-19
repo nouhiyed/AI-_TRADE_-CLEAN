@@ -7,6 +7,7 @@ import unittest
 import pandas as pd
 
 from core.autopilot import Autopilot
+from core.coordinator import TradingCoordinator
 from core.binance_websocket import BinanceKlineStream
 from core.scalping_v3 import FuturesScalpingStrategyV3
 
@@ -1122,6 +1123,37 @@ class LateClosedCandleAuditTests(unittest.TestCase):
                 autopilot._event_executor.shutdown(wait=True)
                 for pool in autopilot._analysis_pools.values():
                     pool.shutdown(wait=True)
+
+
+
+class CachedTrailingFrameTests(unittest.TestCase):
+    def test_trailing_frame_comes_from_warmed_cache_without_rest(self):
+        coordinator = TradingCoordinator.__new__(TradingCoordinator)
+        frame = candle_frame("5min", rows=60)
+        frame.attrs["timeframe"] = "5m"
+        calls = []
+        coordinator.market_frame_provider = (
+            lambda market, symbol: calls.append((market, symbol)) or {"5m": frame}
+        )
+        result = coordinator._cached_trailing_5m_frame("futures", "BTCUSDT", 40)
+        self.assertEqual(len(result), 40)
+        self.assertEqual(calls, [("futures", "BTCUSDT")])
+
+    def test_trailing_frame_fails_closed_when_cache_is_not_ready(self):
+        coordinator = TradingCoordinator.__new__(TradingCoordinator)
+        coordinator.market_frame_provider = lambda _market, _symbol: None
+        self.assertIsNone(
+            coordinator._cached_trailing_5m_frame("spot", "ETHUSDT", 40)
+        )
+
+    def test_trailing_frame_rejects_unclosed_last_candle(self):
+        coordinator = TradingCoordinator.__new__(TradingCoordinator)
+        frame = candle_frame("5min", rows=60, closed=False)
+        frame.attrs["timeframe"] = "5m"
+        coordinator.market_frame_provider = lambda _market, _symbol: {"5m": frame}
+        self.assertIsNone(
+            coordinator._cached_trailing_5m_frame("futures", "BTCUSDT", 40)
+        )
 
 
 if __name__ == "__main__":
