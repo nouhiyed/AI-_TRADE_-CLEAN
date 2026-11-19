@@ -27,11 +27,16 @@ class LearningEngine:
         self.journal = journal
         self.min_samples = int(min_samples)
         self.disable_below_r = float(disable_below_r)
+        # No random-baseline comparator is wired into the runtime yet. Until
+        # one exists, learning is observational and never disables setups.
+        self.random_baseline_compared = False
 
     def allows(self, key):
         return key not in self.journal.disabled_setups()
 
     def evaluate(self):
+        if not self.random_baseline_compared:
+            return []
         trades = [trade for trade in self.journal.closed_trades()
                   if (trade.get("context") or {}).get("profile", "standard") != "explore"]
         disabled_now = []
@@ -89,5 +94,8 @@ class LearningEngine:
             "min_samples": self.min_samples, "closed_trades": len(trades),
             "setups": setups, "features": self._feature_groups(trades, self.min_samples),
             "disabled": disabled, "suggestions": suggestions,
-            "learning_policy": "Observe first 150 closed trades; rank features by net expectancy; no automatic indicator deletion.",
+            "learning_policy": "No profitability conclusion before 150 Standard trades and a random-baseline comparison; review one factor per week; Explore trades are excluded.",
+            "random_baseline_required": True,
+            "random_baseline_compared": self.random_baseline_compared,
+            "profitability_conclusion": None,
         }
