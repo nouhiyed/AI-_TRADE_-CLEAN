@@ -241,6 +241,9 @@ class SpotDemoMixin:
                 risk_pct=float(risk_pct), leverage=1)
             if not reservation.get("approved"):
                 return reservation
+            if callable(getattr(self, "funnel_recorder", None)):
+                self.funnel_recorder(domain,
+                    int(signal.get("signal_candle_open_time") or 0), "risk_approved")
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
 
