@@ -445,7 +445,7 @@ class TradingCoordinator(SpotDemoMixin):
                 return False, "Invalid plan or execution price"
             max_drift = max(atr * Decimal("0.30"), entry * Decimal("0.0002"))
             if abs(price - entry) > max_drift:
-                return False, "Entry moved more than 0.10 ATR after confirmation; wait for a new setup"
+                return False, "Entry moved more than 0.30 ATR after confirmation; wait for a new setup"
             if str(direction).upper() == "SHORT":
                 if not target < price < stop:
                     return False, "Live price invalidated the SHORT structure"
