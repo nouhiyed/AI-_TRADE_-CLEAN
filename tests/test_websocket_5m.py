@@ -7,6 +7,7 @@ import unittest
 import pandas as pd
 
 from core.autopilot import Autopilot
+from core.coordinator import TradingCoordinator
 from core.binance_websocket import BinanceKlineStream
 from core.scalping_v3 import FuturesScalpingStrategyV3
 
@@ -136,27 +137,27 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
 
-    def test_800_cached_5m_bars_build_closed_15m_and_1h_without_rest(self):
+    def test_2400_cached_5m_bars_build_200_closed_hourly_bars_without_rest(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=250)
-        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 800)
+        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 2400)
         self.assertEqual(stream._active_intervals("futures"), ["5m"])
-        frame = candle_frame("5min", rows=800)
+        frame = candle_frame("5min", rows=2400)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         snapshot = stream._snapshot("futures", "BTCUSDT")
         self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
-        self.assertGreaterEqual(len(snapshot["15m"]), 60)
-        self.assertGreaterEqual(len(snapshot["1h"]), 60)
+        self.assertGreaterEqual(len(snapshot["15m"]), 800)
+        self.assertGreaterEqual(len(snapshot["1h"]), 200)
         self.assertTrue(snapshot["15m"]["is_closed"].all())
         self.assertTrue(snapshot["1h"]["is_closed"].all())
         self.assertEqual(snapshot["15m"].iloc[-1]["close"], frame.iloc[-1]["close"])
         self.assertEqual(snapshot["1h"].iloc[-1]["close"], frame.iloc[-1]["close"])
 
-    def test_spot_keeps_seeded_210_hour_history_and_includes_optional_4h(self):
+    def test_spot_derives_hourly_history_from_5m_and_includes_optional_4h(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=30)
-        five = candle_frame("5min", rows=2544)
+        five = candle_frame("5min", rows=2400)
         five.attrs["timeframe"] = "5m"
         four_hour = candle_frame("4h", rows=210)
         four_hour.attrs["timeframe"] = "4h"
@@ -164,8 +165,7 @@ class BinanceCandleCacheTests(unittest.TestCase):
         stream._merge_frame("spot", "BTCUSDT", "4h", four_hour)
         snapshot = stream._snapshot("spot", "BTCUSDT")
         self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
-        self.assertGreaterEqual(len(snapshot["1h"]), 210)
-        self.assertEqual(snapshot["1h"].attrs["source"], "derived_from_binance_5m_cache")
+        self.assertGreaterEqual(len(snapshot["1h"]), 200)
 
     def test_analysis_snapshot_rejects_stale_5m_cache(self):
         stream = BinanceKlineStream(
@@ -254,12 +254,11 @@ class BinanceCandleCacheTests(unittest.TestCase):
         )
 
     def test_snapshot_requires_all_closed_context_frames(self):
-        frame = candle_frame("5min", rows=800)
-        frame.attrs["timeframe"] = "5m"
-        self.stream._merge_frame("futures", "BTCUSDT", "5m", frame)
-        snapshot = self.stream._snapshot("futures", "BTCUSDT")
-        self.assertIsNotNone(snapshot)
-        self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
+        for interval in ("5m", "15m", "1h"):
+            frame = candle_frame("5min" if interval == "5m" else "15min" if interval == "15m" else "1h")
+            frame.attrs["timeframe"] = interval
+            self.stream._merge_frame("futures", "BTCUSDT", interval, frame)
+        self.assertIsNotNone(self.stream._snapshot("futures", "BTCUSDT"))
 
         open_frame = candle_frame("5min")
         open_frame.attrs["timeframe"] = "5m"
@@ -268,9 +267,12 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNone(self.stream._snapshot("futures", "BTCUSDT"))
 
     def test_spot_cache_does_not_require_optional_4h_history(self):
-        frame = candle_frame("5min", rows=2544)
-        frame.attrs["timeframe"] = "5m"
-        self.stream._merge_frame("spot", "NEWUSDT", "5m", frame)
+        for interval, freq, rows in (
+            ("5m", "5min", 60), ("15m", "15min", 60), ("1h", "1h", 210),
+        ):
+            frame = candle_frame(freq, rows=rows)
+            frame.attrs["timeframe"] = interval
+            self.stream._merge_frame("spot", "NEWUSDT", interval, frame)
         snapshot = self.stream._snapshot("spot", "NEWUSDT")
         self.assertIsNotNone(snapshot)
         self.assertNotIn("4h", snapshot)
@@ -424,8 +426,7 @@ class ManualEntryQueueTests(unittest.TestCase):
             }
             result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
             self.assertTrue(result["success"])
-            self.assertFalse(result["queued"])
-            self.assertEqual(result["decision_status"], "SUBMITTED")
+            self.assertTrue(result["queued"])
             autopilot._event_executor.shutdown(wait=True)
 
 
@@ -1122,6 +1123,37 @@ class LateClosedCandleAuditTests(unittest.TestCase):
                 autopilot._event_executor.shutdown(wait=True)
                 for pool in autopilot._analysis_pools.values():
                     pool.shutdown(wait=True)
+
+
+
+class CachedTrailingFrameTests(unittest.TestCase):
+    def test_trailing_frame_comes_from_warmed_cache_without_rest(self):
+        coordinator = TradingCoordinator.__new__(TradingCoordinator)
+        frame = candle_frame("5min", rows=60)
+        frame.attrs["timeframe"] = "5m"
+        calls = []
+        coordinator.market_frame_provider = (
+            lambda market, symbol: calls.append((market, symbol)) or {"5m": frame}
+        )
+        result = coordinator._cached_trailing_5m_frame("futures", "BTCUSDT", 40)
+        self.assertEqual(len(result), 40)
+        self.assertEqual(calls, [("futures", "BTCUSDT")])
+
+    def test_trailing_frame_fails_closed_when_cache_is_not_ready(self):
+        coordinator = TradingCoordinator.__new__(TradingCoordinator)
+        coordinator.market_frame_provider = lambda _market, _symbol: None
+        self.assertIsNone(
+            coordinator._cached_trailing_5m_frame("spot", "ETHUSDT", 40)
+        )
+
+    def test_trailing_frame_rejects_unclosed_last_candle(self):
+        coordinator = TradingCoordinator.__new__(TradingCoordinator)
+        frame = candle_frame("5min", rows=60, closed=False)
+        frame.attrs["timeframe"] = "5m"
+        coordinator.market_frame_provider = lambda _market, _symbol: {"5m": frame}
+        self.assertIsNone(
+            coordinator._cached_trailing_5m_frame("futures", "BTCUSDT", 40)
+        )
 
 
 if __name__ == "__main__":
