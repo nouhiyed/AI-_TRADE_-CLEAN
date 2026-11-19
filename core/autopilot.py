@@ -49,6 +49,7 @@ class Autopilot:
         self._cooldown = {}          # symbol -> unix time when it may trade again
         self._lock = threading.Lock()
         self._event_lock = threading.RLock()
+        self.c._signal_funnel_callback = self._record_funnel
         self._event_seen = OrderedDict()
         self._pending_entries = {}
         # One retained closed candle per symbol while its cache warms.
@@ -608,6 +609,7 @@ class Autopilot:
             self._event_seen[identity] = None
             if len(self._event_seen) > 20000:
                 self._event_seen.popitem(last=False)
+        self._record_funnel(domain, open_time, "events_received")
 
         frames = event.get("market_data")
         if isinstance(frames, dict) and frames:
@@ -791,8 +793,6 @@ class Autopilot:
         """Run the 5m symbol gate, then route candidates to the full V3 worker."""
         analysis_started_at_ms = int(time.time() * 1000)
         received_at_ms = int(received_at_ms or candle.get("received_at_ms") or analysis_started_at_ms)
-        cycle_open_time_ms = int(candle.get("open_time") or 0)
-        self._record_funnel(domain, cycle_open_time_ms, "events_received")
         prefilter_info = None
         try:
             with self._analysis_stats_lock:
@@ -1191,10 +1191,6 @@ class Autopilot:
                     symbol, domain="spot", risk_pct=float(cfg["risk_pct"]),
                     signal_override=signal, entry_reference_price=entry_price)
             if trade.get("approved"):
-                self._record_funnel(
-                    domain, int(signal.get("signal_candle_open_time") or 0),
-                    "risk_approved",
-                )
                 self._cooldown[symbol] = self.clock() + float(cfg["cooldown_min"]) * 60
                 result["opened"].append({
                     "domain": domain, "symbol": symbol,
