@@ -55,6 +55,8 @@ class Autopilot:
         self._waiting_cache_events = {}
         self._latest_open = {}
         self._last_execution_result = {}
+        # Per-5m-candle signal funnel; retained for recent-cycle diagnosis.
+        self._cycle_funnels = {}
         # One logical audit record per symbol; work itself is dispatched to a
         # bounded pool so hundreds of symbols never create hundreds of threads.
         self._symbol_audits = {"futures": {}, "spot": {}}
@@ -274,6 +276,47 @@ class Autopilot:
                 if counter and counter in self._symbol_audit_totals[domain]:
                     self._symbol_audit_totals[domain][counter] += 1
 
+    def _record_funnel(self, domain, cycle_open_time_ms, stage=None, reason=None):
+        domain = str(domain).strip().lower()
+        cycle_open_time_ms = int(cycle_open_time_ms or 0)
+        if domain not in ("futures", "spot") or cycle_open_time_ms <= 0:
+            return
+        key = (domain, cycle_open_time_ms)
+        now_ms = int(self.clock() * 1000)
+        with self._event_lock:
+            record = self._cycle_funnels.setdefault(key, {
+                "domain": domain, "candle_open_time_ms": cycle_open_time_ms,
+                "events_received": 0, "filter_passed": 0,
+                "strategy_accepted": 0, "valid_plans": 0,
+                "risk_approved": 0, "opened": 0, "rejections": {},
+                "updated_at_ms": now_ms,
+            })
+            if stage:
+                record[stage] = int(record.get(stage) or 0) + 1
+            if reason:
+                reasons = record.setdefault("rejections", {})
+                label = str(reason).strip()[:240] or "Unspecified rejection"
+                reasons[label] = int(reasons.get(label) or 0) + 1
+            record["updated_at_ms"] = now_ms
+            if len(self._cycle_funnels) > 100:
+                oldest = sorted(self._cycle_funnels, key=lambda item: item[1])
+                for old_key in oldest[:-100]:
+                    self._cycle_funnels.pop(old_key, None)
+
+    def funnel_status(self):
+        with self._event_lock:
+            records = [dict(value, rejections=dict(value.get("rejections") or {}))
+                       for value in self._cycle_funnels.values()]
+        records.sort(key=lambda item: item["updated_at_ms"], reverse=True)
+        for record in records:
+            ranked = sorted(record["rejections"].items(),
+                            key=lambda item: item[1], reverse=True)[:5]
+            record["top_rejections"] = [
+                {"reason": reason, "count": count} for reason, count in ranked
+            ]
+        return {"success": True, "retention_cycles": 100,
+                "cycles": records[:30]}
+
     def symbol_auditor_status(self):
         """Compact per-market counts; detailed per-symbol state stays internal."""
         result = {}
@@ -426,7 +469,7 @@ class Autopilot:
                     reason="Closed candle exceeded the 10-minute audit retention window",
                 )
                 continue
-            if age_ms > 30000:
+            if age_ms > 90000:
                 candle["audit_only"] = True
             self._analyze_ws_close(domain, symbol, candle, received_at_ms)
 
@@ -619,7 +662,7 @@ class Autopilot:
                 reason="Cache became ready after the 10-minute audit retention window",
             )
             return False
-        replay["audit_only"] = bool(replay.get("audit_only")) or age_ms > 30000
+        replay["audit_only"] = bool(replay.get("audit_only")) or age_ms > 90000
         accepted = self._queue_latest_analysis(domain, symbol, replay, count_event=False)
         if accepted:
             self._record_symbol_audit(
@@ -715,8 +758,8 @@ class Autopilot:
             return {"success": False, "reason": "The agent signal is not an approved V3 setup"}
         now_ms = int(self.clock() * 1000)
         generated_at = int(signal.get("signal_generated_at_ms") or 0)
-        if generated_at <= 0 or now_ms - generated_at > 30000 or generated_at > now_ms + 2000:
-            return {"success": False, "reason": "Agent signal is stale; request a fresh 5m analysis"}
+        if generated_at <= 0 or now_ms - generated_at > 90000 or generated_at > now_ms + 2000:
+            return {"success": False, "reason": "Agent signal is older than the 90-second execution window"}
         next_open = ((now_ms // 300000) + 1) * 300000
         key = (domain, symbol)
         with self._event_lock:
@@ -747,6 +790,8 @@ class Autopilot:
         """Run the 5m symbol gate, then route candidates to the full V3 worker."""
         analysis_started_at_ms = int(time.time() * 1000)
         received_at_ms = int(received_at_ms or candle.get("received_at_ms") or analysis_started_at_ms)
+        cycle_open_time_ms = int(candle.get("open_time") or 0)
+        self._record_funnel(domain, cycle_open_time_ms, "events_received")
         prefilter_info = None
         try:
             with self._analysis_stats_lock:
@@ -796,7 +841,7 @@ class Autopilot:
                     reason="Closed-candle event exceeded the 10-minute audit retention window",
                 )
                 return
-            if event_age_ms > 30000:
+            if event_age_ms > 90000:
                 audit_only = True
 
             frames = candle.get("market_data")
@@ -828,6 +873,10 @@ class Autopilot:
                     )
                     return
                 if not prefilter_info.get("candidate"):
+                    self._record_funnel(
+                        domain, cycle_open_time_ms,
+                        reason=prefilter_info.get("reason") or "5m filter rejected",
+                    )
                     with self._analysis_stats_lock:
                         self._analysis_stats[domain]["prefilter_rejected"] += 1
                     self._record_symbol_audit(
@@ -836,6 +885,7 @@ class Autopilot:
                         reason=prefilter_info.get("reason") or "No 5m-local setup",
                     )
                     return
+                self._record_funnel(domain, cycle_open_time_ms, "filter_passed")
                 with self._analysis_stats_lock:
                     self._analysis_stats[domain]["prefilter_passed"] += 1
                     self._analysis_stats[domain]["deep_analysis"] += 1
@@ -850,6 +900,7 @@ class Autopilot:
                 )
                 signal_source = "BINANCE_WEBSOCKET_5M_PREFILTER_REST_CONTEXT"
             else:
+                self._record_funnel(domain, cycle_open_time_ms, "filter_passed")
                 # Explicit top-N mode retains the original multi-timeframe cache path.
                 analysis = self.c.analyze_live_from_frames(
                     symbol, domain, frames, agent=agent
@@ -866,6 +917,7 @@ class Autopilot:
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                 )
+                self._record_funnel(domain, cycle_open_time_ms, reason=reason)
                 self.last_result = {
                     "status": "SKIPPED", "phase": "websocket_analysis",
                     "domain": domain, "symbol": symbol, "reason": reason,
@@ -890,19 +942,28 @@ class Autopilot:
             direction = str(signal.get("direction", "WAIT")).upper()
             valid_direction = direction in (("BUY",) if domain == "spot"
                                              else ("LONG", "SHORT"))
-            if (not valid_direction or signal.get("strategy_version") != "v3"
-                    or not isinstance(plan, dict) or plan.get("success") is not True
+            if not valid_direction or signal.get("strategy_version") != "v3":
+                reason = str(signal.get("reason") or "Strategy did not accept this direction")
+                self._record_symbol_audit(
+                    domain, symbol, "strategy_rejected", reason=reason,
+                )
+                self._record_funnel(domain, cycle_open_time_ms, reason=reason)
+                return
+            self._record_funnel(domain, cycle_open_time_ms, "strategy_accepted")
+            if (not isinstance(plan, dict) or plan.get("success") is not True
                     or plan.get("strategy_version") != "v3"
                     or str(plan.get("timeframe", "")).lower() != "5m"):
                 reason = str(
                     (plan or {}).get("reason")
                     or signal.get("reason")
-                    or "V3 did not approve a valid 5m entry plan"
+                    or "V3 trade plan rejected or invalid"
                 )
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                 )
+                self._record_funnel(domain, cycle_open_time_ms, reason=reason)
                 return
+            self._record_funnel(domain, cycle_open_time_ms, "valid_plans")
 
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["actionable"] += 1
@@ -1015,7 +1076,7 @@ class Autopilot:
                     or opening_candle.get("source") != "binance_websocket"
                     or entry_price <= 0 or event_time < open_time
                     or event_time - open_time > 10000
-                    or abs(local_now_ms - event_time) > 30000):
+                    or abs(local_now_ms - event_time) > 90000):
                 result["status"] = "SKIPPED"
                 result["skipped"].append({"reason": "Next-candle opening event arrived stale or invalid"})
                 return
@@ -1046,26 +1107,38 @@ class Autopilot:
                 result["skipped"].append({"reason": "V3 trade plan is not approved"})
                 return
             try:
-                planned_entry = float(plan.get("entry"))
-                max_deviation_pct = float(os.environ.get(
-                    "AI_TRADER_MAX_ENTRY_DEVIATION_PCT_FUTURES" if domain == "futures"
-                    else "AI_TRADER_MAX_ENTRY_DEVIATION_PCT_SPOT",
-                    "0.15" if domain == "futures" else "0.20"))
-            except (TypeError, ValueError):
-                planned_entry, max_deviation_pct = 0.0, 0.0
-            if (not math.isfinite(planned_entry) or planned_entry <= 0
-                    or not math.isfinite(max_deviation_pct) or max_deviation_pct <= 0):
+                from decimal import Decimal
+                planned_entry = Decimal(str(plan.get("entry")))
+                atr = Decimal(str(plan.get("atr")))
+                actual_entry = Decimal(str(entry_price))
+                generated_at_ms = int(signal.get("signal_generated_at_ms") or 0)
+                signal_age_ms = local_now_ms - generated_at_ms
+                drift = abs(actual_entry - planned_entry)
+                max_drift = atr * Decimal("0.30")
+                drift_atr = float(drift / atr) if atr > 0 else None
+            except (TypeError, ValueError, ArithmeticError):
+                planned_entry = atr = actual_entry = Decimal("0")
+                signal_age_ms, drift_atr, max_drift = 10**12, None, Decimal("0")
+                drift = Decimal("0")
+            if (not planned_entry.is_finite() or planned_entry <= 0
+                    or not atr.is_finite() or atr <= 0
+                    or not actual_entry.is_finite() or actual_entry <= 0):
                 result["status"] = "SKIPPED"
-                result["skipped"].append({"reason": "Invalid planned entry or deviation guard"})
+                result["skipped"].append({"reason": "Invalid signal entry or ATR for drift guard"})
                 return
-            deviation_pct = abs(entry_price - planned_entry) / planned_entry * 100.0
-            if deviation_pct > max_deviation_pct:
+            if signal_age_ms < -2000 or signal_age_ms > 90000:
                 result["status"] = "SKIPPED"
                 result["skipped"].append({
-                    "reason": "Entry price moved %.4f%% from the approved signal price (limit %.4f%%)"
-                              % (deviation_pct, max_deviation_pct),
-                    "entry_deviation_pct": deviation_pct,
-                    "max_entry_deviation_pct": max_deviation_pct,
+                    "reason": "Signal exceeded the 90-second execution window",
+                    "signal_age_ms": signal_age_ms,
+                })
+                return
+            if drift > max_drift:
+                result["status"] = "SKIPPED"
+                result["skipped"].append({
+                    "reason": "Entry drift %.3f ATR exceeds the 0.300 ATR limit" % (drift_atr or 0),
+                    "entry_drift_atr": drift_atr,
+                    "max_entry_drift_atr": 0.30,
                 })
                 return
             confidence = float(signal.get("confidence") or 0)
@@ -1117,6 +1190,10 @@ class Autopilot:
                     symbol, domain="spot", risk_pct=float(cfg["risk_pct"]),
                     signal_override=signal, entry_reference_price=entry_price)
             if trade.get("approved"):
+                self._record_funnel(
+                    domain, int(signal.get("signal_candle_open_time") or 0),
+                    "risk_approved",
+                )
                 self._cooldown[symbol] = self.clock() + float(cfg["cooldown_min"]) * 60
                 result["opened"].append({
                     "domain": domain, "symbol": symbol,
@@ -1133,17 +1210,33 @@ class Autopilot:
             result["error"] = str(error)
         finally:
             if result.get("opened"):
+                self._record_funnel(
+                    domain,
+                    int((pending.get("signal") or {}).get("signal_candle_open_time") or 0),
+                    "opened",
+                )
                 self._record_symbol_audit(
                     domain, symbol, "opened", increment="opened",
                     trade_ids=[item.get("trade_id") for item in result["opened"]],
                 )
             elif result.get("error"):
+                self._record_funnel(
+                    domain,
+                    int((pending.get("signal") or {}).get("signal_candle_open_time") or 0),
+                    reason=result.get("error"),
+                )
                 self._record_symbol_audit(
                     domain, symbol, "execution_error", increment="errors",
                     reason=result.get("error"),
                 )
             elif result.get("skipped"):
                 reasons = [str(item.get("reason", "")) for item in result["skipped"]]
+                for rejection in reasons:
+                    self._record_funnel(
+                        domain,
+                        int((pending.get("signal") or {}).get("signal_candle_open_time") or 0),
+                        reason=rejection,
+                    )
                 self._record_symbol_audit(
                     domain, symbol, "entry_skipped", increment="entry_skipped",
                     reason="; ".join(reason for reason in reasons if reason)[:500],
