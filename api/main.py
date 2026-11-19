@@ -122,21 +122,18 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
             overlap_symbols.update(bucket.intersection(other))
     accounted = set().union(*buckets) if buckets else set()
     unclassified = universe - accounted
-    complete = bool(universe) and (
-        completed == universe
-        and not pending_cache
-        and not pending_analysis
-        and not pending_reconcile
-        and not rejected
-        and int(analysis_errors or 0) == 0
-        and not overlap_symbols
-        and not unclassified
-    )
+    processed_ratio = (len(completed) / len(universe)) if universe else 0.0
+    # A cycle is operationally successful once at least 95% of its symbols
+    # completed analysis. Fatal errors and the unprocessed remainder stay
+    # visible as separate metrics instead of invalidating all useful work.
+    complete = bool(universe) and processed_ratio >= 0.95 and not overlap_symbols and not unclassified
     return {
         "cycle_open_time_ms": int(cycle_open_time_ms or 0),
         "expected_symbols": len(universe),
         "accepted_symbols": len(accepted),
         "completed_symbols": len(completed),
+        "processed_ratio": round(processed_ratio, 4),
+        "processed_pct": round(processed_ratio * 100, 2),
         "pending_cache_symbols": len(pending_cache),
         "pending_analysis_symbols": len(pending_analysis),
         "pending_reconcile_symbols": len(pending_reconcile),
