@@ -639,7 +639,7 @@ class BinanceKlineStream:
     def _frame_healthy(self, market, interval, frame, now_ms=None):
         return self._frame_health_reason(market, interval, frame, now_ms) is None
 
-    def _snapshot(self, market, symbol):
+    def _snapshot(self, market, symbol, max_age_seconds=None):
         self._rebuild_derived_frames(market, symbol)
         required = self.REQUIRED_ROWS[market]
         frames = {}
@@ -665,6 +665,12 @@ class BinanceKlineStream:
                         "source": "binance_websocket_cache",
                     })
                     frames["4h"] = copied
+        if max_age_seconds is not None:
+            latest_close_ms = self._row_key(
+                frames["5m"].iloc[-1]["close_time"])
+            age_ms = int(time.time() * 1000) - latest_close_ms
+            if age_ms < -5000 or age_ms > int(max_age_seconds * 1000):
+                return None
         return frames
 
     def _warm_symbol(self, market, symbol):
