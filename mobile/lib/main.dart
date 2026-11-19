@@ -1656,6 +1656,103 @@ class _TradeShellState extends State<TradeShell>
     );
   }
 
+  Widget _funnelCard() {
+    final rootRaw = scanStatus['funnel'];
+    final root = rootRaw is Map ? Map<String, dynamic>.from(rootRaw) : <String, dynamic>{};
+    final marketsRaw = root['markets'];
+    final markets = marketsRaw is Map ? marketsRaw : const {};
+    Map<String, dynamic> latest(String market) {
+      final raw = markets[market];
+      if (raw is! List || raw.isEmpty || raw.last is! Map) return {};
+      return Map<String, dynamic>.from(raw.last as Map);
+    }
+    Widget marketFunnel(String market, Color accent) {
+      final cycle = latest(market);
+      final stages = [
+        ('وصلت', 'events_received'),
+        ('اجتازت الفلتر', 'filter_passed'),
+        ('قبلتها الاستراتيجية', 'strategy_accepted'),
+        ('خطة صالحة', 'valid_plan'),
+        ('وافقت المخاطرة', 'risk_approved'),
+        ('صفقات مفتوحة', 'trade_opened'),
+      ];
+      final reasonsRaw = cycle['top_rejection_reasons'];
+      final reasons = reasonsRaw is List ? reasonsRaw.whereType<Map>().toList() : <Map>[];
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(market.toUpperCase(), style: TextStyle(
+            color: accent, fontSize: 11, fontWeight: FontWeight.w900,
+            letterSpacing: 1.1,
+          )),
+          const SizedBox(height: 7),
+          if (cycle.isEmpty)
+            Text(tr('بانتظار أول دورة شموع', 'Waiting for first candle cycle'),
+              style: TextStyle(color: widget.muted, fontSize: 11))
+          else ...[
+            Wrap(
+              spacing: 6, runSpacing: 6,
+              children: stages.map((stage) {
+                final value = int.tryParse('${cycle[stage.$2] ?? 0}') ?? 0;
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: accent.withOpacity(.08),
+                    borderRadius: BorderRadius.circular(9),
+                    border: Border.all(color: accent.withOpacity(.18)),
+                  ),
+                  child: Text('${stage.$1}: $value',
+                    style: TextStyle(color: widget.foreground, fontSize: 10,
+                      fontWeight: FontWeight.w700)),
+                );
+              }).toList(),
+            ),
+            if (reasons.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(tr('أكثر أسباب الرفض', 'Top rejection reasons'),
+                style: TextStyle(color: widget.muted, fontSize: 10,
+                  fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              ...reasons.take(5).map((item) => Padding(
+                padding: const EdgeInsets.only(bottom: 3),
+                child: Text('• ${item['reason'] ?? ''} (${item['count'] ?? 0})',
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: widget.muted, fontSize: 10)),
+              )),
+            ],
+          ],
+        ],
+      );
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: widget.panel.withOpacity(.72),
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: widget.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.filter_alt_outlined, color: cyan, size: 17),
+            const SizedBox(width: 7),
+            Text(tr('مسار الإشارات — Funnel', 'SIGNAL FUNNEL'),
+              style: TextStyle(color: widget.foreground, fontSize: 11,
+                fontWeight: FontWeight.w900, letterSpacing: .8)),
+            const Spacer(),
+            Text('/funnel', style: TextStyle(color: widget.muted, fontSize: 9)),
+          ]),
+          const SizedBox(height: 12),
+          marketFunnel('futures', cyan),
+          const SizedBox(height: 12),
+          marketFunnel('spot', blue),
+        ],
+      ),
+    );
+  }
+
   Widget _home() => ListView(
         key: const PageStorageKey('home'),
         padding: const EdgeInsets.fromLTRB(15, 0, 15, 22),
@@ -1682,6 +1779,7 @@ class _TradeShellState extends State<TradeShell>
           const SizedBox(height: 9),
           _scanActivityRow('futures', cyan),
           _scanActivityRow('spot', blue),
+          _funnelCard(),
           const SizedBox(height: 12),
           _activityCard(),
         ],
