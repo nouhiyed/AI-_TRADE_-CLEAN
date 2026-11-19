@@ -267,7 +267,7 @@ class _V3Base:
 
     @classmethod
     def plan_with_structure(cls, market, direction, five, frames, setup,
-                             regime, base_target_r, current_price):
+                             regime, base_target_r, current_price, profile="standard"):
         """Build a V3 plan and veto entries with inadequate room to S/R."""
         plan = cls.plan(market, direction, five, setup, regime,
                         base_target_r, current_price)
@@ -276,7 +276,8 @@ class _V3Base:
         atr = float(plan["atr"])
         entry = float(plan["entry"])
         extension = cls.entry_extension_atr(five, direction, entry)
-        if extension is not None and extension > 0.90:
+        explore = str(profile or "standard").lower() == "explore"
+        if not explore and extension is not None and extension > 0.90:
             return {
                 "success": False,
                 "reason": ("V3 late-entry veto: %s is %.3f ATR beyond EMA9; "
@@ -287,6 +288,19 @@ class _V3Base:
                 },
             }
         structure = cls.nearest_opposing_structure(frames, direction, entry)
+        if explore and structure is not None:
+            plan["structure_guard"] = {
+                "blocked": False, "bypassed": True, "direction": direction,
+                "level": float(structure["level"]),
+                "timeframe": structure["timeframe"],
+                "reason": "Explore profile bypassed the structure veto for data collection",
+            }
+            plan["entry_timing_guard"] = {
+                "blocked": False, "bypassed": True,
+                "extension_atr": round(extension, 4) if extension is not None else None,
+                "reason": "Explore profile bypassed the late-entry veto for data collection",
+            }
+            return plan
         if structure is None:
             # No confirmed opposing swing means there is no identified nearby
             # wall in the supplied closed context. The required 5m/15m/1h
@@ -440,7 +454,7 @@ class FuturesScalpingStrategyV3(_V3Base):
         )
         for valid, direction, setup, regime, target_r in setups:
             if valid:
-                return self.plan_with_structure("futures", direction, trigger, data, setup, regime, target_r, c)
+                return self.plan_with_structure("futures", direction, trigger, data, setup, regime, target_r, c, data.get("profile", "standard"))
 
         bb_low, bb_high = v(trigger, "BB_lower"), v(trigger, "BB_upper")
         range_market = v(fifteen, "ADX")
@@ -448,12 +462,12 @@ class FuturesScalpingStrategyV3(_V3Base):
                 and loc >= .72 and c > o and rsi <= 30 and vr >= .80
                 and shape["lower_wick_range"] >= self.REJECTION_WICK_RANGE
                 and bb_low is not None and c <= bb_low*1.002):
-            return self.plan_with_structure("futures", "LONG", trigger, data, "RANGE_REJECTION_5M", "RANGE", 1.55, c)
+            return self.plan_with_structure("futures", "LONG", trigger, data, "RANGE_REJECTION_5M", "RANGE", 1.55, c, data.get("profile", "standard"))
         if (range_market is not None and range_market <= 18
                 and loc <= .28 and c < o and rsi >= 70 and vr >= .80
                 and shape["upper_wick_range"] >= self.REJECTION_WICK_RANGE
                 and bb_high is not None and c >= bb_high*.998):
-            return self.plan_with_structure("futures", "SHORT", trigger, data, "RANGE_REJECTION_5M", "RANGE", 1.55, c)
+            return self.plan_with_structure("futures", "SHORT", trigger, data, "RANGE_REJECTION_5M", "RANGE", 1.55, c, data.get("profile", "standard"))
         return {"success": False, "reason": "No qualifying V3 Futures 5m setup"}
 
 
@@ -512,15 +526,15 @@ class SpotScalpingStrategyV3(_V3Base):
             and shape["upper_wick_range"] <= .18
         )
         if support_reclaim:
-            return self.plan_with_structure("spot", "LONG", trigger, data, "SUPPORT_RECLAIM_5M", "BULL_TREND", 1.60, c)
+            return self.plan_with_structure("spot", "LONG", trigger, data, "SUPPORT_RECLAIM_5M", "BULL_TREND", 1.60, c, data.get("profile", "standard"))
         if pull:
-            return self.plan_with_structure("spot", "LONG", trigger, data, "PULLBACK_5M", "BULL_TREND", 1.65, c)
+            return self.plan_with_structure("spot", "LONG", trigger, data, "PULLBACK_5M", "BULL_TREND", 1.65, c, data.get("profile", "standard"))
         if breakout:
-            return self.plan_with_structure("spot", "LONG", trigger, data, "BREAKOUT_5M", "BULL_TREND", 1.85, c)
+            return self.plan_with_structure("spot", "LONG", trigger, data, "BREAKOUT_5M", "BULL_TREND", 1.85, c, data.get("profile", "standard"))
         adx15, bb = v(fifteen, "ADX"), v(trigger, "BB_lower")
         if (adx15 is not None and adx15 <= 18 and bb is not None
                 and rsi <= 30 and c <= bb*1.002 and c > o
                 and loc >= .72 and vr >= .80
                 and shape["lower_wick_range"] >= self.REJECTION_WICK_RANGE):
-            return self.plan_with_structure("spot", "LONG", trigger, data, "RANGE_BOUNCE_5M", "RANGE", 1.55, c)
+            return self.plan_with_structure("spot", "LONG", trigger, data, "RANGE_BOUNCE_5M", "RANGE", 1.55, c, data.get("profile", "standard"))
         return {"success": False, "reason": "No qualifying V3 Spot 5m setup"}
