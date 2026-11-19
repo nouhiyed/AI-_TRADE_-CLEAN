@@ -298,12 +298,9 @@ class BinanceKlineStream:
         }
 
     def _active_intervals(self, market):
-        # Large universes stream only the fast trigger timeframe for every
-        # symbol. Higher-timeframe context is fetched only after a 5m candidate
-        # passes the V3 local prefilter, avoiding thousands of idle candle streams.
-        if self.fast_scan_mode:
-            return ["5m"]
-        return list(self.CACHE_LIMITS[market])
+        # The 5m stream is the sole decision feed. 15m and 1h are derived from
+        # its closed candles; Spot 4h is refreshed independently once per hour.
+        return ["5m"]
 
     def start(self):
         if any(thread.is_alive() for thread in self._threads.values()):
