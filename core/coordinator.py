@@ -1783,7 +1783,7 @@ class TradingCoordinator(SpotDemoMixin):
 
         if limit is not None:
             try:
-                requested_limit = min(250, max(1, int(limit)))
+                requested_limit = min(30, max(1, int(limit)))
             except (TypeError, ValueError):
                 return {
                     "success": False,
