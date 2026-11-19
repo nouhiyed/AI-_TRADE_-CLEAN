@@ -23,13 +23,13 @@ class BinanceKlineStream:
         "futures": "wss://fstream.binance.com/market/stream",
     }
     CACHE_LIMITS = {
-        "futures": {"5m": 800, "15m": 266, "1h": 66},
-        "spot": {"5m": 2544, "15m": 848, "1h": 212, "4h": 210},
+        "futures": {"5m": 2400, "15m": 800, "1h": 200},
+        "spot": {"5m": 2400, "15m": 800, "1h": 200, "4h": 210},
     }
     REQUIRED_ROWS = {
         "futures": {"5m": 60, "15m": 60, "1h": 60},
         # Spot's 4h EMA200 is an optional macro filter for newer listings.
-        "spot": {"5m": 60, "15m": 60, "1h": 210},
+        "spot": {"5m": 60, "15m": 60, "1h": 200},
     }
     MAX_STREAMS_PER_CONNECTION = 1020
     # Binance sends server ping frames; websocket-client auto-replies with pong.
@@ -87,12 +87,6 @@ class BinanceKlineStream:
         self._closed_seen = set()
         self._latest_candles = {}
         self._warm_errors = {}
-        # One bounded REST refresh per stale symbol and 5m cycle.
-        self._last_rest_refresh_cycle = set()
-        # A successful HTTP response may still omit the exact requested candle.
-        # Keep per-symbol retry timestamps so missing-cycle responses are retried
-        # with bounded backoff instead of being mistaken for reconciliation.
-        self._last_rest_refresh_attempt_at = {}
         self._status = {
             market: {
                 "connected": False, "fully_connected": False, "state": "stopped",
@@ -480,36 +474,31 @@ class BinanceKlineStream:
             self._rebuild_derived_frames(market, symbol)
 
     def _aggregate_5m_frame(self, market, symbol, timeframe, frame):
-        """Aggregate confirmed 5m bars into completed 15m/1h bars without REST."""
+        """Aggregate exact, aligned groups of closed 5m bars locally."""
         if frame is None or frame.empty or timeframe not in ("15m", "1h"):
             return pd.DataFrame()
-        frequency = "15min" if timeframe == "15m" else "1h"
+        required = 3 if timeframe == "15m" else 12
         duration = self.INTERVAL_MS[timeframe]
         source = frame.loc[frame["is_closed"].astype(bool)].copy()
         if source.empty:
             return pd.DataFrame()
         source["open_time"] = pd.to_datetime(source["open_time"], utc=True)
         source["close_time"] = pd.to_datetime(source["close_time"], utc=True)
-        source = source.sort_values("open_time")
+        source = source.sort_values("open_time").drop_duplicates("open_time", keep="last")
+        frequency = "15min" if timeframe == "15m" else "1h"
         current_bucket = pd.Timestamp.now(tz="UTC").floor(frequency)
         source = source.loc[source["open_time"] < current_bucket]
-        if source.empty:
-            return pd.DataFrame()
         source["bucket_open"] = source["open_time"].dt.floor(frequency)
         rows = []
         for bucket_open, group in source.groupby("bucket_open", sort=True):
+            group = group.sort_values("open_time")
+            expected = [bucket_open + pd.Timedelta(minutes=5 * i) for i in range(required)]
+            actual = list(group["open_time"])
+            if actual != expected or len(group) != required:
+                continue
+            if not bool(group["is_closed"].astype(bool).all()):
+                continue
             bucket_end = bucket_open + pd.Timedelta(milliseconds=duration)
-            # Require the final 5m slice to be present and closed. Missing
-            # no-trade bars inside a bucket are not fabricated as zero candles.
-            if group.empty or group["open_time"].iloc[-1] < bucket_end - pd.Timedelta(minutes=5):
-                continue
-            if group["open_time"].iloc[0] > bucket_open + pd.Timedelta(minutes=5):
-                continue
-            expected_slices = 3 if timeframe == "15m" else 12
-            if (len(group) != expected_slices
-                    or group["open_time"].iloc[0] != bucket_open
-                    or group["open_time"].iloc[-1] != bucket_end - pd.Timedelta(minutes=5)):
-                continue
             row = {
                 "open_time": bucket_open,
                 "open": float(group["open"].iloc[0]),
@@ -528,9 +517,8 @@ class BinanceKlineStream:
             return pd.DataFrame()
         result = pd.DataFrame(rows)
         result.attrs.update({
-            "market": market, "symbol": symbol,
-            "interval": timeframe, "timeframe": timeframe,
-            "source": "derived_from_binance_5m_cache",
+            "market": market, "symbol": symbol, "interval": timeframe,
+            "timeframe": timeframe, "source": "derived_from_binance_5m_cache",
         })
         return result
 
@@ -655,12 +643,7 @@ class BinanceKlineStream:
                 copied.attrs.update({
                     "market": market, "symbol": symbol,
                     "interval": interval, "timeframe": interval,
-                    "source": (
-                        "derived_from_binance_5m_cache"
-                        if interval in ("15m", "1h")
-                        else "binance_rest_hourly_cache" if interval == "4h"
-                        else "binance_websocket_cache"
-                    ),
+                    "source": "binance_websocket_cache",
                 })
                 frames[interval] = copied
             if market == "spot":
@@ -682,8 +665,8 @@ class BinanceKlineStream:
         return frames
 
     def _warm_symbol(self, market, symbol):
-        # 5m is the canonical stream/cache. Spot additionally seeds its long
-        # 1h EMA history and optional 4h macro frame at startup.
+        # One REST bootstrap: 5m only, plus Spot 4h macro context.
+        # 15m/1h are derived from the canonical 5m history.
         bootstrap_intervals = ["5m"] + (["4h"] if market == "spot" else [])
         for interval in bootstrap_intervals:
             limit = self.CACHE_LIMITS[market][interval]
@@ -702,30 +685,32 @@ class BinanceKlineStream:
                 if self._stop.is_set():
                     return False
                 try:
-                    if limit <= 1000:
-                        frame = self.feed.fetch_candles(
-                            market, symbol, interval, limit=limit, closed_only=True)
-                    else:
-                        # Binance caps each kline page at 1000 rows. Page only
-                        # during the one-time 5m cache warmup, then use WS.
+                    if interval == "5m" and limit > 1000:
                         pages = []
-                        remaining = limit
+                        remaining = int(limit)
                         end_time = None
                         while remaining > 0 and not self._stop.is_set():
                             page_limit = min(1000, remaining)
                             page = self.feed.fetch_candles(
-                                market, symbol, interval, limit=page_limit,
+                                market, symbol, "5m", limit=page_limit,
                                 closed_only=True, end_time=end_time)
                             if page is None or page.empty:
-                                break
-                            pages.insert(0, page)
-                            end_time = self._row_key(page["open_time"].iloc[0]) - 1
+                                raise RuntimeError("5m bootstrap pagination returned an empty page")
+                            pages.append(page)
                             remaining -= len(page)
+                            oldest_ms = self._row_key(page["open_time"].iloc[0])
+                            end_time = oldest_ms - 1
                             if len(page) < page_limit:
                                 break
-                        frame = pd.concat(pages, ignore_index=True) if pages else None
-                    if frame is None or frame.empty:
-                        raise RuntimeError("Binance returned insufficient 5m warmup candles")
+                        if not pages:
+                            raise RuntimeError("5m bootstrap produced no pages")
+                        frame = pd.concat(pages, ignore_index=True)
+                        frame = frame.drop_duplicates(subset=["open_time"], keep="last")
+                        frame = frame.sort_values("open_time").tail(limit).reset_index(drop=True)
+                    else:
+                        frame = self.feed.fetch_candles(
+                            market, symbol, interval, limit=min(1000, limit),
+                            closed_only=True)
                     self._merge_frame(market, symbol, interval, frame)
                     last_error = None
                     break
@@ -910,8 +895,8 @@ class BinanceKlineStream:
                     return
                 continue
 
-            # After the one-time 5m REST warmup, all 5m analysis data
-            # arrives only over WebSocket. Do not repair analysis candles via REST.
+            # After the one-time REST seed, 5m is WebSocket-only.
+            # Spot 4h is the sole scheduled REST refresh (hourly).
             if market == "spot":
                 for symbol in current_symbols:
                     self._refresh_spot_4h_if_due(symbol)
