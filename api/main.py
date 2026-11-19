@@ -516,6 +516,7 @@ def initialize_runtime():
         on_universe=autopilot.register_symbol_universe,
         on_cache_ready=autopilot.on_symbol_cache_ready,
     )
+    coordinator.market_stream = market_stream
 
 
 submission_store_path = PROJECT_ROOT / "data" / "agent_submissions.json"
@@ -1035,7 +1036,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected:
                     return self.send_json({
                         "success": False, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 Spot/Futures universes",
+                        "reason": "Symbol is outside the current daily top-30 Spot/Futures universes",
                     }, 403)
                 return self.send_json(coordinator.analyze_live(symbol))
 
