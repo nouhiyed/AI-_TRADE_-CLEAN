@@ -835,8 +835,11 @@ class APIHandler(BaseHTTPRequestHandler):
                 })
 
             if path == "/performance":
-                return self.send_json(
-                    performance.compute(coordinator.journal.closed_trades()))
+                standard_trades = [
+                    trade for trade in coordinator.journal.closed_trades()
+                    if (trade.get("context") or {}).get("profile", "standard") != "explore"
+                ]
+                return self.send_json(performance.compute(standard_trades))
             if path == "/journal":
                 if params.get("closed", ["0"])[0] == "1":
                     trades = coordinator.journal.closed_trades()
