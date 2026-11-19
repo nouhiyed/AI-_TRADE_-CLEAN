@@ -57,7 +57,8 @@ class BinanceKlineStream:
             # Environment/runtime configuration is always bounded to top 30.
             self.max_symbols = (
                 0 if explicit_test_limit and parsed_limit == 0
-                else min(30, max(1, parsed_limit))
+                else 30 if parsed_limit <= 0
+                else min(30, parsed_limit)
             )
         except (TypeError, ValueError):
             self.max_symbols = 30
