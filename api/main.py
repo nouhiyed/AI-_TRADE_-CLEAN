@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.19.4"
+API_VERSION = "2026.11.19.2"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -122,25 +122,26 @@ def build_cycle_coverage(universe_symbols, accepted_symbols, completed_symbols,
             overlap_symbols.update(bucket.intersection(other))
     accounted = set().union(*buckets) if buckets else set()
     unclassified = universe - accounted
-    successful_symbols = max(0, len(completed) - int(analysis_errors or 0))
-    required_successful_symbols = int(math.ceil(len(universe) * 0.95))
-    complete = bool(universe) and (
-        successful_symbols >= required_successful_symbols
-        and not overlap_symbols
-        and not unclassified
-    )
+    failed_count = min(len(completed), int(analysis_errors or 0))
+    successful_count = max(0, len(completed) - failed_count)
+    required_successful = int(math.ceil(len(universe) * 0.95))
+    processed_ratio = (successful_count / len(universe)) if universe else 0.0
+    # A cycle is operationally successful once at least 95% of its symbols
+    # completed analysis. Fatal errors and the unprocessed remainder stay
+    # visible as separate metrics instead of invalidating all useful work.
+    complete = bool(universe) and processed_ratio >= 0.95 and not overlap_symbols and not unclassified
     return {
         "cycle_open_time_ms": int(cycle_open_time_ms or 0),
         "expected_symbols": len(universe),
         "accepted_symbols": len(accepted),
         "completed_symbols": len(completed),
-        "successful_symbols": successful_symbols,
-        "failed_symbols": min(len(completed), int(analysis_errors or 0)),
+        "successful_symbols": successful_count,
+        "failed_symbols": failed_count,
         "completion_threshold_percent": 95,
-        "required_successful_symbols": required_successful_symbols,
-        "completion_percent": round(
-            successful_symbols / len(universe) * 100, 2
-        ) if universe else 0.0,
+        "required_successful_symbols": required_successful,
+        "processed_ratio": round(processed_ratio, 4),
+        "processed_pct": round(processed_ratio * 100, 2),
+        "completion_percent": round(processed_ratio * 100, 2),
         "pending_cache_symbols": len(pending_cache),
         "pending_analysis_symbols": len(pending_analysis),
         "pending_reconcile_symbols": len(pending_reconcile),
@@ -492,11 +493,11 @@ def continuous_scan_worker():
 
 
 def selected_market_symbols(market):
-    """Return the current daily top-250 symbols for one Binance market."""
+    """Return the current daily top-30 symbols for one Binance market."""
     market = str(market).strip().lower()
     if market not in {"spot", "futures"}:
         raise ValueError("Unsupported market")
-    ranked = coordinator.market_feed.fetch_top_symbols(market, limit=250)
+    ranked = coordinator.market_feed.fetch_top_symbols(market, limit=30)
     return {str(item["symbol"]).strip().upper() for item in ranked}
 
 
@@ -510,6 +511,7 @@ def initialize_runtime():
                                    news_max_age_h=12)
     coordinator.market_context = market_context
     autopilot = Autopilot(coordinator, context=market_context)
+    coordinator.funnel_recorder = autopilot._record_funnel
     market_stream = BinanceKlineStream(
         coordinator.market_feed, autopilot.on_market_kline,
         max_symbols=30,
@@ -517,6 +519,10 @@ def initialize_runtime():
         on_cache_ready=autopilot.on_symbol_cache_ready,
     )
     coordinator.market_stream = market_stream
+    coordinator.market_frame_provider = (
+        lambda domain, symbol: market_stream._snapshot(domain, symbol)
+        if market_stream else None
+    )
 
 
 submission_store_path = PROJECT_ROOT / "data" / "agent_submissions.json"
@@ -565,6 +571,7 @@ def _process_agent_submission(request_id, payload):
             take_profit=payload.get("take_profit"),
             stop_loss=payload.get("stop_loss"),
             agent=autopilot.worker_agent(str(payload.get("domain", "")).lower()),
+            profile=autopilot.config.get("profile", "standard"),
         )
     except Exception as error:
         failed = True
@@ -647,7 +654,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 # return its ranked order rather than alphabetically sorting
                 # the stream's internal symbol set.
                 ranked = coordinator.market_feed.fetch_top_symbols(
-                    market, limit=250
+                    market, limit=30
                 )
                 symbols = [item["symbol"] for item in ranked]
                 stream_state = (
@@ -658,12 +665,12 @@ class APIHandler(BaseHTTPRequestHandler):
                     "market": market,
                     "symbols": symbols,
                     "count": len(symbols),
-                    "limit": 250,
+                    "limit": 30,
                     "ranking_day": stream_state.get("ranking_day") or (
                         ranked[0].get("ranking_day") if ranked else None
                     ),
                     "selection_rule": "24h USDT quote volume + best bid/ask liquidity + spread",
-                    "source": "binance_daily_top_250",
+                    "source": "binance_daily_top_30",
                     "received_at": time.time(),
                 })
 
@@ -704,7 +711,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected_market_symbols(market):
                     return self.send_json({
                         "success": False, "market": market, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 universe",
+                        "reason": "Symbol is outside the current daily top-30 universe",
                     }, 403)
                 live = params.get("live", ["0"])[0] == "1"
                 start_time = params.get("startTime", [None])[0]
@@ -840,8 +847,21 @@ class APIHandler(BaseHTTPRequestHandler):
                 })
 
             if path == "/performance":
-                return self.send_json(
-                    performance.compute(coordinator.journal.closed_trades()))
+                standard_trades = [
+                    trade for trade in coordinator.journal.closed_trades()
+                    if (trade.get("context") or {}).get("profile", "standard") != "explore"
+                ]
+                metrics = performance.compute(standard_trades)
+                return self.send_json({
+                    **metrics,
+                    "sample_threshold_met": metrics["overall"]["trades"] >= 150,
+                    "evaluation_ready": False,
+                    "random_baseline_required": True,
+                    "random_baseline_compared": False,
+                    "profitability_conclusion": None,
+                    "minimum_standard_trades": 150,
+                    "evaluation_policy": "Do not judge profitability before 150 Standard trades and a random-baseline comparison; adjust one factor per weekly review.",
+                })
             if path == "/journal":
                 if params.get("closed", ["0"])[0] == "1":
                     trades = coordinator.journal.closed_trades()
@@ -860,11 +880,6 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json(coordinator.learning.report())
             if path == "/autopilot":
                 return self.send_json(autopilot.status())
-            if path == "/funnel":
-                return self.send_json(
-                    autopilot.funnel_status() if autopilot is not None
-                    else {"success": False, "cycles": []}
-                )
             if path == "/agent/submission":
                 request_id = str(params.get("id", [""])[0]).strip()
                 with submission_jobs_lock:
@@ -912,7 +927,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     and int(coverage[domain].get("expected_symbols") or 0)
                         == int((stream.get(domain) or {}).get("symbols") or 0)
                     and int(coverage[domain].get("successful_symbols") or 0)
-                        >= int(coverage[domain].get("required_successful_symbols") or 0)
+                        >= math.ceil(int(coverage[domain].get("expected_symbols") or 0) * 0.95)
                     and time.time() - float(coverage[domain].get("updated_at") or 0) <= 30
                     for domain in ("futures", "spot")
                 )
@@ -946,9 +961,14 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self.send_json({
                     "success": True,
                     "strategy_timeframe": "5m",
-                    "entry_timing": "immediate_current_bid_ask",
+                    "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                     "websocket": market_stream.status() if market_stream else {},
                 })
+            if path == "/funnel":
+                return self.send_json(
+                    autopilot.funnel_status() if autopilot else
+                    {"success": False, "reason": "Autopilot is not initialized"}
+                )
             if path == "/scan/status":
                 with scan_status_lock:
                     snapshot = json.loads(json.dumps(scan_status))
@@ -956,9 +976,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 snapshot["websocket"] = market_stream.status() if market_stream else {}
                 snapshot["analysis"] = runtime.get("analysis_pools", {})
                 snapshot["symbol_auditors"] = runtime.get("symbol_auditors", {})
-                snapshot["funnel"] = runtime.get("funnel", {})
+                snapshot["funnel"] = autopilot.funnel_status() if autopilot else {}
                 snapshot["strategy_timeframe"] = "5m"
-                snapshot["entry_timing"] = "next_5m_candle_open"
+                snapshot["entry_timing"] = "immediate_after_analysis_with_atr_drift_guard"
                 return self.send_json(snapshot)
             if path == "/status":
                 with scan_status_lock:
@@ -970,7 +990,6 @@ class APIHandler(BaseHTTPRequestHandler):
                 scan_snapshot["websocket"] = stream_snapshot
                 scan_snapshot["analysis"] = analysis_snapshot
                 scan_snapshot["symbol_auditors"] = auditor_snapshot
-                scan_snapshot["funnel"] = runtime_snapshot.get("funnel", {})
                 return self.send_json({
                     "api_version": API_VERSION,
                     "system": coordinator.get_system_status(),
@@ -981,11 +1000,11 @@ class APIHandler(BaseHTTPRequestHandler):
                     "analysis_pools": analysis_snapshot,
                     "analysis_metrics": analysis_snapshot,
                     "symbol_auditors": auditor_snapshot,
-                    "funnel": runtime_snapshot.get("funnel", {}),
+                    "funnel": autopilot.funnel_status() if autopilot else {},
                     "strategy": {
                         "version": "v3",
                         "signal_timeframe": "5m",
-                        "entry_timing": "immediate_current_bid_ask",
+                        "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                         "live_mode_locked": True,
                     },
                 })
@@ -1029,45 +1048,34 @@ class APIHandler(BaseHTTPRequestHandler):
 
             if path == "/analyze":
                 symbol = str(data.get("symbol", "BTCUSDT")).strip().upper()
-                requested_domain = str(data.get("domain", "")).strip().lower()
-                if requested_domain and requested_domain not in {"spot", "futures"}:
-                    return self.send_json({
-                        "success": False, "symbol": symbol,
-                        "reason": "Unsupported market domain",
-                    }, 400)
-                domains = (
-                    [requested_domain] if requested_domain else
-                    [domain for domain in ("spot", "futures")
-                     if symbol in selected_market_symbols(domain)]
+                selected = (
+                    selected_market_symbols("spot")
+                    | selected_market_symbols("futures")
                 )
-                if not domains or any(
-                    symbol not in selected_market_symbols(domain)
-                    for domain in domains
-                ):
+                if symbol not in selected:
                     return self.send_json({
                         "success": False, "symbol": symbol,
                         "reason": "Symbol is outside the current daily top-30 Spot/Futures universes",
                     }, 403)
                 signals = {}
-                data_errors = {}
-                for domain in domains:
-                    frames = market_stream._snapshot(domain, symbol, max_age_seconds=90)
-                    if frames is None:
-                        data_errors[domain] = "Market candle cache is still warming"
+                errors = {}
+                for domain in ("futures", "spot"):
+                    if symbol not in selected_market_symbols(domain):
                         continue
-                    analysis = coordinator.analyze_live_from_frames(
-                        symbol, domain, frames, agent=coordinator.agents[domain]
+                    frames = market_stream._snapshot(domain, symbol) if market_stream else None
+                    if not isinstance(frames, dict) or not frames:
+                        errors[domain] = "Warmed WebSocket candle cache is not ready"
+                        continue
+                    result = coordinator.analyze_live_from_frames(
+                        symbol, domain, frames, profile="standard"
                     )
-                    signal = analysis.get("signals", {}).get(domain)
-                    if isinstance(signal, dict) and signal:
-                        signals[domain] = signal
-                    if analysis.get("data_errors"):
-                        data_errors[domain] = analysis["data_errors"]
+                    signals[domain] = (result.get("signals") or {}).get(domain, {})
+                    errors.update(result.get("data_errors") or {})
                 return self.send_json({
-                    "success": bool(signals), "symbol": symbol,
-                    "source": "binance_websocket_cache",
-                    "signals": signals, "data_errors": data_errors,
-                }, 200 if signals else 503)
+                    "symbol": symbol, "source": "binance_websocket_cache",
+                    "signals": signals, "data_errors": errors,
+                    "success": bool(signals) and not errors,
+                })
 
             if path == "/agent/submit":
                 domain = str(data.get("domain", "")).strip().lower()
@@ -1079,7 +1087,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected_market_symbols(domain):
                     return self.send_json({
                         "success": False, "domain": domain, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 universe",
+                        "reason": "Symbol is outside the current daily top-30 universe",
                     }, 403)
                 request_id = uuid4().hex
                 now = time.time()
