@@ -847,9 +847,13 @@ class APIHandler(BaseHTTPRequestHandler):
                 metrics = performance.compute(standard_trades)
                 return self.send_json({
                     **metrics,
-                    "evaluation_ready": metrics["overall"]["trades"] >= 150,
+                    "sample_threshold_met": metrics["overall"]["trades"] >= 150,
+                    "evaluation_ready": False,
+                    "random_baseline_required": True,
+                    "random_baseline_compared": False,
+                    "profitability_conclusion": None,
                     "minimum_standard_trades": 150,
-                    "evaluation_policy": "Do not judge profitability before 150 Standard trades and a random-baseline comparison.",
+                    "evaluation_policy": "Do not judge profitability before 150 Standard trades and a random-baseline comparison; adjust one factor per weekly review.",
                 })
             if path == "/journal":
                 if params.get("closed", ["0"])[0] == "1":
