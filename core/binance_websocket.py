@@ -655,7 +655,12 @@ class BinanceKlineStream:
                 copied.attrs.update({
                     "market": market, "symbol": symbol,
                     "interval": interval, "timeframe": interval,
-                    "source": "binance_websocket_cache",
+                    "source": (
+                        "derived_from_binance_5m_cache"
+                        if interval in ("15m", "1h")
+                        else "binance_rest_hourly_cache" if interval == "4h"
+                        else "binance_websocket_cache"
+                    ),
                 })
                 frames[interval] = copied
             if market == "spot":
