@@ -1087,6 +1087,24 @@ class TradingCoordinator(SpotDemoMixin):
 
             market_price = self._demo_market_price(
                 symbol, reference_price=entry_reference_price)
+            valid_entry, entry_reason = self._validate_demo_entry_price(
+                plan, direction, market_price, min_net_rr=1.5, market="futures"
+            )
+            if not valid_entry:
+                return {"approved": False, "mode": "DEMO", "reason": entry_reason}
+            if direction == "LONG" and not stop < market_price < target:
+                return {
+                    "approved": False,
+                    "mode": "DEMO",
+                    "reason": "Live price is outside the LONG plan range",
+                }
+            if direction == "SHORT" and not target < market_price < stop:
+                return {
+                    "approved": False,
+                    "mode": "DEMO",
+                    "reason": "Live price is outside the SHORT plan range",
+                }
+
             reservation = self.risk.reserve_trade(
                 domain="futures",
                 symbol=symbol,
@@ -1102,28 +1120,6 @@ class TradingCoordinator(SpotDemoMixin):
             self._record_signal_funnel("futures", signal, "risk_approved")
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
-
-            valid_entry, entry_reason = self._validate_demo_entry_price(
-                plan, direction, market_price, min_net_rr=1.5, market="futures"
-            )
-            if not valid_entry:
-                self.risk.release_reservation(trade_id)
-                return {"approved": False, "mode": "DEMO", "reason": entry_reason}
-            if direction == "LONG" and not stop < market_price < target:
-                self.risk.release_reservation(trade_id)
-                return {
-                    "approved": False,
-                    "mode": "DEMO",
-                    "reason": "Live price is outside the LONG plan range",
-                }
-            if direction == "SHORT" and not target < market_price < stop:
-                self.risk.release_reservation(trade_id)
-                return {
-                    "approved": False,
-                    "mode": "DEMO",
-                    "reason": "Live price is outside the SHORT plan range",
-                }
-
             quantity = Decimal(str(reservation["quantity"]))
 
             execution_attempted = True
