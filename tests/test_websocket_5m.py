@@ -337,6 +337,36 @@ class V3PrefilterTests(unittest.TestCase):
 
 
 class ManualEntryQueueTests(unittest.TestCase):
+    def test_fresh_manual_signal_is_submitted_immediately_not_queued_for_next_open(self):
+        now = 1_800_000_000
+        submitted = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(
+                FakeCoordinator(), config_path=directory + "/autopilot.json",
+                clock=lambda: now,
+            )
+            autopilot._execute_ws_entry = lambda *_args: submitted.set()
+            signal = {
+                "symbol": "BTCUSDT", "direction": "LONG",
+                "strategy_version": "v3",
+                "signal_generated_at_ms": (now - 60) * 1000,
+                "signal_candle_open_time": 1_799_999_700_000,
+                "trade_plan": {
+                    "success": True, "strategy_version": "v3",
+                    "timeframe": "5m", "direction": "LONG",
+                },
+            }
+            try:
+                result = autopilot.queue_manual_signal("futures", "BTCUSDT", signal)
+                self.assertTrue(result["success"])
+                self.assertEqual(result["decision_status"], "SUBMITTED")
+                self.assertNotIn("next_entry_candle_open_ms", result)
+                self.assertTrue(submitted.wait(timeout=2))
+            finally:
+                autopilot._event_executor.shutdown(wait=True)
+                for pool in autopilot._analysis_pools.values():
+                    pool.shutdown(wait=True)
+
     def test_stale_agent_signal_is_rejected(self):
         now = 1_800_000_000
         with tempfile.TemporaryDirectory() as directory:
