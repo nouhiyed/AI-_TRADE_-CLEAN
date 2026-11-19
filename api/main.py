@@ -844,7 +844,13 @@ class APIHandler(BaseHTTPRequestHandler):
                     trade for trade in coordinator.journal.closed_trades()
                     if (trade.get("context") or {}).get("profile", "standard") != "explore"
                 ]
-                return self.send_json(performance.compute(standard_trades))
+                metrics = performance.compute(standard_trades)
+                return self.send_json({
+                    **metrics,
+                    "evaluation_ready": metrics["overall"]["trades"] >= 150,
+                    "minimum_standard_trades": 150,
+                    "evaluation_policy": "Do not judge profitability before 150 Standard trades and a random-baseline comparison.",
+                })
             if path == "/journal":
                 if params.get("closed", ["0"])[0] == "1":
                     trades = coordinator.journal.closed_trades()
