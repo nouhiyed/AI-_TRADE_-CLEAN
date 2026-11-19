@@ -244,6 +244,55 @@ class Top30UniverseTests(unittest.TestCase):
         self.assertEqual(stream._active_intervals("spot"), ["5m"])
         stream.stop()
 
+    def test_explicit_250_websocket_configuration_is_clamped_to_30(self):
+        class Feed:
+            def __init__(self):
+                self.requested = []
+
+            def fetch_top_symbols(self, market, limit):
+                self.requested.append((market, limit))
+                return [
+                    {"symbol": "COIN%03dUSDT" % index, "ranking_day": "2026-11-19"}
+                    for index in range(limit)
+                ]
+
+        feed = Feed()
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=250
+        )
+        self.assertEqual(stream.max_symbols, 30)
+        self.assertEqual(len(stream._load_symbols("spot")), 30)
+        self.assertEqual(feed.requested, [("spot", 30)])
+        stream.stop()
+
+    def test_rest_universe_default_is_30_and_explicit_250_is_capped(self):
+        import inspect
+
+        self.assertEqual(
+            inspect.signature(BinanceMarketData.fetch_top_symbols)
+            .parameters["limit"].default,
+            30,
+        )
+
+        class FortySymbolFeed(RankedMarketFeed):
+            def __init__(self):
+                super().__init__()
+                self.symbols = ["COIN%02dUSDT" % index for index in range(40)]
+                self.tickers = [
+                    {"symbol": symbol, "quoteVolume": "1000000",
+                     "lastPrice": "10", "priceChangePercent": "1"}
+                    for symbol in self.symbols
+                ]
+                self.books = [
+                    {"symbol": symbol, "bidPrice": "9.99", "askPrice": "10.00",
+                     "bidQty": "100", "askQty": "100"}
+                    for symbol in self.symbols
+                ]
+
+        ranked = FortySymbolFeed().fetch_top_symbols("spot", limit=250)
+        self.assertEqual(len(ranked), 30)
+        self.assertEqual(len({item["symbol"] for item in ranked}), 30)
+
     def test_websocket_rejects_a_partial_top_n_selection(self):
         class Feed:
             def fetch_top_symbols(self, market, limit):
