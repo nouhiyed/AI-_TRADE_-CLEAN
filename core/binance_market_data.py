@@ -291,7 +291,7 @@ class BinanceMarketData:
             raise ValueError("Market must be spot or futures")
         return sorted(set(symbols))
 
-    def fetch_top_symbols(self, market, limit=250, force_refresh=False):
+    def fetch_top_symbols(self, market, limit=30, force_refresh=False):
         """Return the daily top-N USDT pairs ranked by turnover and live book liquidity.
 
         Binance's 24h quote volume is the primary activity measure. Balanced
@@ -305,6 +305,9 @@ class BinanceMarketData:
             limit = int(limit)
         except (TypeError, ValueError):
             raise ValueError("limit must be a positive integer")
+        # The production universe is intentionally capped at the 30 most liquid
+        # USDT pairs per market. Callers cannot silently expand REST/WS load.
+        limit = min(30, limit)
         if limit < 1:
             raise ValueError("limit must be a positive integer")
 
