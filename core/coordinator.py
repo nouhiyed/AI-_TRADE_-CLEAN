@@ -1492,8 +1492,9 @@ class TradingCoordinator(SpotDemoMixin):
         # a fresh, fully warmed WebSocket snapshot; never fall back to REST.
         stream = getattr(self, "market_stream", None)
         snapshot = getattr(stream, "_snapshot", None)
-        frames = snapshot(domain, symbol, max_age_seconds=90) if callable(snapshot) else None
-        if not isinstance(frames, dict) or not frames:
+        if callable(snapshot):
+            frames = snapshot(domain, symbol, max_age_seconds=90)
+        else:
             provider = getattr(self, "market_frame_provider", None)
             frames = provider(domain, symbol) if callable(provider) else None
         if not isinstance(frames, dict) or not frames:
