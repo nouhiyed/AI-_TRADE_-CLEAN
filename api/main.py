@@ -488,11 +488,11 @@ def continuous_scan_worker():
 
 
 def selected_market_symbols(market):
-    """Return the current daily top-250 symbols for one Binance market."""
+    """Return the current daily top-30 symbols for one Binance market."""
     market = str(market).strip().lower()
     if market not in {"spot", "futures"}:
         raise ValueError("Unsupported market")
-    ranked = coordinator.market_feed.fetch_top_symbols(market, limit=250)
+    ranked = coordinator.market_feed.fetch_top_symbols(market, limit=30)
     return {str(item["symbol"]).strip().upper() for item in ranked}
 
 
@@ -508,7 +508,7 @@ def initialize_runtime():
     autopilot = Autopilot(coordinator, context=market_context)
     market_stream = BinanceKlineStream(
         coordinator.market_feed, autopilot.on_market_kline,
-        max_symbols=250,
+        max_symbols=30,
         on_universe=autopilot.register_symbol_universe,
         on_cache_ready=autopilot.on_symbol_cache_ready,
     )
@@ -642,7 +642,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 # return its ranked order rather than alphabetically sorting
                 # the stream's internal symbol set.
                 ranked = coordinator.market_feed.fetch_top_symbols(
-                    market, limit=250
+                    market, limit=30
                 )
                 symbols = [item["symbol"] for item in ranked]
                 stream_state = (
@@ -658,7 +658,7 @@ class APIHandler(BaseHTTPRequestHandler):
                         ranked[0].get("ranking_day") if ranked else None
                     ),
                     "selection_rule": "24h USDT quote volume + best bid/ask liquidity + spread",
-                    "source": "binance_daily_top_250",
+                    "source": "binance_daily_top_30",
                     "received_at": time.time(),
                 })
 
@@ -699,7 +699,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected_market_symbols(market):
                     return self.send_json({
                         "success": False, "market": market, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 universe",
+                        "reason": "Symbol is outside the current daily top-30 universe",
                     }, 403)
                 live = params.get("live", ["0"])[0] == "1"
                 start_time = params.get("startTime", [None])[0]
@@ -1023,7 +1023,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected:
                     return self.send_json({
                         "success": False, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 Spot/Futures universes",
+                        "reason": "Symbol is outside the current daily top-30 Spot/Futures universes",
                     }, 403)
                 return self.send_json(coordinator.analyze_live(symbol))
 
@@ -1037,7 +1037,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 if symbol not in selected_market_symbols(domain):
                     return self.send_json({
                         "success": False, "domain": domain, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-250 universe",
+                        "reason": "Symbol is outside the current daily top-30 universe",
                     }, 403)
                 request_id = uuid4().hex
                 now = time.time()
