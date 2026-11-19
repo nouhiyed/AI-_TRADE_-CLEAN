@@ -1060,6 +1060,7 @@ class Autopilot:
                 quote = self.c.market_feed.fetch_book_ticker(market, symbol)
                 quote_side = "ask" if normalized_hint == "LONG" else "bid"
                 entry_price = float(quote.get(quote_side) or 0)
+                local_now_ms = int(time.time() * 1000)
                 open_time = int(
                     signal.get("signal_candle_open_time")
                     or (local_now_ms // 300000) * 300000
