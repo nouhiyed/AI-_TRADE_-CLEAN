@@ -136,38 +136,35 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
 
-    def test_800_cached_5m_bars_build_closed_15m_and_1h_without_rest(self):
+    def test_2400_cached_5m_bars_build_200_closed_hourly_bars_without_rest(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=250)
-        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 800)
+        self.assertEqual(stream.CACHE_LIMITS["futures"]["5m"], 2400)
         self.assertEqual(stream._active_intervals("futures"), ["5m"])
-        frame = candle_frame("5min", rows=800)
+        frame = candle_frame("5min", rows=2400)
         frame.attrs["timeframe"] = "5m"
         stream._merge_frame("futures", "BTCUSDT", "5m", frame)
         snapshot = stream._snapshot("futures", "BTCUSDT")
         self.assertEqual(set(snapshot), {"5m", "15m", "1h"})
-        self.assertGreaterEqual(len(snapshot["15m"]), 60)
-        self.assertGreaterEqual(len(snapshot["1h"]), 60)
+        self.assertGreaterEqual(len(snapshot["15m"]), 800)
+        self.assertGreaterEqual(len(snapshot["1h"]), 200)
         self.assertTrue(snapshot["15m"]["is_closed"].all())
         self.assertTrue(snapshot["1h"]["is_closed"].all())
         self.assertEqual(snapshot["15m"].iloc[-1]["close"], frame.iloc[-1]["close"])
         self.assertEqual(snapshot["1h"].iloc[-1]["close"], frame.iloc[-1]["close"])
 
-    def test_spot_keeps_seeded_210_hour_history_and_includes_optional_4h(self):
+    def test_spot_derives_hourly_history_from_5m_and_includes_optional_4h(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=30)
-        five = candle_frame("5min", rows=800)
+        five = candle_frame("5min", rows=2400)
         five.attrs["timeframe"] = "5m"
-        one_hour = candle_frame("1h", rows=210)
-        one_hour.attrs["timeframe"] = "1h"
         four_hour = candle_frame("4h", rows=210)
         four_hour.attrs["timeframe"] = "4h"
         stream._merge_frame("spot", "BTCUSDT", "5m", five)
-        stream._merge_frame("spot", "BTCUSDT", "1h", one_hour)
         stream._merge_frame("spot", "BTCUSDT", "4h", four_hour)
         snapshot = stream._snapshot("spot", "BTCUSDT")
         self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
-        self.assertGreaterEqual(len(snapshot["1h"]), 210)
+        self.assertGreaterEqual(len(snapshot["1h"]), 200)
 
     def test_analysis_snapshot_rejects_stale_5m_cache(self):
         stream = BinanceKlineStream(
