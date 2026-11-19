@@ -1325,7 +1325,7 @@ class TradingCoordinator(SpotDemoMixin):
         }
 
 
-    def analyze_live_from_frames(self, symbol, domain, frames, agent=None):
+    def analyze_live_from_frames(self, symbol, domain, frames, agent=None, profile="standard"):
         """Run V3 against the closed multi-timeframe WebSocket cache (no REST I/O)."""
         symbol = str(symbol).strip().upper()
         domain = str(domain).strip().lower()
@@ -1373,6 +1373,7 @@ class TradingCoordinator(SpotDemoMixin):
         }
         try:
             agent_data = self.market_engine.for_live_agent(live_data, domain)
+            agent_data["profile"] = str(profile or "standard").lower()
             active_agent = agent if agent is not None else self.agents[domain]
             signal = active_agent.analyze(agent_data)
             if not isinstance(signal, dict) or signal.get("strategy_version") != "v3":
