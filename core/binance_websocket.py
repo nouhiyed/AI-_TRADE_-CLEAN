@@ -24,7 +24,7 @@ class BinanceKlineStream:
     }
     CACHE_LIMITS = {
         "futures": {"5m": 2412, "15m": 800, "1h": 200},
-        "spot": {"5m": 2412, "15m": 800, "1h": 200, "4h": 210},
+        "spot": {"5m": 3000, "15m": 800, "1h": 200, "4h": 210},
     }
     REQUIRED_ROWS = {
         "futures": {"5m": 60, "15m": 60, "1h": 60},
@@ -482,10 +482,15 @@ class BinanceKlineStream:
             self._rebuild_derived_frames(market, symbol)
 
     def _aggregate_5m_frame(self, market, symbol, timeframe, frame):
-        """Aggregate exact, aligned groups of closed 5m bars locally."""
+        """Aggregate observed closed 5m bars into aligned higher-timeframe bars.
+
+        Binance omits 5m klines for intervals with no trades. Those absent
+        intervals are valid market data, not missing candles to fabricate.
+        Aggregate the real observations inside each completed 15m/1h bucket
+        instead of requiring exactly 3/12 source rows.
+        """
         if frame is None or frame.empty or timeframe not in ("15m", "1h"):
             return pd.DataFrame()
-        required = 3 if timeframe == "15m" else 12
         duration = self.INTERVAL_MS[timeframe]
         source = frame.loc[frame["is_closed"].astype(bool)].copy()
         if source.empty:
@@ -500,11 +505,7 @@ class BinanceKlineStream:
         rows = []
         for bucket_open, group in source.groupby("bucket_open", sort=True):
             group = group.sort_values("open_time")
-            expected = [bucket_open + pd.Timedelta(minutes=5 * i) for i in range(required)]
-            actual = list(group["open_time"])
-            if actual != expected or len(group) != required:
-                continue
-            if not bool(group["is_closed"].astype(bool).all()):
+            if group.empty or not bool(group["is_closed"].astype(bool).all()):
                 continue
             bucket_end = bucket_open + pd.Timedelta(milliseconds=duration)
             row = {
@@ -830,7 +831,7 @@ class BinanceKlineStream:
             reason_counts = {}
             reason_samples = []
             for symbol in pending:
-                for interval in self._active_intervals(market):
+                for interval in self.REQUIRED_ROWS[market]:
                     frame = self._cache.get((market, symbol, interval))
                     reason = self._frame_health_reason(market, interval, frame)
                     if reason:
