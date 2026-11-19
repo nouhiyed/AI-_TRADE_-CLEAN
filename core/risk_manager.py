@@ -248,6 +248,7 @@ class RiskManager:
             if stop_distance <= 0:
                 return {"approved": False, "reason": "Invalid stop distance"}
 
+            requested_risk_amount = risk_amount
             notional = risk_amount / stop_distance
             margin = notional / leverage
 
@@ -288,9 +289,11 @@ class RiskManager:
                 "notional": notional,
                 "margin": margin,
                 "risk": risk_amount,
+                "requested_risk": requested_risk_amount,
                 "requested_risk_pct": risk_pct,
                 "actual_risk_pct": (risk_amount / self.equity * 100) if self.equity > 0 else 0,
                 "sizing_capped": sizing_capped,
+                "size_capped": sizing_capped,
                 "margin_cap_pct": 25.0,
                 "leverage": leverage,
                 "status": "RESERVED"
