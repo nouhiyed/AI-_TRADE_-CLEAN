@@ -909,8 +909,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     and int(coverage[domain].get("cycle_open_time_ms") or 0) == expected_cycle
                     and int(coverage[domain].get("expected_symbols") or 0)
                         == int((stream.get(domain) or {}).get("symbols") or 0)
-                    and int(coverage[domain].get("completed_symbols") or 0)
-                        == int(coverage[domain].get("expected_symbols") or 0)
+                    and int(coverage[domain].get("successful_symbols") or 0)
+                        >= math.ceil(int(coverage[domain].get("expected_symbols") or 0) * 0.95)
                     and time.time() - float(coverage[domain].get("updated_at") or 0) <= 30
                     for domain in ("futures", "spot")
                 )
