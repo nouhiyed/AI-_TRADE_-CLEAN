@@ -1741,7 +1741,7 @@ class _TradeShellState extends State<TradeShell>
             Icon(Icons.filter_alt_outlined, color: cyan, size: 17),
             const SizedBox(width: 7),
             Text(tr('مسار الإشارات — Funnel', 'SIGNAL FUNNEL'),
-              style: TextStyle(color: widget.foreground, fontSize: 11,
+              style: TextStyle(color: widget.text, fontSize: 11,
                 fontWeight: FontWeight.w900, letterSpacing: .8)),
             const Spacer(),
             Text('/funnel', style: TextStyle(color: widget.muted, fontSize: 9)),
