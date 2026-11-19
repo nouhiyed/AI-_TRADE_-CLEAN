@@ -84,6 +84,15 @@ class TradingCoordinator(SpotDemoMixin):
         self._recover_demo_positions()
 
 
+    def _record_signal_funnel(self, domain, signal, stage):
+        callback = getattr(self, "_signal_funnel_callback", None)
+        if callable(callback) and isinstance(signal, dict):
+            callback(
+                domain,
+                int(signal.get("signal_candle_open_time") or 0),
+                stage,
+            )
+
     def _demo_position_lock(self, position_id):
         key = str(position_id).strip()
         with self._demo_position_locks_guard:
@@ -1078,6 +1087,7 @@ class TradingCoordinator(SpotDemoMixin):
             if not reservation.get("approved"):
                 return reservation
 
+            self._record_signal_funnel("futures", signal, "risk_approved")
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
 
