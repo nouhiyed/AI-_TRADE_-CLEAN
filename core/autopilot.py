@@ -831,7 +831,7 @@ class Autopilot:
                     reason="Closed-candle event exceeded the 10-minute audit retention window",
                 )
                 return
-            if event_age_ms > 30000:
+            if event_age_ms > 90000:
                 audit_only = True
 
             frames = candle.get("market_data")
@@ -944,7 +944,7 @@ class Autopilot:
                     or "V3 did not approve a valid 5m entry plan"
                 )
                 self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                    "strategy_accepted", reason=reason)
+                                    "rejection", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                 )
@@ -1030,9 +1030,9 @@ class Autopilot:
                     }
 
     def _execute_ws_entry(self, domain, symbol, pending, opening_candle):
-        """Execute DEMO at the observed next 5m candle open, never on 1m."""
+        """Execute DEMO immediately using the current executable bid/ask and ATR drift guard."""
         result = {
-            "status": "RUNNING", "phase": "next_5m_open",
+            "status": "RUNNING", "phase": "immediate_after_analysis",
             "domain": domain, "symbol": symbol, "opened": [], "skipped": [],
         }
         try:
