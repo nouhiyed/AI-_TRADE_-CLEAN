@@ -2,7 +2,7 @@
 
 The first 150 Standard trades are an observation window, not a claim of statistical
 certainty. Reports rank setups and recorded signal features by net outcomes;
-automatic disabling only applies to a setup after the 150-trade minimum.
+automatic disabling remains off until a random-baseline comparator is available.
 """
 from core import performance
 
