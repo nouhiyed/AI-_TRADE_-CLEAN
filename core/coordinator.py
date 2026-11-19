@@ -731,6 +731,23 @@ class TradingCoordinator(SpotDemoMixin):
             self._save_demo_state()
             return {"success": False, "reason": str(error)}
 
+    def _cached_trailing_5m_frame(self, market, symbol, limit=40):
+        """Return confirmed closed 5m bars from the warmed WebSocket cache only."""
+        provider = getattr(self, "market_frame_provider", None)
+        frames = provider(market, str(symbol).strip().upper()) if callable(provider) else None
+        if not isinstance(frames, dict) or not frames:
+            stream = getattr(self, "market_stream", None)
+            snapshot = getattr(stream, "_snapshot", None)
+            frames = snapshot(market, str(symbol).strip().upper()) if callable(snapshot) else None
+        if not isinstance(frames, dict):
+            return None
+        frame = frames.get("5m")
+        if frame is None or frame.empty or "is_closed" not in frame.columns:
+            return None
+        if not bool(frame["is_closed"].iloc[-1]):
+            return None
+        return frame.tail(max(16, int(limit))).copy()
+
     def monitor_demo_positions(self):
         with self._demo_lock:
             position_ids = [
@@ -809,8 +826,8 @@ class TradingCoordinator(SpotDemoMixin):
                     )
                 if trailing_enabled and trailing_armed:
                     try:
-                        trail_frame = self.market_feed.fetch_candles(
-                            "futures", symbol, "5m", limit=40, closed_only=True)
+                        trail_frame = self._cached_trailing_5m_frame(
+                            "futures", symbol, limit=40)
                         trail_update = calculate_trailing_stop(
                             trail_frame, direction, stop,
                             snapshot.get("trailing_best_price"), exit_price)
@@ -1479,7 +1496,7 @@ class TradingCoordinator(SpotDemoMixin):
             stream = getattr(self, "market_stream", None)
             snapshot = getattr(stream, "_snapshot", None)
             if callable(snapshot):
-                frames = snapshot(domain, symbol, max_age_seconds=90)
+                frames = snapshot(domain, symbol)
         if not isinstance(frames, dict) or not frames:
             reason = "Warmed WebSocket candle cache is not ready for this symbol"
             return {**base, "success": False, "decision_status": "WAITING_FOR_CACHE",
