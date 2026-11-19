@@ -57,7 +57,7 @@ class BinanceKlineStream:
         self.full_universe = self.max_symbols == 0
         # Large top-N lists use only 5m trigger streams; higher-timeframe
         # context is fetched on demand after the local 5m prefilter passes.
-        self.fast_scan_mode = self.full_universe or self.max_symbols >= 100
+        self.fast_scan_mode = True  # every configured universe now uses a 5m-only stream
         try:
             warmup_workers = int(os.environ.get("AI_TRADER_WS_WARMUP_WORKERS", "6"))
         except (TypeError, ValueError):
@@ -543,11 +543,20 @@ class BinanceKlineStream:
         source = source.sort_values("open_time").set_index("open_time")
         rule = str(minutes) + "min"
         grouped = source.resample(rule, origin="epoch", label="left", closed="left")
-        out = grouped.agg({
+        aggregations = {
             "open": "first", "high": "max", "low": "min", "close": "last",
-            "volume": "sum", "quote_volume": "sum", "trades": "sum",
+            "volume": "sum",
+        }
+        optional = {
+            "quote_volume": "sum", "trades": "sum",
             "taker_buy_base": "sum", "taker_buy_quote": "sum",
-        })
+        }
+        aggregations.update({key: value for key, value in optional.items()
+                             if key in source.columns})
+        out = grouped.agg(aggregations)
+        for key in optional:
+            if key not in out.columns:
+                out[key] = 0
         counts = grouped["close"].count()
         out = out.loc[counts == expected_count].tail(limit).reset_index()
         if out.empty:
