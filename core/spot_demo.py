@@ -241,6 +241,7 @@ class SpotDemoMixin:
                 risk_pct=float(risk_pct), leverage=1)
             if not reservation.get("approved"):
                 return reservation
+            self._record_signal_funnel("spot", signal, "risk_approved")
             trade_id = reservation["trade_id"]
             self.risk.update_reservation_status(trade_id, "DEMO_PENDING")
 
