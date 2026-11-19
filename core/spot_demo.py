@@ -45,26 +45,19 @@ class SpotDemoMixin:
         if not self._agent_enabled("spot"):
             return {"success": False, "reason": "Spot agent is stopped",
                     "opportunities": []}
-        # Volume ranks the universe but does not exclude eligible USDT pairs.
-        # A volume floor is applied only when explicitly requested by a caller.
-        minimum = (float(min_quote_volume)
-                   if min_quote_volume is not None else None)
         try:
-            tickers = self.market_feed._request(
-                "spot", "/api/v3/ticker/24hr", {}
-            )
-            if limit is None:
-                # Automatic scans use exchangeInfo as the authoritative,
-                # complete list of eligible Spot USDT symbols.
-                symbols = self.market_feed.fetch_symbols("spot")
-            else:
-                # A user-requested limited scan can use the live Spot ticker
-                # response directly, avoiding a second exchangeInfo request.
-                symbols = sorted({
-                    str(item.get("symbol", "")).strip().upper()
-                    for item in tickers
-                    if str(item.get("symbol", "")).strip().upper().endswith("USDT")
-                })
+            requested_limit = 30 if limit is None else min(30, max(1, int(limit)))
+            # Ranking is cached per UTC day by BinanceMarketData. Do not issue
+            # a fresh 24h ticker/exchangeInfo request on every scan.
+            ranked = self.market_feed.fetch_top_symbols("spot", limit=30)
+            minimum = (float(min_quote_volume)
+                       if min_quote_volume is not None else None)
+            if minimum is not None:
+                ranked = [
+                    item for item in ranked
+                    if float(item.get("quote_volume", 0) or 0) >= minimum
+                ]
+            universe = [dict(item) for item in ranked[:requested_limit]]
         except Exception as error:
             return {
                 "success": False,
@@ -72,35 +65,12 @@ class SpotDemoMixin:
                 "opportunities": [],
             }
 
-        ticker_by_symbol = {
-            str(item.get("symbol", "")).strip().upper(): item for item in tickers
-        }
-        ranked = []
-        for symbol in symbols:
-            item = ticker_by_symbol.get(symbol, {})
-            try:
-                volume = float(item.get("quoteVolume", 0))
-                price = float(item.get("lastPrice", 0))
-            except (TypeError, ValueError):
-                volume, price = 0.0, 0.0
-
-            if minimum is not None and volume < minimum:
-                continue
-
-            ranked.append({
-                "symbol": symbol,
-                "quote_volume": volume,
-                "last_price": price,
-            })
-
-        ranked.sort(key=lambda item: item["quote_volume"], reverse=True)
-        universe = ranked[:30] if limit is None else ranked[:min(30, max(1, int(limit)))]
-
         scan_meta = {
             "universe_total": len(universe),
             "batch_size": len(universe),
             "cycle": 0,
             "cycle_complete": True,
+            "ranking": "daily_top_30_quote_volume_and_order_book_liquidity",
         }
         if limit is None:
             from core.scan_rotation import next_scan_batch
@@ -117,11 +87,24 @@ class SpotDemoMixin:
             if len(rejection_samples) < 10:
                 rejection_samples.append({"symbol": symbol, "reason": reason})
 
+        stream = getattr(self, "market_stream", None)
+        snapshot = getattr(stream, "_snapshot", None)
         for item in universe:
-            symbol = item["symbol"]
+            symbol = str(item.get("symbol", "")).strip().upper()
             try:
-                analysis = self.analyze_live(symbol, domains=["spot"])
-                signal = analysis.get("signals", {}).get("spot", {})
+                frames = snapshot("spot", symbol, max_age_seconds=90) if callable(snapshot) else None
+                if not isinstance(frames, dict) or not frames:
+                    errors[symbol] = "Spot WebSocket candle cache is not ready or stale"
+                    continue
+                analysis = self.analyze_live_from_frames(
+                    symbol, "spot", frames, agent=self.agents.get("spot")
+                )
+                data_errors = analysis.get("data_errors") or {}
+                if data_errors:
+                    errors[symbol] = "; ".join(
+                        str(value) for value in data_errors.values()
+                    )
+                signal = (analysis.get("signals") or {}).get("spot", {})
                 opp = self._as_opportunity(item, signal, "spot")
                 if opp:
                     opportunities.append(opp)
@@ -134,6 +117,7 @@ class SpotDemoMixin:
                     reject(symbol, plan.get("reason") or "Trade plan rejected")
             except Exception as error:
                 errors[symbol] = str(error)
+
         result = self._finish_scan(
             "spot", universe, opportunities, errors,
             rejections=rejections, rejection_samples=rejection_samples)
