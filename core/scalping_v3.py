@@ -344,6 +344,23 @@ class _V3Base:
         }
         return plan
 
+
+    @classmethod
+    def rejection_diagnostics(cls, market, metrics, setups):
+        """Explain failed V3 gates without changing any entry decision."""
+        return {
+            "market": market,
+            "timeframe": cls.TIMEFRAME,
+            "failed_setups": [name for name, passed in setups.items() if not passed],
+            "setup_checks": {name: bool(passed) for name, passed in setups.items()},
+            "metrics": {
+                key: (bool(value) if isinstance(value, bool)
+                       else round(float(value), 5) if isinstance(value, (int, float))
+                       else value)
+                for key, value in metrics.items()
+            },
+        }
+
     @classmethod
     def plan(cls, market, direction, five, setup, regime, base_target_r, current_price):
         atr = cls.value(five, "ATR")
@@ -468,7 +485,32 @@ class FuturesScalpingStrategyV3(_V3Base):
                 and shape["upper_wick_range"] >= self.REJECTION_WICK_RANGE
                 and bb_high is not None and c >= bb_high*.998):
             return self.plan_with_structure("futures", "SHORT", trigger, data, "RANGE_REJECTION_5M", "RANGE", 1.55, c, data.get("profile", "standard"))
-        return {"success": False, "reason": "No qualifying V3 Futures 5m setup"}
+        diagnostics = self.rejection_diagnostics("futures", {
+            "rsi_5m": rsi, "adx_5m": adx5, "adx_15m": range_market,
+            "volume_ratio": vr, "body_atr": body, "close_location": loc,
+            "lower_wick_ratio": shape["lower_wick_range"],
+            "upper_wick_ratio": shape["upper_wick_range"],
+            "bullish_15m_1h_bias": bull, "bearish_15m_1h_bias": bear,
+            "close_vs_ema9_atr": (c - ema9) / atr,
+            "low_vs_ema20_atr": (low - ema20) / atr,
+            "high_vs_ema20_atr": (h - ema20) / atr,
+            "close_vs_prior_high_atr": (c - prior_high) / atr,
+            "close_vs_prior_low_atr": (c - prior_low) / atr,
+        }, {
+            "SUPPORT_RECLAIM_LONG": support_reclaim_long,
+            "PULLBACK_LONG": pull_long, "PULLBACK_SHORT": pull_short,
+            "BREAKOUT_LONG": breakout_long, "BREAKOUT_SHORT": breakout_short,
+            "RANGE_REJECTION_LONG": bool(range_market is not None and range_market <= 18
+                and loc >= .72 and c > o and rsi <= 30 and vr >= .80
+                and shape["lower_wick_range"] >= self.REJECTION_WICK_RANGE
+                and bb_low is not None and c <= bb_low*1.002),
+            "RANGE_REJECTION_SHORT": bool(range_market is not None and range_market <= 18
+                and loc <= .28 and c < o and rsi >= 70 and vr >= .80
+                and shape["upper_wick_range"] >= self.REJECTION_WICK_RANGE
+                and bb_high is not None and c >= bb_high*.998),
+        })
+        return {"success": False, "reason": "No qualifying V3 Futures 5m setup",
+                "diagnostics": diagnostics}
 
 
 class SpotScalpingStrategyV3(_V3Base):
@@ -537,4 +579,24 @@ class SpotScalpingStrategyV3(_V3Base):
                 and loc >= .72 and vr >= .80
                 and shape["lower_wick_range"] >= self.REJECTION_WICK_RANGE):
             return self.plan_with_structure("spot", "LONG", trigger, data, "RANGE_BOUNCE_5M", "RANGE", 1.55, c, data.get("profile", "standard"))
-        return {"success": False, "reason": "No qualifying V3 Spot 5m setup"}
+        diagnostics = self.rejection_diagnostics("spot", {
+            "rsi_5m": rsi, "adx_15m": adx15, "volume_ratio": vr,
+            "body_atr": body, "close_location": loc,
+            "lower_wick_ratio": shape["lower_wick_range"],
+            "upper_wick_ratio": shape["upper_wick_range"],
+            "bullish_context": bullish,
+            "close_vs_ema9_atr": (c - ema9) / atr,
+            "low_vs_ema20_atr": (low - ema20) / atr,
+            "close_vs_prior_high_atr": (c - prior_high) / atr,
+            "close_vs_prior_low_atr": (c - prior_low) / atr,
+            "hourly_close_vs_ema200_pct": (c1 / e200 - 1.0) * 100.0 if e200 else None,
+        }, {
+            "SUPPORT_RECLAIM_LONG": support_reclaim,
+            "PULLBACK_LONG": pull, "BREAKOUT_LONG": breakout,
+            "RANGE_BOUNCE_LONG": bool(adx15 is not None and adx15 <= 18
+                and bb is not None and rsi <= 30 and c <= bb*1.002
+                and c > o and loc >= .72 and vr >= .80
+                and shape["lower_wick_range"] >= self.REJECTION_WICK_RANGE),
+        })
+        return {"success": False, "reason": "No qualifying V3 Spot 5m setup",
+                "diagnostics": diagnostics}
