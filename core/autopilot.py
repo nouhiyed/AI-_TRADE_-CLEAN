@@ -109,8 +109,11 @@ class Autopilot:
                      "superseded": 0, "dropped_stale": 0,
                      "prefilter_passed": 0, "prefilter_rejected": 0,
                      "deep_analysis": 0, "actionable": 0,
+                     "audit_only_delayed": 0,
                      "last_received_at_ms": None, "last_started_at_ms": None,
                      "last_completed_at_ms": None, "last_queue_wait_ms": None,
+                     "last_event_age_ms": None, "last_event_source": None,
+                     "last_audit_only_reason": None,
                      "last_analysis_ms": None, "last_candle_close_time_ms": None}
             for domain in ("futures", "spot")
         }
@@ -163,6 +166,8 @@ class Autopilot:
                         for domain, stats in self._analysis_stats.items()}
         for domain in ("futures", "spot"):
             analysis[domain]["agent_instances"] = self._analysis_agents_created[domain]
+            analysis[domain]["analysis_path"] = "cached_multi_timeframe"
+            analysis[domain]["prefilter_enabled"] = False
         writer_threads = getattr(self._event_executor, "_threads", set())
         analysis["execution_writer"] = {
             "workers": 1,
@@ -480,6 +485,16 @@ class Autopilot:
                 int(time.time() * 1000) - event_time_ms
                 if event_time_ms > 0 else age_ms
             )
+            with self._analysis_stats_lock:
+                stats = self._analysis_stats[domain]
+                stats["last_event_age_ms"] = max(0, event_age_ms)
+                stats["last_event_source"] = str(candle.get("source") or "unknown")
+                stats["last_audit_only_reason"] = (
+                    "event_age_exceeded_90s" if event_age_ms > 90000
+                    else ("cache_reconciliation" if candle.get("audit_only") else None)
+                )
+                if event_age_ms > 90000:
+                    stats["audit_only_delayed"] += 1
             if event_age_ms > 90000:
                 candle["audit_only"] = True
             self._analyze_ws_close(domain, symbol, candle, received_at_ms)
@@ -783,10 +798,9 @@ class Autopilot:
         }
 
     def _analyze_ws_close(self, domain, symbol, candle, received_at_ms=None):
-        """Run the 5m symbol gate, then route candidates to the full V3 worker."""
+        """Run full V3 analysis from the warmed multi-timeframe WebSocket cache."""
         analysis_started_at_ms = int(time.time() * 1000)
         received_at_ms = int(received_at_ms or candle.get("received_at_ms") or analysis_started_at_ms)
-        prefilter_info = None
         try:
             with self._analysis_stats_lock:
                 stats = self._analysis_stats[domain]
@@ -861,6 +875,16 @@ class Autopilot:
             agent = self.worker_agent(domain)
             # Every production decision uses only the warmed WebSocket cache.
             # Higher timeframes are locally aggregated before reaching this worker.
+            # This deployment uses the full cached multi-timeframe V3 path;
+            # it does not run the optional 5m prefilter. Count the actual deep
+            # analysis call so health telemetry cannot mistake unused prefilter
+            # counters for a stalled analysis pipeline.
+            with self._analysis_stats_lock:
+                self._analysis_stats[domain]["deep_analysis"] += 1
+            self._record_symbol_audit(
+                domain, symbol, "deep_analysis", increment="deep_analysis",
+                analysis_path="cached_multi_timeframe",
+            )
             analysis = self.c.analyze_live_from_frames(
                 symbol, domain, frames, agent=agent, profile=profile
             )
