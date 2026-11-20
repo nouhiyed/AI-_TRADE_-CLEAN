@@ -682,6 +682,23 @@ class BinanceKlineStream:
                 return None
         return frames
 
+    def _replay_waiting_event_after_dispatch(self, market, symbol, initial_frames):
+        """Close the cache-ready callback race for a just-retained WS event.
+
+        A warmup worker can publish cache readiness after the first snapshot
+        returns None but before Autopilot stores the event in its waiting
+        cache. In that ordering the one-shot readiness callback sees no event,
+        then the event is retained forever. Recheck immediately after dispatch
+        so either side of that race triggers the replay.
+        """
+        if initial_frames is not None or not callable(self.on_cache_ready):
+            return False
+        frames = self._snapshot(market, symbol)
+        if frames is None:
+            return False
+        self.on_cache_ready(market, symbol, frames)
+        return True
+
     def _warm_symbol(self, market, symbol):
         # Publish in-flight work so a stalled REST bootstrap is distinguishable
         # from a worker that is idle or has already failed.
