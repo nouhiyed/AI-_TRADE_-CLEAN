@@ -110,6 +110,9 @@ class BinanceKlineStream:
                 "last_close_code": None, "last_close_reason": None,
                 "last_disconnect_at": None, "reconnect_delay_seconds": 3,
                 "ranking_day": None,
+                "universe_load_started_at": None,
+                "cache_warmup_active_symbols": [],
+                "cache_warmup_last_progress_at": None,
             }
             for market in ("spot", "futures")
         }
@@ -674,6 +677,13 @@ class BinanceKlineStream:
         return frames
 
     def _warm_symbol(self, market, symbol):
+        # Publish in-flight work so a stalled REST bootstrap is distinguishable
+        # from a worker that is idle or has already failed.
+        with self._lock:
+            active = self._status[market].setdefault("cache_warmup_active_symbols", [])
+            if symbol not in active:
+                active.append(symbol)
+            self._status[market]["cache_warmup_last_progress_at"] = time.time()
         # One REST bootstrap: 5m only, plus Spot 4h macro context.
         # 15m/1h are derived from the canonical 5m history.
         # Only canonical 5m history participates in cache readiness.
@@ -755,6 +765,11 @@ class BinanceKlineStream:
             except Exception as error:
                 with self._lock:
                     self._status[market]["last_error"] = "cache-ready callback: " + str(error)
+        with self._lock:
+            active = self._status[market].setdefault("cache_warmup_active_symbols", [])
+            if symbol in active:
+                active.remove(symbol)
+            self._status[market]["cache_warmup_last_progress_at"] = time.time()
         return ready
 
     def _ensure_warmup_worker(self, market):
@@ -937,6 +952,9 @@ class BinanceKlineStream:
     def _run_market(self, market):
         while not self._stop.is_set():
             try:
+                with self._lock:
+                    self._status[market]["state"] = "loading_universe"
+                    self._status[market]["universe_load_started_at"] = time.time()
                 symbols = self._load_symbols(market)
                 # Provision one logical auditor record for every eligible pair
                 # before websocket events start arriving; status can distinguish
