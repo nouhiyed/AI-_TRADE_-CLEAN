@@ -1,6 +1,7 @@
 import time
 import threading
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
@@ -36,6 +37,42 @@ class _BinanceAccessRestrictedError(RuntimeError):
 class BinanceMarketData:
     # Stablecoin quote pairs are not useful directional scalping instruments.
     EXCLUDED_SCALPING_SYMBOLS = frozenset({"EURUSDT", "FDUSDUSDT"})
+    # Spot base assets that are cash-like rather than directional crypto pairs.
+    EXCLUDED_SPOT_STABLE_BASES = frozenset({
+        "USDT", "USDC", "FDUSD", "USD1", "RLUSD", "BFUSD", "XUSD",
+        "U", "EUR", "BUSD", "TUSD", "DAI", "USDP", "PYUSD", "USDE",
+        "USDD", "UST", "USTC", "FRAX", "USDS", "USDJ", "EURI",
+    })
+    # Binance tokenized-equity symbols seen in the Spot universe.
+    EXCLUDED_SPOT_EQUITY_BASES = frozenset({
+        "INTCB", "QQQB", "NVDAB", "MUB", "MRVLB", "SPCXB", "SOXLB",
+    })
+
+    @classmethod
+    def _spot_base_is_excluded(cls, symbol, ticker=None):
+        symbol = str(symbol or "").upper()
+        if not symbol.endswith("USDT"):
+            return True
+        base = symbol[:-4]
+        custom = {
+            item.strip().upper()
+            for item in os.getenv("AI_TRADER_EXCLUDED_BASES", "").split(",")
+            if item.strip()
+        }
+        if base in cls.EXCLUDED_SPOT_STABLE_BASES:
+            return True
+        if base in cls.EXCLUDED_SPOT_EQUITY_BASES or base in custom:
+            return True
+        # Catch newly listed USD-pegged instruments without maintaining a list.
+        if "USD" in base and ticker:
+            try:
+                price = float(ticker.get("lastPrice", 0) or 0)
+                change = abs(float(ticker.get("priceChangePercent", 0) or 0))
+                if 0.97 <= price <= 1.03 and change < 0.5:
+                    return True
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return False
     BASE_URLS = {
         # Official public market-data-only REST endpoint. The app does not
         # require Spot user-data endpoints from this client.
@@ -344,10 +381,16 @@ class BinanceMarketData:
             } if isinstance(books, list) else {}
 
             candidates = []
+            scalping_eligible_count = 0
             for symbol in eligible:
                 ticker = ticker_map.get(symbol)
                 book = book_map.get(symbol)
-                if not ticker or not book:
+                if not ticker:
+                    continue
+                if market == "spot" and self._spot_base_is_excluded(symbol, ticker):
+                    continue
+                scalping_eligible_count += 1
+                if not book:
                     continue
                 try:
                     quote_volume = float(ticker.get("quoteVolume", 0) or 0)
@@ -387,7 +430,7 @@ class BinanceMarketData:
                     "ranking_day": ranking_day,
                 })
 
-            required = min(limit, len(eligible))
+            required = min(limit, scalping_eligible_count)
             if len(candidates) < required:
                 raise RuntimeError(
                     "Incomplete Binance liquidity snapshot for %s: %s valid pairs, %s required"
