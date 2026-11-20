@@ -718,7 +718,9 @@ class BinanceKlineStream:
                             remaining -= len(page)
                             oldest_ms = self._row_key(page["open_time"].iloc[0])
                             end_time = oldest_ms - 1
-                            if len(page) < page_limit:
+                            # closed_only drops the currently open candle, so a full Binance page
+                            # can legitimately contain page_limit-1 closed rows.
+                            if len(page) < page_limit - 1:
                                 break
                         if not pages:
                             raise RuntimeError("5m bootstrap produced no pages")
