@@ -354,7 +354,9 @@ class _V3Base:
             "failed_setups": [name for name, passed in setups.items() if not passed],
             "setup_checks": {name: bool(passed) for name, passed in setups.items()},
             "metrics": {
-                key: (round(float(value), 5) if isinstance(value, (int, float)) else value)
+                key: (bool(value) if isinstance(value, bool)
+                       else round(float(value), 5) if isinstance(value, (int, float))
+                       else value)
                 for key, value in metrics.items()
             },
         }
