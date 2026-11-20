@@ -109,8 +109,11 @@ class Autopilot:
                      "superseded": 0, "dropped_stale": 0,
                      "prefilter_passed": 0, "prefilter_rejected": 0,
                      "deep_analysis": 0, "actionable": 0,
+                     "audit_only_delayed": 0,
                      "last_received_at_ms": None, "last_started_at_ms": None,
                      "last_completed_at_ms": None, "last_queue_wait_ms": None,
+                     "last_event_age_ms": None, "last_event_source": None,
+                     "last_audit_only_reason": None,
                      "last_analysis_ms": None, "last_candle_close_time_ms": None}
             for domain in ("futures", "spot")
         }
@@ -482,6 +485,16 @@ class Autopilot:
                 int(time.time() * 1000) - event_time_ms
                 if event_time_ms > 0 else age_ms
             )
+            with self._analysis_stats_lock:
+                stats = self._analysis_stats[domain]
+                stats["last_event_age_ms"] = max(0, event_age_ms)
+                stats["last_event_source"] = str(candle.get("source") or "unknown")
+                stats["last_audit_only_reason"] = (
+                    "event_age_exceeded_90s" if event_age_ms > 90000
+                    else ("cache_reconciliation" if candle.get("audit_only") else None)
+                )
+                if event_age_ms > 90000:
+                    stats["audit_only_delayed"] += 1
             if event_age_ms > 90000:
                 candle["audit_only"] = True
             self._analyze_ws_close(domain, symbol, candle, received_at_ms)
