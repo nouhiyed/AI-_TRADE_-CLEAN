@@ -504,30 +504,36 @@ class BinanceKlineStream:
         frequency = "15min" if timeframe == "15m" else "1h"
         current_bucket = pd.Timestamp.now(tz="UTC").floor(frequency)
         source = source.loc[source["open_time"] < current_bucket]
-        source["bucket_open"] = source["open_time"].dt.floor(frequency)
-        rows = []
-        for bucket_open, group in source.groupby("bucket_open", sort=True):
-            group = group.sort_values("open_time")
-            if group.empty or not bool(group["is_closed"].astype(bool).all()):
-                continue
-            bucket_end = bucket_open + pd.Timedelta(milliseconds=duration)
-            row = {
-                "open_time": bucket_open,
-                "open": float(group["open"].iloc[0]),
-                "high": float(group["high"].max()),
-                "low": float(group["low"].min()),
-                "close": float(group["close"].iloc[-1]),
-                "volume": float(group["volume"].sum()),
-                "close_time": bucket_end - pd.Timedelta(milliseconds=1),
-                "is_closed": True,
-            }
-            for column in ("quote_volume", "trades", "taker_buy_base", "taker_buy_quote"):
-                if column in group.columns:
-                    row[column] = float(group[column].sum())
-            rows.append(row)
-        if not rows:
+        if source.empty:
             return pd.DataFrame()
-        result = pd.DataFrame(rows)
+        source["bucket_open"] = source["open_time"].dt.floor(frequency)
+
+        # Vectorised aggregation avoids a Python loop for every candle bucket.
+        # Only closed 5m rows were selected above, preserving the prior safety
+        # rule that an unfinished source candle can never form a derived bar.
+        aggregations = {
+            "open": ("open", "first"),
+            "high": ("high", "max"),
+            "low": ("low", "min"),
+            "close": ("close", "last"),
+            "volume": ("volume", "sum"),
+        }
+        for column in ("quote_volume", "trades", "taker_buy_base", "taker_buy_quote"):
+            if column in source.columns:
+                aggregations[column] = (column, "sum")
+        grouped = source.groupby("bucket_open", sort=True).agg(**aggregations)
+        if grouped.empty:
+            return pd.DataFrame()
+        grouped = grouped.astype(float)
+        bucket_open = grouped.index.to_series().reset_index(drop=True)
+        result = grouped.reset_index(drop=True)
+        result.insert(0, "open_time", bucket_open)
+        result.insert(
+            6, "close_time",
+            bucket_open + pd.Timedelta(milliseconds=duration)
+            - pd.Timedelta(milliseconds=1),
+        )
+        result.insert(7, "is_closed", True)
         result.attrs.update({
             "market": market, "symbol": symbol, "interval": timeframe,
             "timeframe": timeframe, "source": "derived_from_binance_5m_cache",
