@@ -1243,6 +1243,9 @@ class BinanceKlineStream:
                     "market_data": frames,
                     "cache_ready": frames is not None,
                 })
+                self._replay_waiting_event_after_dispatch(
+                    market, symbol, frames
+                )
             elif opening_event:
                 self.on_kline(market, {
                     "symbol": symbol, "interval": "5m",
