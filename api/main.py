@@ -722,11 +722,19 @@ class APIHandler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "Unsupported interval"}, 400)
                 if market not in {"spot", "futures"}:
                     return self.send_json({"error": "Unsupported market"}, 400)
-                if symbol not in selected_market_symbols(market):
+                # Chart requests are user-directed and must not be coupled to
+                # the automatic scanner's daily top-30 universe. The scanner
+                # remains capped independently; Binance itself validates that
+                # the requested USDT pair exists and is tradable.
+                if (
+                    not symbol.endswith("USDT")
+                    or not symbol[:-4].isalnum()
+                    or not 5 <= len(symbol) <= 20
+                ):
                     return self.send_json({
                         "success": False, "market": market, "symbol": symbol,
-                        "reason": "Symbol is outside the current daily top-30 universe",
-                    }, 403)
+                        "reason": "Invalid USDT trading symbol",
+                    }, 400)
                 live = params.get("live", ["0"])[0] == "1"
                 start_time = params.get("startTime", [None])[0]
                 end_time = params.get("endTime", [None])[0]
