@@ -164,5 +164,43 @@ class CacheWarmupReplayTests(unittest.TestCase):
         self.assertEqual(calls, [("futures", "BTCUSDT", snapshot)])
 
 
+    def test_dispatch_race_rechecks_cache_after_waiting_event_is_retained(self):
+        now = int(time.time() * 1000)
+        open_time = (now // 300000) * 300000 - 300000
+        event = {
+            "symbol": "BTCUSDT", "interval": "5m",
+            "open_time": open_time, "close_time": open_time + 299999,
+            "event_time": open_time + 300001, "is_closed": True,
+            "market_data": None, "cache_ready": False,
+        }
+        frames = {"5m": object()}
+        stream = BinanceKlineStream(
+            FakeFeed(),
+            self.autopilot.on_market_kline,
+            on_cache_ready=self.autopilot.on_symbol_cache_ready,
+        )
+
+        # Simulate the initial WebSocket snapshot missing the cache, followed
+        # by the warmup worker making it ready just after the event is retained.
+        self.autopilot.on_market_kline("futures", event)
+        with patch.object(stream, "_snapshot", return_value=frames):
+            self.assertTrue(stream._replay_waiting_event_after_dispatch(
+                "futures", "BTCUSDT", None
+            ))
+
+        self.assertNotIn(
+            ("futures", "BTCUSDT"), self.autopilot._waiting_cache_events
+        )
+        queued = self.autopilot._analysis_pending[("futures", "BTCUSDT")]
+        self.assertEqual(queued["market_data"], frames)
+        self.assertTrue(queued["cache_ready"])
+        self.assertEqual(
+            self.autopilot.waiting_cache_symbols_for_cycle(
+                "futures", open_time, ["BTCUSDT"]
+            ),
+            set(),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
