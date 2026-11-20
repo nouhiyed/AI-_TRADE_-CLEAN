@@ -31,6 +31,19 @@ from core.trailing_stop import (
 )
 
 
+def market_data_timeout_seconds(value=None):
+    """Return a bounded REST deadline suitable for mobile market warmup."""
+    if value is None:
+        value = os.environ.get("AI_TRADER_MARKET_DATA_TIMEOUT_SECONDS", "20")
+    try:
+        configured = float(value)
+    except (TypeError, ValueError, OverflowError):
+        configured = 20.0
+    if not math.isfinite(configured):
+        configured = 20.0
+    return max(5.0, min(30.0, configured))
+
+
 class TradingCoordinator(SpotDemoMixin):
 
     def __init__(self, initial_balance=1000):
@@ -40,9 +53,7 @@ class TradingCoordinator(SpotDemoMixin):
         # all warmup workers apparently alive but making no progress for minutes.
         # Keep the budget configurable while allowing enough time for Binance
         # public endpoint fallbacks on a healthy connection.
-        market_data_timeout = max(5.0, min(30.0, float(
-            os.environ.get("AI_TRADER_MARKET_DATA_TIMEOUT_SECONDS", "20")
-        )))
+        market_data_timeout = market_data_timeout_seconds()
         self.market_feed = BinanceMarketData(
             timeout=market_data_timeout, total_timeout=market_data_timeout
         )
