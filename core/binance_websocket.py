@@ -708,7 +708,8 @@ class BinanceKlineStream:
                         remaining = int(limit)
                         end_time = None
                         while remaining > 0 and not self._stop.is_set():
-                            page_limit = min(1000, remaining)
+                            # Binance rejects limit=1; request two and trim the final cache to the configured size.
+                            page_limit = max(2, min(1000, remaining))
                             page = self.feed.fetch_candles(
                                 market, symbol, "5m", limit=page_limit,
                                 closed_only=True, end_time=end_time)
