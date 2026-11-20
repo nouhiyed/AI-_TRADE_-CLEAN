@@ -936,6 +936,11 @@ class Autopilot:
                     or signal.get("reason")
                     or "V3 did not approve a valid 5m entry plan"
                 )
+                diagnostics = (plan or {}).get("diagnostics")
+                if diagnostics:
+                    reason += " | V3 diagnostics=" + json.dumps(
+                        diagnostics, sort_keys=True, separators=(",", ":")
+                    )
                 self._record_funnel(domain, int(candle.get("open_time") or 0),
                                     "rejection", reason=reason)
                 self._record_symbol_audit(
