@@ -1,5 +1,6 @@
 
 import math
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
@@ -30,13 +31,33 @@ from core.trailing_stop import (
 )
 
 
+def market_data_timeout_seconds(value=None):
+    """Return a bounded REST deadline suitable for mobile market warmup."""
+    if value is None:
+        value = os.environ.get("AI_TRADER_MARKET_DATA_TIMEOUT_SECONDS", "20")
+    try:
+        configured = float(value)
+    except (TypeError, ValueError, OverflowError):
+        configured = 20.0
+    if not math.isfinite(configured):
+        configured = 20.0
+    return max(5.0, min(30.0, configured))
+
+
 class TradingCoordinator(SpotDemoMixin):
 
     def __init__(self, initial_balance=1000):
         self.risk = RiskManager(initial_balance=initial_balance)
-        self.market_feed = BinanceMarketData(timeout=240, total_timeout=240)
-        # Execution quotes must fail fast; candle warmup has a separate longer
-        # timeout and never runs in the entry writer.
+        # Startup universe discovery and candle warmup must be bounded on mobile
+        # networks. A 240s per-request budget can leave each market supervisor and
+        # all warmup workers apparently alive but making no progress for minutes.
+        # Keep the budget configurable while allowing enough time for Binance
+        # public endpoint fallbacks on a healthy connection.
+        market_data_timeout = market_data_timeout_seconds()
+        self.market_feed = BinanceMarketData(
+            timeout=market_data_timeout, total_timeout=market_data_timeout
+        )
+        # Execution quotes must fail fast and never wait on candle warmup.
         self.execution_quote_feed = BinanceMarketData(timeout=3, total_timeout=5)
         self.market_engine = MarketDataEngine(timeout=6)
         self.market_scanner = FuturesMarketScanner(timeout=6, market=self.market_feed)
