@@ -169,6 +169,44 @@ class BinanceCandleCacheTests(unittest.TestCase):
         self.assertEqual(set(snapshot), {"5m", "15m", "1h", "4h"})
         self.assertGreaterEqual(len(snapshot["1h"]), 200)
 
+    def test_spot_warmup_never_requests_invalid_single_candle_page(self):
+        class PaginatedFeed:
+            def __init__(self):
+                self.frame = candle_frame("5min", rows=3005)
+                self.calls = []
+
+            def fetch_candles(self, market, symbol, interval, limit,
+                              closed_only=True, end_time=None):
+                self.calls.append(limit)
+                if limit < 2 or limit > 1000:
+                    raise ValueError("limit must be between 2 and 1000")
+                frame = self.frame
+                if end_time is not None:
+                    keys = frame["open_time"].map(
+                        lambda value: int(value.timestamp() * 1000)
+                    )
+                    frame = frame.loc[keys <= end_time]
+                    return frame.tail(limit).copy()
+                # First Binance page includes the still-open candle, which
+                # closed_only removes and leaves 999 rows from limit=1000.
+                return frame.tail(limit).iloc[:-1].copy()
+
+        feed = PaginatedFeed()
+        stream = BinanceKlineStream(
+            feed, lambda _market, _event: None, max_symbols=30
+        )
+
+        self.assertTrue(stream._warm_symbol("spot", "BTCUSDT"))
+
+        self.assertTrue(feed.calls)
+        self.assertTrue(all(2 <= value <= 1000 for value in feed.calls))
+        self.assertIn(2, feed.calls)
+        snapshot = stream._snapshot("spot", "BTCUSDT")
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(len(snapshot["5m"]), 3000)
+        self.assertGreaterEqual(len(snapshot["1h"]), 200)
+        self.assertIn(("spot", "BTCUSDT"), stream._cache_ready)
+
     def test_analysis_snapshot_rejects_stale_5m_cache(self):
         stream = BinanceKlineStream(
             FakeFeed(), lambda _market, _event: None, max_symbols=0)
