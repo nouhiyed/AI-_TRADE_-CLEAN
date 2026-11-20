@@ -42,10 +42,14 @@ class BinanceMarketData:
         "USDT", "USDC", "FDUSD", "USD1", "RLUSD", "BFUSD", "XUSD",
         "U", "EUR", "BUSD", "TUSD", "DAI", "USDP", "PYUSD", "USDE",
         "USDD", "UST", "USTC", "FRAX", "USDS", "USDJ", "EURI",
+        "GBP", "TRY", "BRL", "ARS", "JPY", "AUD", "MXN", "PLN", "RON",
+        "CZK", "UAH",
     })
     # Binance tokenized-equity symbols seen in the Spot universe.
     EXCLUDED_SPOT_EQUITY_BASES = frozenset({
         "INTCB", "QQQB", "NVDAB", "MUB", "MRVLB", "SPCXB", "SOXLB",
+        "GOOGLB", "MSTRB", "KORUB", "AAPLB", "TSLAB", "COINB",
+        "SPYB", "AMZNB", "METAB", "MSFTB", "CRCLB", "HOODB",
     })
 
     @classmethod
@@ -158,7 +162,7 @@ class BinanceMarketData:
                     response = self.session.get(
                         base_url + endpoint,
                         params=params,
-                        timeout=max(0.05, min(deadline - time.monotonic(), 2.5)),
+                        timeout=max(0.05, min(deadline - time.monotonic(), 8.0, self.timeout)),
                     )
                     status = int(getattr(response, "status_code", 200))
 
