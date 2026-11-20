@@ -1,5 +1,6 @@
 
 import math
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
@@ -40,7 +41,7 @@ class TradingCoordinator(SpotDemoMixin):
         # Keep the budget configurable while allowing enough time for Binance
         # public endpoint fallbacks on a healthy connection.
         market_data_timeout = max(5.0, min(30.0, float(
-            __import__("os").environ.get("AI_TRADER_MARKET_DATA_TIMEOUT_SECONDS", "20")
+            os.environ.get("AI_TRADER_MARKET_DATA_TIMEOUT_SECONDS", "20")
         )))
         self.market_feed = BinanceMarketData(
             timeout=market_data_timeout, total_timeout=market_data_timeout
