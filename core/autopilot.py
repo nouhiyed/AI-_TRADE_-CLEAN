@@ -456,6 +456,25 @@ class Autopilot:
             return False
         return True
 
+    @staticmethod
+    def _candle_event_age_ms(candle, received_at_ms=None, now_ms=None):
+        """Measure live WS freshness by local receipt, not Binance server clock.
+
+        Binance event_time and the device clock may have an offset. For cache
+        reconciliation, keep the exchange-event age because replaying an old
+        candle must never make it eligible for a live entry.
+        """
+        now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        source = str((candle or {}).get("source") or "")
+        if source == "binance_websocket":
+            received = int(
+                received_at_ms or (candle or {}).get("received_at_ms") or 0
+            )
+            if received > 0:
+                return now_ms - received
+        event_time = int((candle or {}).get("event_time") or 0)
+        return now_ms - event_time if event_time > 0 else 10**12
+
     def _drain_symbol_analysis(self, domain, symbol):
         """One scheduled worker drains the latest pending event for this symbol."""
         key = (domain, symbol)
@@ -481,9 +500,8 @@ class Autopilot:
             # replay is newly queued even when its original Binance event is old.
             # Keep such events for coverage/audit, never for live execution.
             event_time_ms = int(candle.get("event_time") or 0)
-            event_age_ms = (
-                int(time.time() * 1000) - event_time_ms
-                if event_time_ms > 0 else age_ms
+            event_age_ms = self._candle_event_age_ms(
+                candle, received_at_ms=received_at_ms
             )
             with self._analysis_stats_lock:
                 stats = self._analysis_stats[domain]
@@ -830,7 +848,9 @@ class Autopilot:
             # kline by more than ten minutes. Preserve valid events for audit
             # and coverage, but mark anything beyond the 90-second live-entry
             # window audit-only. Malformed or future-dated events remain stale.
-            event_age_ms = local_now_ms - close_event_time
+            event_age_ms = self._candle_event_age_ms(
+                candle, received_at_ms=received_at_ms, now_ms=local_now_ms
+            )
             if (close_time <= 0 or close_event_time < close_time
                     or close_event_time - close_time > 10000
                     or event_age_ms < -30000):
