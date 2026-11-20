@@ -34,6 +34,8 @@ class _BinanceAccessRestrictedError(RuntimeError):
 
 
 class BinanceMarketData:
+    # Stablecoin quote pairs are not useful directional scalping instruments.
+    EXCLUDED_SCALPING_SYMBOLS = frozenset({"EURUSDT", "FDUSDUSDT"})
     BASE_URLS = {
         # Official public market-data-only REST endpoint. The app does not
         # require Spot user-data endpoints from this client.
@@ -278,6 +280,7 @@ class BinanceMarketData:
                 if item.get("status") == "TRADING"
                 and item.get("quoteAsset") == "USDT"
                 and item.get("isSpotTradingAllowed", True)
+                and item.get("symbol") not in self.EXCLUDED_SCALPING_SYMBOLS
             ]
         elif market == "futures":
             raw = self._request("futures", "/fapi/v1/exchangeInfo", {})
@@ -286,6 +289,7 @@ class BinanceMarketData:
                 if item.get("status") == "TRADING"
                 and item.get("quoteAsset") == "USDT"
                 and item.get("contractType") == "PERPETUAL"
+                and item.get("symbol") not in self.EXCLUDED_SCALPING_SYMBOLS
             ]
         else:
             raise ValueError("Market must be spot or futures")
@@ -320,7 +324,7 @@ class BinanceMarketData:
             ):
                 return [dict(item) for item in cached["ranked"][:limit]]
 
-            eligible = set(self.fetch_symbols(market))
+            eligible = set(self.fetch_symbols(market)) - self.EXCLUDED_SCALPING_SYMBOLS
             if market == "spot":
                 ticker_endpoint = "/api/v3/ticker/24hr"
                 book_endpoint = "/api/v3/ticker/bookTicker"
