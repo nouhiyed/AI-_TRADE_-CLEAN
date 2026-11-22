@@ -1,6 +1,5 @@
 import unittest
 from decimal import Decimal
-from types import SimpleNamespace
 
 from core.coordinator import TradingCoordinator
 
