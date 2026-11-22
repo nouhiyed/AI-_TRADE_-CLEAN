@@ -3,6 +3,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
+
 from core.autopilot import Autopilot
 from core.binance_websocket import BinanceKlineStream
 
@@ -163,6 +165,72 @@ class CacheWarmupReplayTests(unittest.TestCase):
             self.assertTrue(stream._warm_symbol("futures", "BTCUSDT"))
         self.assertEqual(calls, [("futures", "BTCUSDT", snapshot)])
 
+
+    def test_missing_exact_cycle_is_recovered_from_rest_once(self):
+        stream = BinanceKlineStream(FakeFeed(), lambda _market, _event: None)
+        now_ms = int(time.time() * 1000)
+        expected_open = (now_ms // 300000) * 300000 - 300000
+        previous_open = expected_open - 300000
+
+        def rows(opens):
+            return pd.DataFrame([
+                {
+                    "open_time": pd.to_datetime(open_time, unit="ms", utc=True),
+                    "close_time": pd.to_datetime(open_time + 299999, unit="ms", utc=True),
+                    "open": 10.0, "high": 11.0, "low": 9.0,
+                    "close": 10.5, "volume": 100.0, "is_closed": True,
+                }
+                for open_time in opens
+            ])
+
+        old_frames = {"5m": rows([previous_open])}
+        ready_frames = {"5m": rows([previous_open, expected_open])}
+        stream._market_symbols["futures"] = {"BTCUSDT"}
+        stream.feed.fetch_candles = lambda *args, **kwargs: ready_frames["5m"]
+        stream._merge_frame = lambda *_args, **_kwargs: None
+
+        with patch.object(
+            stream, "_snapshot", side_effect=[old_frames, ready_frames]
+        ):
+            result = stream.latest_closed_events(
+                "futures", expected_open, ["BTCUSDT"]
+            )
+
+        self.assertEqual(result["available"], 1)
+        self.assertEqual(result["missing_symbols"], [])
+        self.assertEqual(result["events"][0]["open_time"], expected_open)
+        status = stream.status()["futures"]
+        self.assertEqual(status["cache_reconcile_rest_attempts"], 1)
+        self.assertEqual(status["cache_reconcile_rest_successes"], 1)
+
+    def test_missing_exact_cycle_rest_recovery_is_cooldown_limited(self):
+        stream = BinanceKlineStream(FakeFeed(), lambda _market, _event: None)
+        now_ms = int(time.time() * 1000)
+        expected_open = (now_ms // 300000) * 300000 - 300000
+        old_frames = {"5m": pd.DataFrame([{
+            "open_time": pd.to_datetime(expected_open - 300000, unit="ms", utc=True),
+            "close_time": pd.to_datetime(expected_open - 1, unit="ms", utc=True),
+            "open": 10.0, "high": 11.0, "low": 9.0,
+            "close": 10.5, "volume": 100.0, "is_closed": True,
+        }])}
+        calls = []
+        stream._market_symbols["futures"] = {"BTCUSDT"}
+
+        def fail_fetch(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise RuntimeError("temporary REST failure")
+
+        stream.feed.fetch_candles = fail_fetch
+        with patch.object(stream, "_snapshot", return_value=old_frames):
+            first = stream.latest_closed_events("futures", expected_open, ["BTCUSDT"])
+            second = stream.latest_closed_events("futures", expected_open, ["BTCUSDT"])
+
+        self.assertEqual(first["missing_symbols"], ["BTCUSDT"])
+        self.assertEqual(second["missing_symbols"], ["BTCUSDT"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            stream.status()["futures"]["cache_reconcile_rest_attempts"], 1
+        )
 
     def test_dispatch_race_rechecks_cache_after_waiting_event_is_retained(self):
         now = int(time.time() * 1000)
