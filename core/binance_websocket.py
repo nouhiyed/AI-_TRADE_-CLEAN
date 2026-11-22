@@ -95,6 +95,8 @@ class BinanceKlineStream:
         self._closed_seen = set()
         self._latest_candles = {}
         self._warm_errors = {}
+        # Cool down REST recovery per symbol/cycle; WS remains the primary feed.
+        self._reconcile_rest_attempts = {}
         self._status = {
             market: {
                 "connected": False, "fully_connected": False, "state": "stopped",
@@ -107,6 +109,9 @@ class BinanceKlineStream:
                 "cache_not_ready_reasons": {},
                 "cache_not_ready_samples": [],
                 "cache_warmup_last_error": None,
+                "cache_reconcile_rest_attempts": 0,
+                "cache_reconcile_rest_successes": 0,
+                "cache_reconcile_last_error": None,
                 "last_close_code": None, "last_close_reason": None,
                 "last_disconnect_at": None, "reconnect_delay_seconds": 3,
                 "ranking_day": None,
@@ -202,6 +207,11 @@ class BinanceKlineStream:
                 key: value for key, value in self._warm_errors.items()
                 if not is_removed(key)
             }
+            self._reconcile_rest_attempts = {
+                key: value for key, value in self._reconcile_rest_attempts.items()
+                if not (isinstance(key, tuple) and len(key) >= 2
+                        and key[0] == market and key[1] not in keep)
+            }
             state = self._status[market]
             ready_count = sum(1 for key in self._cache_ready if key[0] == market)
             state["cache_ready_symbols"] = ready_count
@@ -216,6 +226,52 @@ class BinanceKlineStream:
                 key: value for key, value in self._cache.items()
                 if key[0] != market or key[1] in keep
             }
+
+    def _recover_exact_closed_candle(self, market, symbol, expected_open_time_ms):
+        """Recover one missing exact-cycle 5m close from REST with a cooldown."""
+        market = str(market).strip().lower()
+        symbol = str(symbol).strip().upper()
+        expected_open_time_ms = int(expected_open_time_ms or 0)
+        key = (market, symbol, expected_open_time_ms)
+        now = time.monotonic()
+        with self._lock:
+            previous = self._reconcile_rest_attempts.get(key)
+            if previous is not None and now - previous < 20:
+                return False
+            self._reconcile_rest_attempts[key] = now
+            self._status[market]["cache_reconcile_rest_attempts"] += 1
+            cutoff = now - 600
+            self._reconcile_rest_attempts = {
+                item: stamp for item, stamp in self._reconcile_rest_attempts.items()
+                if stamp >= cutoff
+            }
+        try:
+            interval_ms = self.INTERVAL_MS["5m"]
+            frame = self.feed.fetch_candles(
+                market, symbol, "5m", limit=2, closed_only=True,
+                start_time=max(0, expected_open_time_ms - interval_ms),
+                end_time=expected_open_time_ms + interval_ms - 1,
+            )
+            if frame is None or frame.empty:
+                return False
+            opens = pd.to_datetime(frame["open_time"], utc=True)
+            exact = frame.loc[
+                opens.map(lambda value: self._row_key(value))
+                == expected_open_time_ms
+            ]
+            if exact.empty:
+                return False
+            self._merge_frame(market, symbol, "5m", exact)
+            with self._lock:
+                self._status[market]["cache_reconcile_rest_successes"] += 1
+                self._status[market]["cache_reconcile_last_error"] = None
+            return True
+        except Exception as error:
+            with self._lock:
+                self._status[market]["cache_reconcile_last_error"] = (
+                    symbol + ": " + str(error)
+                )[:500]
+            return False
 
     def latest_closed_events(self, market, expected_open_time_ms, symbols=None):
         """Build cache-backed audit events for the exact latest closed 5m candle.
@@ -259,8 +315,20 @@ class BinanceKlineStream:
                     == expected_open_time_ms
                 ]
                 if matching.empty:
-                    missing.append(symbol)
-                    continue
+                    if self._recover_exact_closed_candle(
+                        market, symbol, expected_open_time_ms
+                    ):
+                        frames = self._snapshot(market, symbol)
+                        frame = (frames or {}).get("5m")
+                        if frame is not None and not frame.empty:
+                            opens = pd.to_datetime(frame["open_time"], utc=True)
+                            matching = frame.loc[
+                                opens.map(lambda value: self._row_key(value))
+                                == expected_open_time_ms
+                            ]
+                    if matching.empty:
+                        missing.append(symbol)
+                        continue
                 row = matching.iloc[-1]
                 if not bool(row.get("is_closed", False)):
                     missing.append(symbol)
