@@ -191,6 +191,9 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
     hourly = add_indicators(hourly_raw, "1h")
     strategy = FuturesScalpingStrategyV3() if market == "futures" else SpotScalpingStrategyV3()
     baseline, experimental = [], []
+    baseline_rejections = {}
+    candidate_signals = 0
+    candidate_plan_rejections = {}
     baseline_free_until = -1
     experimental_free_until = -1
     i = 220
@@ -224,10 +227,14 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
             trade["setup"] = plan.get("setup", "V3")
             baseline.append(trade)
             baseline_free_until = trade["exit_index"]
+        elif i > baseline_free_until:
+            reason = str(result.get("reason") or "unspecified")
+            baseline_rejections[reason] = baseline_rejections.get(reason, 0) + 1
 
         # Candidate has its own signal, but shares V3's plan/risk/structure guard.
         signal = candidate_signal(f5, f15, f1h, market) if i > experimental_free_until else None
         if signal:
+            candidate_signals += 1
             direction, setup = signal
             plan = strategy.plan_with_structure(
                 market, direction, f5, frames, setup,
@@ -245,6 +252,9 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
                 trade["setup"] = setup
                 experimental.append(trade)
                 experimental_free_until = trade["exit_index"]
+            else:
+                reason = str(plan.get("reason") or "unspecified")
+                candidate_plan_rejections[reason] = candidate_plan_rejections.get(reason, 0) + 1
         i += 1
 
     def stats(trades):
@@ -278,7 +288,10 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
             "same_bar_sl_tp": "stop first", "overlapping_signals": "one open trade per strategy per symbol; new signals skipped until exit",
         },
         "v3_baseline": stats(baseline),
+        "v3_top_rejection_reasons": sorted(baseline_rejections.items(), key=lambda item: item[1], reverse=True)[:8],
         "trend_continuation_experiment": stats(experimental),
+        "candidate_raw_signals": candidate_signals,
+        "candidate_plan_rejections": sorted(candidate_plan_rejections.items(), key=lambda item: item[1], reverse=True)[:8],
         "sample_trades": experimental[:5],
     }
 
