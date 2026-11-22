@@ -8,7 +8,7 @@ from scripts.research_v3_gate_attribution import gate_sets
 class V3GateAttributionTests(unittest.TestCase):
     def setUp(self):
         self.five = pd.DataFrame({
-            "open": [99.0] * 29 + [99.9],
+            "open": [99.0] * 29 + [99.8],
             "high": [101.0] * 30,
             "low": [98.0] * 30,
             "close": [100.0] * 30,
