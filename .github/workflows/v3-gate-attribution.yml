@@ -1,0 +1,43 @@
+name: V3 gate attribution research
+
+on:
+  push:
+    branches:
+      - "research/v3-gate-attribution"
+    paths:
+      - "scripts/research_v3_gate_attribution.py"
+      - "tests/test_v3_gate_attribution.py"
+      - ".github/workflows/v3-gate-attribution.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spot-attribution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m unittest tests.test_v3_gate_attribution -v
+      - name: Attribute production V3 Spot entry gates
+        run: |
+          python -m scripts.research_v3_gate_attribution \
+            --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT LINKUSDT \
+            --limit 8640 \
+            --output v3_gate_attribution.json
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: v3-gate-attribution
+          path: v3_gate_attribution.json
+          if-no-files-found: error
+          retention-days: 14
