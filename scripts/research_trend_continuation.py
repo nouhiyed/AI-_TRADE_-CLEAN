@@ -29,15 +29,35 @@ MAX_HOLD_BARS = 12
 
 def fetch_klines(market: str, symbol: str, interval: str, limit: int) -> pd.DataFrame:
     endpoint = "/api/v3/klines" if market == "spot" else "/fapi/v1/klines"
-    response = requests.get(
-        BASE_URL[market] + endpoint,
-        params={"symbol": symbol, "interval": interval, "limit": min(1000, limit)},
-        timeout=20,
-        headers={"User-Agent": "AI-Trader-Offline-Research/1.0"},
-    )
-    response.raise_for_status()
-    raw = response.json()
-    if not isinstance(raw, list) or len(raw) < 300:
+    interval_ms = {
+        "5m": 300_000, "15m": 900_000, "1h": 3_600_000,
+    }[interval]
+    requested = max(2, int(limit))
+    start_time = int(time.time() * 1000) - requested * interval_ms
+    raw = []
+    while len(raw) < requested:
+        page_size = min(1000, requested - len(raw))
+        response = requests.get(
+            BASE_URL[market] + endpoint,
+            params={
+                "symbol": symbol, "interval": interval, "limit": page_size,
+                "startTime": start_time,
+            },
+            timeout=20,
+            headers={"User-Agent": "AI-Trader-Offline-Research/1.0"},
+        )
+        response.raise_for_status()
+        batch = response.json()
+        if not isinstance(batch, list) or not batch:
+            break
+        raw.extend(batch)
+        next_start = int(batch[-1][6]) + 1
+        if next_start <= start_time or len(batch) < page_size:
+            break
+        start_time = next_start
+        if len(raw) < requested:
+            time.sleep(0.12)
+    if len(raw) < min(300, requested):
         raise RuntimeError(f"Insufficient Binance history for {market} {symbol} {interval}")
     frame = pd.DataFrame(raw, columns=[
         "open_time", "open", "high", "low", "close", "volume", "close_time",
@@ -185,8 +205,8 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
     five_raw = fetch_klines(market, symbol, "5m", limit)
     five = add_indicators(five_raw, "5m")
     # Build context strictly from completed 5m bars available at each signal.
-    fifteen_raw = fetch_klines(market, symbol, "15m", 1000)
-    hourly_raw = fetch_klines(market, symbol, "1h", 1000)
+    fifteen_raw = fetch_klines(market, symbol, "15m", max(1000, (limit + 2) // 3))
+    hourly_raw = fetch_klines(market, symbol, "1h", max(1000, (limit + 11) // 12))
     fifteen = add_indicators(fifteen_raw, "15m")
     hourly = add_indicators(hourly_raw, "1h")
     strategy = FuturesScalpingStrategyV3() if market == "futures" else SpotScalpingStrategyV3()
