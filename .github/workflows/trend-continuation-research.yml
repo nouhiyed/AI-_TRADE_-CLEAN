@@ -33,7 +33,7 @@ jobs:
           python -m scripts.research_trend_continuation \
             --markets spot futures \
             --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
-            --limit 1000 \
+            --limit 8640 \
             --output trend_continuation_research.json
       - name: Upload research report
         uses: actions/upload-artifact@v4
