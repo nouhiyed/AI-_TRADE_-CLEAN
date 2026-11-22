@@ -28,6 +28,40 @@ class FunnelTelemetryTests(unittest.TestCase):
                 self.assertEqual(snapshot["risk_approved"], 1)
                 self.assertEqual(snapshot["trade_opened"], 1)
                 self.assertEqual(len(snapshot["top_rejection_reasons"]), 5)
+    def test_full_rejection_reason_is_not_truncated_and_symbol_detail_is_exposed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            autopilot = Autopilot(object(), config_path=directory + "/autopilot.json")
+            try:
+                candle = 1_800_000_300_000
+                long_reason = "V3 rejected: " + ("diagnostic-detail-" * 40)
+                autopilot._record_funnel(
+                    "spot", candle, "rejection", reason=long_reason
+                )
+                autopilot._record_symbol_audit(
+                    "spot", "BTCUSDT", "strategy_rejected",
+                    reason=long_reason, setup_checks={"PULLBACK_LONG": False},
+                    metrics={"adx": 17.2, "rsi": 48.1},
+                )
+
+                diagnostics = autopilot.strategy_diagnostics("spot", limit=10)
+                market = diagnostics["markets"]["spot"]
+                self.assertEqual(market["symbols"][0]["reason"], long_reason)
+                self.assertEqual(
+                    market["symbols"][0]["setup_checks"]["PULLBACK_LONG"], False
+                )
+                self.assertEqual(
+                    market["funnel_cycles"][0]["rejection_reasons"][0]["reason"],
+                    long_reason,
+                )
+                self.assertGreater(
+                    len(market["funnel_cycles"][0]["rejection_reasons"][0]["reason"]),
+                    240,
+                )
+            finally:
+                autopilot._event_executor.shutdown(wait=True)
+                for pool in autopilot._analysis_pools.values():
+                    pool.shutdown(wait=True)
+
             finally:
                 autopilot._event_executor.shutdown(wait=True)
                 for pool in autopilot._analysis_pools.values():
