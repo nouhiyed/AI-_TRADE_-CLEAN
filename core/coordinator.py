@@ -588,6 +588,51 @@ class TradingCoordinator(SpotDemoMixin):
             print("[NOTIFY] snapshot failed:", type(error).__name__)
             self.notifier.send_message(caption)
 
+    def _execution_market_feed(self):
+        """Prefer the short-deadline client for protective position monitoring."""
+        return getattr(self, "execution_quote_feed", None) or self.market_feed
+
+    @staticmethod
+    def _resolve_demo_exit_trigger(direction, market_price, stop, target,
+                                   trailing_active, missed=None):
+        """Resolve a crossed level without pretending the level was the fill price."""
+        direction = str(direction).upper()
+        market_price = Decimal(str(market_price))
+        stop = Decimal(str(stop))
+        target = Decimal(str(target)) if target is not None else None
+        if missed:
+            return {
+                "reason": missed[0],
+                "trigger_price": Decimal(str(missed[1])),
+                "source": "ONE_MINUTE_CANDLE_REPLAY",
+                "market_price": market_price,
+            }
+        if direction == "LONG":
+            if market_price <= stop:
+                return {
+                    "reason": "TRAILING_STOP" if trailing_active else "STOP_LOSS",
+                    "trigger_price": stop, "source": "REST_BOOK_TICKER",
+                    "market_price": market_price,
+                }
+            if target is not None and market_price >= target:
+                return {
+                    "reason": "TAKE_PROFIT", "trigger_price": target,
+                    "source": "REST_BOOK_TICKER", "market_price": market_price,
+                }
+        elif direction == "SHORT":
+            if market_price >= stop:
+                return {
+                    "reason": "TRAILING_STOP" if trailing_active else "STOP_LOSS",
+                    "trigger_price": stop, "source": "REST_BOOK_TICKER",
+                    "market_price": market_price,
+                }
+            if target is not None and market_price <= target:
+                return {
+                    "reason": "TAKE_PROFIT", "trigger_price": target,
+                    "source": "REST_BOOK_TICKER", "market_price": market_price,
+                }
+        return None
+
     def _catch_up(self, record, direction, stop, target):
         """After an outage, replay 1m candles to see if stop/target was touched.
 
@@ -602,7 +647,9 @@ class TradingCoordinator(SpotDemoMixin):
         limit = min(1000, max(2, int(math.ceil((now_ms - since) / 60_000)) + 2))
         domain = record.get("domain", "futures")
         symbol = str(record["symbol"]).upper()
-        frame = self.market_feed.fetch_candles(
+        # Catch-up is part of the protection path: use the short-deadline feed
+        # so a slow scanner/warmup request cannot hold an exit decision open.
+        frame = self._execution_market_feed().fetch_candles(
             "spot" if domain == "spot" else "futures", symbol, "1m",
             limit=limit, closed_only=False)
         for row in frame.itertuples(index=False):
@@ -825,7 +872,15 @@ class TradingCoordinator(SpotDemoMixin):
 
             try:
                 # Network calls stay outside both coordinator and position locks.
-                quote = self.market_feed.fetch_book_ticker("futures", symbol)
+                quote_started_ms = int(time.time() * 1000)
+                quote_started_at = time.monotonic()
+                # Execution quotes have their own short request deadline and
+                # session; do not queue protective exits behind market scanning.
+                quote = self._execution_market_feed().fetch_book_ticker("futures", symbol)
+                quote_received_ms = int(time.time() * 1000)
+                quote_latency_ms = round(
+                    (time.monotonic() - quote_started_at) * 1000, 2
+                )
                 exit_price = Decimal(str(
                     quote["ask"] if direction == "SHORT" else quote["bid"]
                 ))
@@ -882,19 +937,20 @@ class TradingCoordinator(SpotDemoMixin):
                         ):
                             current["catch_up_error"] = str(catch_error)
 
-                reason = missed[0] if missed else None
-                if missed:
-                    exit_price = missed[1]
-                elif direction == "LONG":
-                    if exit_price <= stop:
-                        reason = "TRAILING_STOP" if snapshot.get("trailing_stop_active") else "STOP_LOSS"
-                    elif target is not None and exit_price >= target:
-                        reason = "TAKE_PROFIT"
-                elif direction == "SHORT":
-                    if exit_price >= stop:
-                        reason = "TRAILING_STOP" if snapshot.get("trailing_stop_active") else "STOP_LOSS"
-                    elif target is not None and exit_price <= target:
-                        reason = "TAKE_PROFIT"
+                # A replayed candle proves that a level was crossed during an
+                # outage, but its stop/target level is not a guaranteed fill.
+                # Resolve the trigger separately and keep the latest executable
+                # bid/ask as the market fill input to the DEMO engine.
+                trigger = self._resolve_demo_exit_trigger(
+                    direction, exit_price, stop, target,
+                    bool(trailing_armed or snapshot.get("trailing_stop_active")),
+                    missed=missed,
+                )
+                reason = trigger["reason"] if trigger else None
+                trigger_price = trigger["trigger_price"] if trigger else None
+                trigger_source = trigger["source"] if trigger else "REST_BOOK_TICKER"
+                if trigger:
+                    exit_price = trigger["market_price"]
 
                 # Do not expire positions by elapsed time. Keep them open until
                 # their price-based stop-loss/take-profit is reached or the user
@@ -919,6 +975,18 @@ class TradingCoordinator(SpotDemoMixin):
                             symbol, "FUTURES", exit_price, source="BINANCE"
                         )
                         current["last_checked_ms"] = int(time.time() * 1000)
+                        current["last_monitor_check"] = {
+                            "checked_at_ms": current["last_checked_ms"],
+                            "quote_started_at_ms": quote_started_ms,
+                            "quote_received_at_ms": quote_received_ms,
+                            "quote_latency_ms": quote_latency_ms,
+                            "bid": str(quote.get("bid")),
+                            "ask": str(quote.get("ask")),
+                            "executable_exit_quote": str(exit_price),
+                            "stop_loss": str(stop),
+                            "take_profit": str(target) if target is not None else None,
+                            "source": "REST_BOOK_TICKER",
+                        }
                         if trailing_enabled:
                             current["take_profit_mode"] = "TRAILING"
                             current["trailing_take_profit_enabled"] = True
@@ -1002,6 +1070,16 @@ class TradingCoordinator(SpotDemoMixin):
                         elif reason == "TAKE_PROFIT" and current.get("tp1_done"):
                             close_reason = "TAKE_PROFIT_2"
                         current["close_reason"] = close_reason
+                        current["close_trigger_source"] = trigger_source
+                        current["close_trigger_price"] = (
+                            str(trigger_price) if trigger_price is not None else None
+                        )
+                        current["close_market_price"] = str(exit_price)
+                        current["close_quote_received_at_ms"] = quote_received_ms
+                        current["close_quote_latency_ms"] = quote_latency_ms
+                        current["close_catch_up_level"] = (
+                            str(missed[1]) if missed else None
+                        )
                         current["close_price"] = str(result["execution_price"])
                         current["realized_pnl"] = str(result["realized_pnl"])
                         current["close_fee"] = str(result["fee"])
