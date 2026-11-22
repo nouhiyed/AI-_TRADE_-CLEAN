@@ -1,0 +1,44 @@
+name: Trend continuation research
+
+on:
+  push:
+    branches:
+      - "research/**"
+    paths:
+      - "scripts/research_trend_continuation.py"
+      - "tests/test_trend_continuation_research.py"
+      - ".github/workflows/trend-continuation-research.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  historical-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout research branch
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run isolated Binance historical comparison
+        run: |
+          python -m scripts.research_trend_continuation \
+            --markets spot futures \
+            --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
+            --limit 1000 \
+            --output trend_continuation_research.json
+      - name: Upload research report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trend-continuation-research
+          path: trend_continuation_research.json
+          if-no-files-found: error
+          retention-days: 14
