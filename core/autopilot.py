@@ -968,7 +968,6 @@ class Autopilot:
                                     "rejection", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
-                    strategy_diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
                 )
                 self.last_result = {
                     "status": "SKIPPED", "phase": "websocket_analysis",
@@ -1009,10 +1008,18 @@ class Autopilot:
                     reason += " | V3 diagnostics=" + json.dumps(
                         diagnostics, sort_keys=True, separators=(",", ":")
                     )
+                structured_diagnostics = (
+                    dict(diagnostics) if isinstance(diagnostics, dict) else {}
+                )
+                for guard_name in ("entry_timing_guard", "structure_guard"):
+                    guard = (plan or {}).get(guard_name)
+                    if isinstance(guard, dict):
+                        structured_diagnostics[guard_name] = guard
                 self._record_funnel(domain, int(candle.get("open_time") or 0),
                                     "rejection", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
+                    strategy_diagnostics=structured_diagnostics or None,
                 )
                 return
 
