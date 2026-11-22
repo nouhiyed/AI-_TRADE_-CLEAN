@@ -197,6 +197,7 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
     candidate_explore_rejections = {}
     baseline_free_until = -1
     experimental_free_until = -1
+    explore_free_until = -1
     i = 220
     while i < len(five)-MAX_HOLD_BARS-1:
         current = five.iloc[i]
@@ -259,24 +260,26 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
 
             # Diagnostic only: preserve V3 SL/TP and costs, bypass entry vetoes
             # to measure the raw signal. This is never eligible for activation.
-            explore_plan = strategy.plan_with_structure(
-                market, direction, f5, frames, setup,
-                "BULL_TREND" if direction == "LONG" else "BEAR_TREND",
-                TARGET_R, float(current["close"]), "explore",
-            )
-            if explore_plan.get("success"):
-                entry = next_open
-                shift = entry - float(explore_plan["entry"])
-                trade = simulate_exit(
-                    five, i, direction, entry,
-                    float(explore_plan["stop_loss"])+shift,
-                    float(explore_plan["take_profit"])+shift, market,
+            if i > explore_free_until:
+                explore_plan = strategy.plan_with_structure(
+                    market, direction, f5, frames, setup,
+                    "BULL_TREND" if direction == "LONG" else "BEAR_TREND",
+                    TARGET_R, float(current["close"]), "explore",
                 )
-                trade["setup"] = setup
-                experimental_explore.append(trade)
-            else:
-                reason = str(explore_plan.get("reason") or "unspecified")
-                candidate_explore_rejections[reason] = candidate_explore_rejections.get(reason, 0) + 1
+                if explore_plan.get("success"):
+                    entry = next_open
+                    shift = entry - float(explore_plan["entry"])
+                    trade = simulate_exit(
+                        five, i, direction, entry,
+                        float(explore_plan["stop_loss"])+shift,
+                        float(explore_plan["take_profit"])+shift, market,
+                    )
+                    trade["setup"] = setup
+                    experimental_explore.append(trade)
+                    explore_free_until = trade["exit_index"]
+                else:
+                    reason = str(explore_plan.get("reason") or "unspecified")
+                    candidate_explore_rejections[reason] = candidate_explore_rejections.get(reason, 0) + 1
         i += 1
 
     def stats(trades):
