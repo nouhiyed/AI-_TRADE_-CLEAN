@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from uuid import uuid4
 
-API_VERSION = "2026.11.19.2"
+API_VERSION = "2026.11.22.1"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
@@ -1277,7 +1277,8 @@ def demo_monitor_worker():
                     print("[DEMO] Monitor error:", event)
         except Exception as error:
             print("[DEMO] Monitor cycle error:", error)
-        time.sleep(2)
+        # Protective DEMO monitoring runs independently from 5m strategy timing.
+        time.sleep(1)
 
 
 if __name__ == "__main__":
