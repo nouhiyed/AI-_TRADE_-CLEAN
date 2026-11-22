@@ -190,10 +190,11 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
     fifteen = add_indicators(fifteen_raw, "15m")
     hourly = add_indicators(hourly_raw, "1h")
     strategy = FuturesScalpingStrategyV3() if market == "futures" else SpotScalpingStrategyV3()
-    baseline, experimental = [], []
+    baseline, experimental, experimental_explore = [], [], []
     baseline_rejections = {}
     candidate_signals = 0
     candidate_plan_rejections = {}
+    candidate_explore_rejections = {}
     baseline_free_until = -1
     experimental_free_until = -1
     i = 220
@@ -255,6 +256,27 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
             else:
                 reason = str(plan.get("reason") or "unspecified")
                 candidate_plan_rejections[reason] = candidate_plan_rejections.get(reason, 0) + 1
+
+            # Diagnostic only: preserve V3 SL/TP and costs, bypass entry vetoes
+            # to measure the raw signal. This is never eligible for activation.
+            explore_plan = strategy.plan_with_structure(
+                market, direction, f5, frames, setup,
+                "BULL_TREND" if direction == "LONG" else "BEAR_TREND",
+                TARGET_R, float(current["close"]), "explore",
+            )
+            if explore_plan.get("success"):
+                entry = next_open
+                shift = entry - float(explore_plan["entry"])
+                trade = simulate_exit(
+                    five, i, direction, entry,
+                    float(explore_plan["stop_loss"])+shift,
+                    float(explore_plan["take_profit"])+shift, market,
+                )
+                trade["setup"] = setup
+                experimental_explore.append(trade)
+            else:
+                reason = str(explore_plan.get("reason") or "unspecified")
+                candidate_explore_rejections[reason] = candidate_explore_rejections.get(reason, 0) + 1
         i += 1
 
     def stats(trades):
@@ -290,9 +312,12 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
         "v3_baseline": stats(baseline),
         "v3_top_rejection_reasons": sorted(baseline_rejections.items(), key=lambda item: item[1], reverse=True)[:8],
         "trend_continuation_experiment": stats(experimental),
+        "trend_continuation_exploratory_no_v3_entry_guards": stats(experimental_explore),
+        "exploratory_plan_rejections": sorted(candidate_explore_rejections.items(), key=lambda item: item[1], reverse=True)[:8],
         "candidate_raw_signals": candidate_signals,
         "candidate_plan_rejections": sorted(candidate_plan_rejections.items(), key=lambda item: item[1], reverse=True)[:8],
         "sample_trades": experimental[:5],
+        "exploratory_sample_trades": experimental_explore[:5],
     }
 
 
