@@ -49,6 +49,10 @@ class FunnelTelemetryTests(unittest.TestCase):
                     "spot", "BTCUSDT", "strategy_rejected",
                     reason=long_reason, setup_checks={"PULLBACK_LONG": False},
                     metrics={"adx": 17.2, "rsi": 48.1},
+                    strategy_diagnostics={
+                        "setup_checks": {"PULLBACK_LONG": False},
+                        "metrics": {"adx": 17.2, "rsi": 48.1},
+                    },
                 )
 
                 diagnostics = autopilot.strategy_diagnostics("spot", limit=10)
@@ -56,6 +60,10 @@ class FunnelTelemetryTests(unittest.TestCase):
                 self.assertEqual(market["symbols"][0]["reason"], long_reason)
                 self.assertFalse(
                     market["symbols"][0]["setup_checks"]["PULLBACK_LONG"]
+                )
+                self.assertEqual(
+                    market["symbols"][0]["strategy_diagnostics"]["metrics"]["adx"],
+                    17.2,
                 )
                 self.assertEqual(
                     market["funnel_cycles"][0]["rejection_reasons"][0]["reason"],
