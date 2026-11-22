@@ -8,6 +8,9 @@ on:
       - "scripts/research_v3_gate_attribution.py"
       - "tests/test_v3_gate_attribution.py"
       - ".github/workflows/v3-gate-attribution.yml"
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
