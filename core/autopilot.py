@@ -968,6 +968,7 @@ class Autopilot:
                                     "rejection", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
+                    strategy_diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
                 )
                 self.last_result = {
                     "status": "SKIPPED", "phase": "websocket_analysis",
