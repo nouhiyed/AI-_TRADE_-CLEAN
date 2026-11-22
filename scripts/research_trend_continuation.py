@@ -144,7 +144,7 @@ def candidate_signal(five: pd.DataFrame, fifteen: pd.DataFrame,
         bool((prior["high"] >= prior["EMA_20"] - 0.20*prior["ATR"]).any())
         and float(c["close"]) < float(c["open"])
         and float(c["close"]) < float(p["low"])
-        and float(c["close"]) < float(c["EMA__9"])
+        and float(c["close"]) < float(c["EMA_9"])
         and 32 <= float(c["RSI"]) <= 52
         and float(c["MACD_hist"]) <= float(p["MACD_hist"])
         and close_loc <= 0.40 and body_atr >= 0.08 and vr >= 0.85
