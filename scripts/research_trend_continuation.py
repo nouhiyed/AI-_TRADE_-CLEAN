@@ -124,7 +124,7 @@ def candidate_signal(five: pd.DataFrame, fifteen: pd.DataFrame,
     # Pullback must have occurred recently, followed by a fresh 5m resumption.
     touched_ema = bool((prior["low"] <= prior["EMA_20"] + 0.20*prior["ATR"]).any())
     bullish_context = (
-        float(fifteen.iloc[-1]["close"]) > float(fifteen.iloc[-1]["EMA__50"])
+        float(fifteen.iloc[-1]["close"]) > float(fifteen.iloc[-1]["EMA_50"])
         and float(hourly.iloc[-1]["close"]) > float(hourly.iloc[-1]["EMA_50"])
     )
     bearish_context = (
@@ -135,7 +135,7 @@ def candidate_signal(five: pd.DataFrame, fifteen: pd.DataFrame,
         bullish_context and touched_ema
         and float(c["close"]) > float(c["open"])
         and float(c["close"]) > float(p["high"])
-        and float(c["close"]) > float(c["EMA__9"])
+        and float(c["close"]) > float(c["EMA_9"])
         and 48 <= float(c["RSI"]) <= 68
         and float(c["MACD_hist"]) >= float(p["MACD_hist"])
         and close_loc >= 0.60 and body_atr >= 0.08 and vr >= 0.85
@@ -186,8 +186,10 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
     five_raw = fetch_klines(market, symbol, "5m", limit)
     five = add_indicators(five_raw, "5m")
     # Build context strictly from completed 5m bars available at each signal.
-    fifteen = resample_closed(five_raw, "15min", five_raw.iloc[-1]["close_time"])
-    hourly = resample_closed(five_raw, "1h", five_raw.iloc[-1]["close_time"])
+    fifteen_raw = fetch_klines(market, symbol, "15m", 1000)
+    hourly_raw = fetch_klines(market, symbol, "1h", 1000)
+    fifteen = add_indicators(fifteen_raw, "15m")
+    hourly = add_indicators(hourly_raw, "1h")
     strategy = FuturesScalpingStrategyV3() if market == "futures" else SpotScalpingStrategyV3()
     baseline, experimental = [], []
     i = 220
@@ -196,7 +198,7 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
         asof = current["close_time"]
         f15 = fifteen[fifteen["close_time"] < asof].copy()
         f1h = hourly[hourly["close_time"] < asof].copy()
-        if len(f15) < 220 or len(f1h) < 220:
+        if len(f15) < 210 or len(f1h) < 210:
             i += 1
             continue
         f5 = five.iloc[:i+1].copy()
