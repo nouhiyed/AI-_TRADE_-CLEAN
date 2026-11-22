@@ -59,8 +59,7 @@ def add_indicators(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     x["EMA_9"] = close.ewm(span=9, adjust=False).mean()
     x["EMA_20"] = close.ewm(span=20, adjust=False).mean()
     x["EMA_21"] = close.ewm(span=21, adjust=False).mean()
-    x["EMA__50"] = close.ewm(span=50, adjust=False).mean()
-    x["EMA_50"] = x["EMA__50"]
+    x["EMA_50"] = close.ewm(span=50, adjust=False).mean()
     x["EMA_200"] = close.ewm(span=200, adjust=False).mean()
     delta = close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
@@ -128,7 +127,7 @@ def candidate_signal(five: pd.DataFrame, fifteen: pd.DataFrame,
         and float(hourly.iloc[-1]["close"]) > float(hourly.iloc[-1]["EMA_50"])
     )
     bearish_context = (
-        float(fifteen.iloc[-1]["close"]) < float(fifteen.iloc[-1]["EMA__50"])
+        float(fifteen.iloc[-1]["close"]) < float(fifteen.iloc[-1]["EMA_50"])
         and float(hourly.iloc[-1]["close"]) < float(hourly.iloc[-1]["EMA_50"])
     )
     long_ok = (
@@ -219,7 +218,7 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
             shift = entry - float(plan["entry"])
             stop = float(plan["stop_loss"]) + shift
             target = float(plan["take_profit"]) + shift
-            trade = simulate_exit(five, i+1, direction, entry, stop, target, market)
+            trade = simulate_exit(five, i, direction, entry, stop, target, market)
             trade["setup"] = plan.get("setup", "V3")
             baseline.append(trade)
 
@@ -236,7 +235,7 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
                 entry = next_open
                 shift = entry - float(plan["entry"])
                 trade = simulate_exit(
-                    five, i+1, direction, entry,
+                    five, i, direction, entry,
                     float(plan["stop_loss"])+shift,
                     float(plan["take_profit"])+shift, market,
                 )
