@@ -176,7 +176,7 @@ def simulate_exit(frame: pd.DataFrame, signal_index: int, direction: str,
     risk = abs(entry-stop)/entry + 2*(FEE[market]+ADVERSE)
     return {
         "entry": entry, "exit": exit_price, "reason": reason,
-        "bars_held": exit_index-signal_index, "net_return_pct": net*100,
+        "bars_held": exit_index-signal_index, "exit_index": exit_index, "net_return_pct": net*100,
         "net_r": net/(risk if risk else 1),
     }
 
@@ -191,6 +191,8 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
     hourly = add_indicators(hourly_raw, "1h")
     strategy = FuturesScalpingStrategyV3() if market == "futures" else SpotScalpingStrategyV3()
     baseline, experimental = [], []
+    baseline_free_until = -1
+    experimental_free_until = -1
     i = 220
     while i < len(five)-MAX_HOLD_BARS-1:
         current = five.iloc[i]
@@ -209,7 +211,7 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
         next_open = float(five.iloc[i+1]["open"])
 
         # Existing production V3 is measured without modifying its rules.
-        result = strategy.analyze(data)
+        result = strategy.analyze(data) if i > baseline_free_until else {"success": False}
         if result.get("success"):
             direction = result["direction"]
             plan = result
@@ -221,9 +223,10 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
             trade = simulate_exit(five, i, direction, entry, stop, target, market)
             trade["setup"] = plan.get("setup", "V3")
             baseline.append(trade)
+            baseline_free_until = trade["exit_index"]
 
         # Candidate has its own signal, but shares V3's plan/risk/structure guard.
-        signal = candidate_signal(f5, f15, f1h, market)
+        signal = candidate_signal(f5, f15, f1h, market) if i > experimental_free_until else None
         if signal:
             direction, setup = signal
             plan = strategy.plan_with_structure(
@@ -241,6 +244,7 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
                 )
                 trade["setup"] = setup
                 experimental.append(trade)
+                experimental_free_until = trade["exit_index"]
         i += 1
 
     def stats(trades):
@@ -271,7 +275,7 @@ def evaluate_market(market: str, symbol: str, limit: int) -> dict:
             "entry": "next 5m candle open", "stop": f"{STOP_ATR} ATR",
             "target": f"{TARGET_R}R", "max_hold_bars": MAX_HOLD_BARS,
             "fees_per_side": FEE[market], "adverse_per_side": ADVERSE,
-            "same_bar_sl_tp": "stop first", "overlapping_signals": "not explicitly portfolio-netted",
+            "same_bar_sl_tp": "stop first", "overlapping_signals": "one open trade per strategy per symbol; new signals skipped until exit",
         },
         "v3_baseline": stats(baseline),
         "trend_continuation_experiment": stats(experimental),
