@@ -986,6 +986,25 @@ class APIHandler(BaseHTTPRequestHandler):
                     "entry_timing": "immediate_after_analysis_with_atr_drift_guard",
                     "websocket": market_stream.status() if market_stream else {},
                 })
+            if path == "/diagnostics/strategy":
+                market = params.get("market", [None])[0]
+                limit = params.get("limit", ["30"])[0]
+                if market not in (None, "", "futures", "spot"):
+                    return self.send_json({
+                        "success": False,
+                        "reason": "market must be futures or spot",
+                    }, 400)
+                try:
+                    diagnostics = autopilot.strategy_diagnostics(
+                        domain=market or None, limit=limit
+                    ) if autopilot else {
+                        "success": False, "reason": "Autopilot is not initialized"
+                    }
+                except ValueError as error:
+                    return self.send_json({
+                        "success": False, "reason": str(error)
+                    }, 400)
+                return self.send_json(diagnostics)
             if path == "/funnel":
                 return self.send_json(
                     autopilot.funnel_status() if autopilot else
