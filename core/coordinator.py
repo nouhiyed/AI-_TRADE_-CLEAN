@@ -588,6 +588,51 @@ class TradingCoordinator(SpotDemoMixin):
             print("[NOTIFY] snapshot failed:", type(error).__name__)
             self.notifier.send_message(caption)
 
+    def _execution_market_feed(self):
+        """Prefer the short-deadline client for protective position monitoring."""
+        return getattr(self, "execution_quote_feed", None) or self.market_feed
+
+    @staticmethod
+    def _resolve_demo_exit_trigger(direction, market_price, stop, target,
+                                   trailing_active, missed=None):
+        """Resolve a crossed level without pretending the level was the fill price."""
+        direction = str(direction).upper()
+        market_price = Decimal(str(market_price))
+        stop = Decimal(str(stop))
+        target = Decimal(str(target)) if target is not None else None
+        if missed:
+            return {
+                "reason": missed[0],
+                "trigger_price": Decimal(str(missed[1])),
+                "source": "ONE_MINUTE_CANDLE_REPLAY",
+                "market_price": market_price,
+            }
+        if direction == "LONG":
+            if market_price <= stop:
+                return {
+                    "reason": "TRAILING_STOP" if trailing_active else "STOP_LOSS",
+                    "trigger_price": stop, "source": "REST_BOOK_TICKER",
+                    "market_price": market_price,
+                }
+            if target is not None and market_price >= target:
+                return {
+                    "reason": "TAKE_PROFIT", "trigger_price": target,
+                    "source": "REST_BOOK_TICKER", "market_price": market_price,
+                }
+        elif direction == "SHORT":
+            if market_price >= stop:
+                return {
+                    "reason": "TRAILING_STOP" if trailing_active else "STOP_LOSS",
+                    "trigger_price": stop, "source": "REST_BOOK_TICKER",
+                    "market_price": market_price,
+                }
+            if target is not None and market_price <= target:
+                return {
+                    "reason": "TAKE_PROFIT", "trigger_price": target,
+                    "source": "REST_BOOK_TICKER", "market_price": market_price,
+                }
+        return None
+
     def _catch_up(self, record, direction, stop, target):
         """After an outage, replay 1m candles to see if stop/target was touched.
 
@@ -604,8 +649,7 @@ class TradingCoordinator(SpotDemoMixin):
         symbol = str(record["symbol"]).upper()
         # Catch-up is part of the protection path: use the short-deadline feed
         # so a slow scanner/warmup request cannot hold an exit decision open.
-        execution_feed = getattr(self, "execution_quote_feed", None) or self.market_feed
-        frame = execution_feed.fetch_candles(
+        frame = self._execution_market_feed().fetch_candles(
             "spot" if domain == "spot" else "futures", symbol, "1m",
             limit=limit, closed_only=False)
         for row in frame.itertuples(index=False):
@@ -832,8 +876,7 @@ class TradingCoordinator(SpotDemoMixin):
                 quote_started_at = time.monotonic()
                 # Execution quotes have their own short request deadline and
                 # session; do not queue protective exits behind market scanning.
-                execution_feed = getattr(self, "execution_quote_feed", None) or self.market_feed
-                quote = execution_feed.fetch_book_ticker("futures", symbol)
+                quote = self._execution_market_feed().fetch_book_ticker("futures", symbol)
                 quote_received_ms = int(time.time() * 1000)
                 quote_latency_ms = round(
                     (time.monotonic() - quote_started_at) * 1000, 2
@@ -894,27 +937,20 @@ class TradingCoordinator(SpotDemoMixin):
                         ):
                             current["catch_up_error"] = str(catch_error)
 
-                reason = missed[0] if missed else None
-                trigger_price = missed[1] if missed else None
-                trigger_source = "ONE_MINUTE_CANDLE_REPLAY" if missed else "REST_BOOK_TICKER"
                 # A replayed candle proves that a level was crossed during an
                 # outage, but its stop/target level is not a guaranteed fill.
-                # Execute the simulated market close at the latest executable
-                # bid/ask above, then let the DEMO engine apply slippage.
-                if not missed and direction == "LONG":
-                    if exit_price <= stop:
-                        reason = "TRAILING_STOP" if trailing_armed or snapshot.get("trailing_stop_active") else "STOP_LOSS"
-                        trigger_price = stop
-                    elif target is not None and exit_price >= target:
-                        reason = "TAKE_PROFIT"
-                        trigger_price = target
-                elif not missed and direction == "SHORT":
-                    if exit_price >= stop:
-                        reason = "TRAILING_STOP" if trailing_armed or snapshot.get("trailing_stop_active") else "STOP_LOSS"
-                        trigger_price = stop
-                    elif target is not None and exit_price <= target:
-                        reason = "TAKE_PROFIT"
-                        trigger_price = target
+                # Resolve the trigger separately and keep the latest executable
+                # bid/ask as the market fill input to the DEMO engine.
+                trigger = self._resolve_demo_exit_trigger(
+                    direction, exit_price, stop, target,
+                    bool(trailing_armed or snapshot.get("trailing_stop_active")),
+                    missed=missed,
+                )
+                reason = trigger["reason"] if trigger else None
+                trigger_price = trigger["trigger_price"] if trigger else None
+                trigger_source = trigger["source"] if trigger else "REST_BOOK_TICKER"
+                if trigger:
+                    exit_price = trigger["market_price"]
 
                 # Do not expire positions by elapsed time. Keep them open until
                 # their price-based stop-loss/take-profit is reached or the user
