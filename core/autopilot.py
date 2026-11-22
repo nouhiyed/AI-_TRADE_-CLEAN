@@ -277,7 +277,7 @@ class Autopilot:
                 cycle[stage] = int(cycle.get(stage, 0)) + 1
             if reason:
                 reasons = cycle["rejection_reasons"]
-                label = str(reason).strip()[:240] or "Unspecified rejection"
+                label = str(reason).strip() or "Unspecified rejection"
                 reasons[label] = int(reasons.get(label, 0)) + 1
             while len(cycles) > 12:
                 cycles.popitem(last=False)
@@ -302,6 +302,53 @@ class Autopilot:
                     })
                 result[domain] = snapshots[-6:]
             return {"success": True, "markets": result}
+
+    def strategy_diagnostics(self, domain=None, limit=30):
+        """Return full recent per-symbol decisions and untruncated funnel reasons."""
+        selected = (str(domain).strip().lower() if domain else None)
+        if selected not in (None, "futures", "spot"):
+            raise ValueError("market must be futures or spot")
+        try:
+            limit = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            limit = 30
+        domains = (selected,) if selected else ("futures", "spot")
+        result = {"success": True, "markets": {}}
+        with self._event_lock:
+            for market in domains:
+                records = [
+                    dict(record)
+                    for record in self._symbol_audits[market].values()
+                    if record.get("state") in (
+                        "strategy_rejected", "signal_ready", "analysis_error",
+                        "stale", "audit_only_delayed", "entry_skipped",
+                        "execution_error", "opened",
+                    )
+                ]
+                records.sort(
+                    key=lambda item: int(item.get("updated_at_ms") or 0),
+                    reverse=True,
+                )
+                cycles = []
+                for cycle in list(self._funnel_cycles[market].values())[-6:]:
+                    reasons = sorted(
+                        cycle.get("rejection_reasons", {}).items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                    cycles.append({
+                        **{key: value for key, value in cycle.items()
+                           if key != "rejection_reasons"},
+                        "rejection_reasons": [
+                            {"reason": reason, "count": count}
+                            for reason, count in reasons
+                        ],
+                    })
+                result["markets"][market] = {
+                    "symbols": records[:limit],
+                    "symbol_records_available": len(records),
+                    "funnel_cycles": cycles,
+                }
+        return result
 
     def _record_symbol_audit(self, domain, symbol, state, increment=None,
                              also_increment=None, **details):
