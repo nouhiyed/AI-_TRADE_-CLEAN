@@ -102,6 +102,12 @@ class BinanceKlineStream:
                 "connected": False, "fully_connected": False, "state": "stopped",
                 "symbols": 0, "total_chunks": 0, "connected_chunks": 0,
                 "last_event": None, "last_closed_candle": None,
+                "messages_received": 0, "kline_messages_received": 0,
+                "closed_5m_received": 0, "closed_5m_dispatched": 0,
+                "open_5m_updates": 0, "message_parse_errors": 0,
+                "last_message_at": None, "last_kline_at": None,
+                "last_open_5m_at": None, "last_closed_5m_at": None,
+                "last_message_event_type": None, "last_message_interval": None,
                 "reconnects": 0, "watchdog_restarts": 0, "last_error": None,
                 "cache_ready_symbols": 0, "cache_warmup_total": 0,
                 "cache_warmup_completed": 0, "cache_warmup_errors": 0,
@@ -148,6 +154,18 @@ class BinanceKlineStream:
                 except (TypeError, ValueError):
                     age = None
                 snapshot[market]["last_event_age_seconds"] = age
+                for source_key, age_key in (
+                    ("last_message_at", "last_message_age_seconds"),
+                    ("last_kline_at", "last_kline_age_seconds"),
+                    ("last_closed_5m_at", "last_closed_5m_age_seconds"),
+                ):
+                    try:
+                        event_stamp = datetime.fromisoformat(
+                            snapshot[market].get(source_key))
+                        snapshot[market][age_key] = max(
+                            0.0, (datetime.now(timezone.utc) - event_stamp).total_seconds())
+                    except (TypeError, ValueError):
+                        snapshot[market][age_key] = None
                 snapshot[market]["watchdog_healthy"] = bool(
                     snapshot[market].get("fully_connected")
                     and age is not None and age <= 360
@@ -1220,6 +1238,18 @@ class BinanceKlineStream:
     def _handle_message(self, market, index, ack_id, app, message):
         try:
             packet = json.loads(message)
+            if not isinstance(packet, dict):
+                raise ValueError("WebSocket packet is not an object")
+            received_at = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                state = self._status[market]
+                state["messages_received"] += 1
+                state["last_message_at"] = received_at
+                payload = packet.get("data")
+                state["last_message_event_type"] = str(
+                    packet.get("e") or
+                    (payload.get("e") if isinstance(payload, dict) else "control")
+                )[:40]
             if packet.get("id") == ack_id:
                 if packet.get("result", "__missing__") is None and "code" not in packet:
                     with self._lock:
@@ -1237,10 +1267,17 @@ class BinanceKlineStream:
                 return
 
             data = packet.get("data", packet)
-            if data.get("e") != "kline":
+            if not isinstance(data, dict) or data.get("e") != "kline":
                 return
             kline = data.get("k") or {}
+            if not isinstance(kline, dict):
+                return
             interval = str(kline.get("i", ""))
+            with self._lock:
+                state = self._status[market]
+                state["kline_messages_received"] += 1
+                state["last_kline_at"] = received_at
+                state["last_message_interval"] = interval
             if interval not in self.CACHE_LIMITS[market]:
                 return
             symbol = str(data.get("s") or kline.get("s") or "").upper()
@@ -1249,6 +1286,14 @@ class BinanceKlineStream:
                 return
             event_time = int(data.get("E", 0))
             is_closed = bool(kline.get("x"))
+            if interval == "5m":
+                with self._lock:
+                    if is_closed:
+                        self._status[market]["closed_5m_received"] += 1
+                        self._status[market]["last_closed_5m_at"] = received_at
+                    else:
+                        self._status[market]["open_5m_updates"] += 1
+                        self._status[market]["last_open_5m_at"] = received_at
             if is_closed:
                 self._merge_event_candle(market, symbol, interval, kline)
 
@@ -1311,6 +1356,8 @@ class BinanceKlineStream:
                     "market_data": frames,
                     "cache_ready": frames is not None,
                 })
+                with self._lock:
+                    self._status[market]["closed_5m_dispatched"] += 1
                 self._replay_waiting_event_after_dispatch(
                     market, symbol, frames
                 )
@@ -1328,4 +1375,5 @@ class BinanceKlineStream:
                 })
         except Exception as error:
             with self._lock:
+                self._status[market]["message_parse_errors"] += 1
                 self._status[market]["last_error"] = "message: " + str(error)
