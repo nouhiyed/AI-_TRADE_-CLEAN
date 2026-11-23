@@ -6,6 +6,7 @@ plan checks, risk reservation and the learning engine's setup filter.
 import json
 import math
 import os
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -62,6 +63,11 @@ class Autopilot:
         self._symbol_universes = {"futures": set(), "spot": set()}
         self._universe_initialized = {"futures": False, "spot": False}
         self._funnel_cycles = {"futures": OrderedDict(), "spot": OrderedDict()}
+        self._history_lock = threading.Lock()
+        self._history_path = Path(os.environ.get(
+            "AI_TRADER_DIAGNOSTICS_DB", "config/diagnostics_history.sqlite3"))
+        self._history_db = None
+        self._init_diagnostics_history()
         self._symbol_audit_totals = {
             domain: {
                 "events_received": 0, "cache_waiting": 0,
@@ -256,6 +262,80 @@ class Autopilot:
                 self._analysis_agents_created[domain] += 1
         return current
 
+    def _init_diagnostics_history(self):
+        """Create durable, append-only decision history; survives restarts."""
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._history_lock:
+                self._history_db = sqlite3.connect(
+                    str(self._history_path), timeout=10, check_same_thread=False)
+                self._history_db.execute("PRAGMA journal_mode=WAL")
+                self._history_db.execute("PRAGMA synchronous=NORMAL")
+                self._history_db.execute("""
+                    CREATE TABLE IF NOT EXISTS funnel_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts_ms INTEGER NOT NULL,
+                        domain TEXT NOT NULL,
+                        candle_open_ms INTEGER NOT NULL,
+                        stage TEXT,
+                        reason TEXT
+                    )
+                """)
+                self._history_db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_funnel_events_ts ON funnel_events(ts_ms)")
+                self._history_db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_funnel_events_domain ON funnel_events(domain, stage)")
+                self._history_db.commit()
+        except Exception as error:
+            self._history_db = None
+            print("[DIAGNOSTICS] persistent history unavailable:", error)
+
+    def _persist_funnel_event(self, domain, candle_open_ms, stage, reason):
+        """Persist every funnel transition/rejection without bounded in-memory eviction."""
+        if self._history_db is None:
+            return
+        try:
+            with self._history_lock:
+                self._history_db.execute(
+                    "INSERT INTO funnel_events(ts_ms,domain,candle_open_ms,stage,reason) "
+                    "VALUES(?,?,?,?,?)",
+                    (int(time.time() * 1000), domain, int(candle_open_ms),
+                     str(stage) if stage else None, str(reason)[:1000] if reason else None))
+                self._history_db.commit()
+        except Exception as error:
+            print("[DIAGNOSTICS] history write failed:", error)
+
+    def funnel_history(self, since_ms=0):
+        """Aggregate all persisted funnel events; no 6/12-cycle memory limit."""
+        try:
+            since_ms = max(0, int(since_ms or 0))
+        except (TypeError, ValueError):
+            since_ms = 0
+        if self._history_db is None:
+            return {"success": False, "persistent": False,
+                    "reason": "Diagnostics history database is unavailable"}
+        with self._history_lock:
+            stage_rows = self._history_db.execute(
+                "SELECT domain,stage,COUNT(*) FROM funnel_events "
+                "WHERE ts_ms>=? AND stage IS NOT NULL GROUP BY domain,stage",
+                (since_ms,)).fetchall()
+            reason_rows = self._history_db.execute(
+                "SELECT domain,reason,COUNT(*) FROM funnel_events "
+                "WHERE ts_ms>=? AND reason IS NOT NULL GROUP BY domain,reason "
+                "ORDER BY domain,COUNT(*) DESC", (since_ms,)).fetchall()
+            bounds = self._history_db.execute(
+                "SELECT MIN(ts_ms),MAX(ts_ms),COUNT(*) FROM funnel_events WHERE ts_ms>=?",
+                (since_ms,)).fetchone()
+        markets = {name: {"stages": {}, "rejection_reasons": {}} 
+                   for name in ("futures", "spot")}
+        for domain, stage, count in stage_rows:
+            markets[domain]["stages"][stage] = count
+        for domain, reason, count in reason_rows:
+            markets[domain]["rejection_reasons"][reason] = count
+        return {"success": True, "persistent": True, "since_ms": since_ms,
+                "first_event_ms": bounds[0], "last_event_ms": bounds[1],
+                "total_events": bounds[2], "markets": markets}
+
     def _record_funnel(self, domain, candle_open_ms, stage=None, reason=None):
         domain = str(domain).strip().lower()
         if domain not in self._funnel_cycles:
@@ -281,6 +361,7 @@ class Autopilot:
                 reasons[label] = int(reasons.get(label, 0)) + 1
             while len(cycles) > 12:
                 cycles.popitem(last=False)
+        self._persist_funnel_event(domain, candle_open_ms, stage, reason)
 
     def funnel_status(self):
         with self._event_lock:
