@@ -292,7 +292,7 @@ class Autopilot:
 
     def _persist_funnel_event(self, domain, candle_open_ms, stage, reason):
         """Persist every funnel transition/rejection without bounded in-memory eviction."""
-        if self._history_db is None:
+        if getattr(self, "_history_db", None) is None:
             return
         try:
             with self._history_lock:
@@ -763,8 +763,7 @@ class Autopilot:
                 try:
                     self._event_executor.submit(self._execute_ws_entry, domain, symbol,
                                                 pending, dict(event))
-                    self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                        "entry_submitted")
+                    self._record_funnel(domain, open_time, "entry_submitted")
                     self._record_symbol_audit(
                         domain, symbol, "entry_submitted", increment="entry_submitted",
                         next_open_time_ms=open_time,
