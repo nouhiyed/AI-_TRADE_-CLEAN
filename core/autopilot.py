@@ -1364,6 +1364,11 @@ class Autopilot:
                     trade_ids=[item.get("trade_id") for item in result["opened"]],
                 )
             elif result.get("error"):
+                self._record_funnel(
+                    domain, int((pending.get("signal") or {}).get(
+                        "signal_candle_open_time") or 0),
+                    "execution_error", reason=result.get("error"),
+                )
                 self._record_symbol_audit(
                     domain, symbol, "execution_error", increment="errors",
                     reason=result.get("error"),
