@@ -1005,6 +1005,16 @@ class APIHandler(BaseHTTPRequestHandler):
                         "success": False, "reason": str(error)
                     }, 400)
                 return self.send_json(diagnostics)
+            if path == "/funnel/history":
+                since_ms = params.get("since_ms", ["0"])[0]
+                try:
+                    return self.send_json(
+                        autopilot.funnel_history(since_ms) if autopilot else
+                        {"success": False, "reason": "Autopilot is not initialized"}
+                    )
+                except (TypeError, ValueError):
+                    return self.send_json({"success": False,
+                                           "reason": "since_ms must be an integer"}, 400)
             if path == "/funnel":
                 return self.send_json(
                     autopilot.funnel_status() if autopilot else
