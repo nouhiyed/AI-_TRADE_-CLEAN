@@ -347,13 +347,16 @@ class Autopilot:
             cycles = self._funnel_cycles[domain]
             cycle = cycles.setdefault(candle_open_ms, {
                 "candle_open_time_ms": candle_open_ms,
-                "events_received": 0, "filter_passed": 0,
-                "strategy_accepted": 0, "valid_plan": 0,
-                "risk_approved": 0, "trade_opened": 0,
+                "events_received": 0, "filter_passed": 0, "deep_analysis": 0,
+                "strategy_rejected": 0, "strategy_accepted": 0, "valid_plan": 0,
+                "entry_queued": 0, "entry_submitted": 0, "entry_skipped": 0,
+                "risk_approved": 0, "trade_opened": 0, "execution_error": 0,
                 "rejection_reasons": {},
             })
-            if stage in ("events_received", "filter_passed", "strategy_accepted",
-                         "valid_plan", "risk_approved", "trade_opened"):
+            if stage in ("events_received", "filter_passed", "deep_analysis",
+                         "strategy_rejected", "strategy_accepted", "valid_plan",
+                         "entry_queued", "entry_submitted", "entry_skipped",
+                         "risk_approved", "trade_opened", "execution_error"):
                 cycle[stage] = int(cycle.get(stage, 0)) + 1
             if reason:
                 reasons = cycle["rejection_reasons"]
@@ -760,6 +763,8 @@ class Autopilot:
                 try:
                     self._event_executor.submit(self._execute_ws_entry, domain, symbol,
                                                 pending, dict(event))
+                    self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                        "entry_submitted")
                     self._record_symbol_audit(
                         domain, symbol, "entry_submitted", increment="entry_submitted",
                         next_open_time_ms=open_time,
@@ -1029,6 +1034,8 @@ class Autopilot:
             # counters for a stalled analysis pipeline.
             with self._analysis_stats_lock:
                 self._analysis_stats[domain]["deep_analysis"] += 1
+            self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                "deep_analysis")
             self._record_symbol_audit(
                 domain, symbol, "deep_analysis", increment="deep_analysis",
                 analysis_path="cached_multi_timeframe",
@@ -1046,7 +1053,7 @@ class Autopilot:
                     or "Agent returned no V3 signal"
                 )
                 self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                    "rejection", reason=reason)
+                                    "strategy_rejected", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                 )
@@ -1097,7 +1104,7 @@ class Autopilot:
                     if isinstance(guard, dict):
                         structured_diagnostics[guard_name] = guard
                 self._record_funnel(domain, int(candle.get("open_time") or 0),
-                                    "rejection", reason=reason)
+                                    "strategy_rejected", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "strategy_rejected", reason=reason,
                     strategy_diagnostics=structured_diagnostics or None,
@@ -1136,6 +1143,8 @@ class Autopilot:
                     "manual": False,
                 }
                 self._pending_entries[key] = pending
+            self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                "entry_queued")
             self._record_symbol_audit(
                 domain, symbol, "entry_queued", increment="entry_queued",
                 entry_timing="immediate_after_analysis",
@@ -1146,6 +1155,8 @@ class Autopilot:
                 if current:
                     self._event_executor.submit(
                         self._execute_ws_entry, domain, symbol, current, None)
+                    self._record_funnel(domain, int(candle.get("open_time") or 0),
+                                        "entry_submitted")
                     self._record_symbol_audit(
                         domain, symbol, "entry_submitted", increment="entry_submitted",
                         entry_timing="immediate_after_analysis",
@@ -1361,7 +1372,7 @@ class Autopilot:
                 reasons = [str(item.get("reason", "")) for item in result["skipped"]]
                 for reason in reasons:
                     self._record_funnel(domain, int((pending.get("signal") or {}).get(
-                        "signal_candle_open_time") or 0), "rejection", reason=reason)
+                        "signal_candle_open_time") or 0), "entry_skipped", reason=reason)
                 self._record_symbol_audit(
                     domain, symbol, "entry_skipped", increment="entry_skipped",
                     reason="; ".join(reason for reason in reasons if reason)[:500],
