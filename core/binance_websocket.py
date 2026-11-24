@@ -632,7 +632,32 @@ class BinanceKlineStream:
             base = self._cache.get((market, symbol, "5m"))
             if base is None or base.empty:
                 return
-            base = base.copy()
+            stamps = self.__dict__.setdefault("_derived_stamp", {})
+            stamp_key = (market, symbol)
+            first_open = base["open_time"].iloc[0]
+            last_open = base["open_time"].iloc[-1]
+            stamp = (len(base), first_open, last_open)
+            previous = stamps.get(stamp_key)
+            have_derived = all(
+                (market, symbol, tf) in self._cache for tf in ("15m", "1h"))
+            if previous == stamp and have_derived:
+                return  # nothing changed since the last rebuild
+            # Incremental path: a live close appends a few rows. Re-aggregate
+            # only the last ~3 hours (aligned to an hour boundary) instead of
+            # the whole 3000-row history. Any backfill of older rows or a big
+            # jump falls back to the full rebuild.
+            incremental = (
+                have_derived and previous is not None
+                and 0 <= stamp[0] - previous[0] <= 3
+                and first_open >= previous[1]
+                and last_open >= previous[2]
+            )
+            if incremental:
+                start = pd.Timestamp(last_open).floor("1h") - pd.Timedelta(hours=2)
+                base = base[base["open_time"] >= start].copy()
+            else:
+                base = base.copy()
+            stamps[stamp_key] = stamp
         for timeframe in ("15m", "1h"):
             derived = self._aggregate_5m_frame(market, symbol, timeframe, base)
             if derived.empty:
@@ -1266,6 +1291,7 @@ class BinanceKlineStream:
                     app.close()
                 return
 
+            arrival_ms = int(time.time() * 1000)  # stamp before any processing
             data = packet.get("data", packet)
             if not isinstance(data, dict) or data.get("e") != "kline":
                 return
@@ -1323,7 +1349,7 @@ class BinanceKlineStream:
                     "close": float(kline.get("c", 0)),
                     "volume": float(kline.get("v", 0)),
                     "is_closed": is_closed, "event_time": event_time,
-                    "received_at_ms": int(time.time() * 1000),
+                    "received_at_ms": arrival_ms,
                     "source": "binance_websocket",
                 }
                 self._status[market]["last_event"] = datetime.now(
