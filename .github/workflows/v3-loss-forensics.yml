@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install analysis dependencies
-        run: python -m pip install --upgrade pip "pandas>=2.2,<3" numpy pytest
+        run: python -m pip install --upgrade pip "pandas>=2.2,<3" numpy pytest requests
       - name: Run forensic unit tests
         run: PYTHONPATH=. python -m pytest tests/test_loss_forensics_v3.py -q
       - name: Download official Binance Vision 5m candles
