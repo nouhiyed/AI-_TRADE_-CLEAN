@@ -27,6 +27,85 @@ def trade_stats(rows):
     }
 
 
+
+def measurable_gate_failures(market, metrics, failed_setups):
+    """Count observable failed clauses on candles where no setup passed.
+    Missing metrics are deliberately excluded rather than guessed.
+    """
+    specs = {
+        "PULLBACK_LONG": [
+            ("bullish_bias", "bullish_15m_1h_bias", lambda x: bool(x)),
+            ("ema20_touch", "low_vs_ema20_atr", lambda x: x <= 0.12),
+            ("close_above_ema9", "close_vs_ema9_atr", lambda x: x > 0),
+            ("rsi_45_67", "rsi_5m", lambda x: 45 <= x <= 67),
+            ("volume_min", "volume_ratio", lambda x: x >= 0.85),
+            ("body_min", "body_atr", lambda x: x >= 0.10),
+            ("close_location", "close_location", lambda x: x >= 0.62),
+            ("lower_wick", "lower_wick_ratio", lambda x: x >= 0.16),
+        ],
+        "PULLBACK_SHORT": [
+            ("bearish_bias", "bearish_15m_1h_bias", lambda x: bool(x)),
+            ("ema20_touch", "high_vs_ema20_atr", lambda x: x >= -0.12),
+            ("close_below_ema9", "close_vs_ema9_atr", lambda x: x < 0),
+            ("rsi_33_55", "rsi_5m", lambda x: 33 <= x <= 55),
+            ("volume_min", "volume_ratio", lambda x: x >= 0.85),
+            ("body_min", "body_atr", lambda x: x >= 0.10),
+            ("close_location", "close_location", lambda x: x <= 0.38),
+            ("upper_wick", "upper_wick_ratio", lambda x: x >= 0.16),
+        ],
+        "BREAKOUT_LONG": [
+            ("bullish_bias", "bullish_15m_1h_bias", lambda x: bool(x)),
+            ("prior_high_break", "close_vs_prior_high_atr", lambda x: x > 0.05),
+            ("rsi_52_74", "rsi_5m", lambda x: 52 <= x <= 74),
+            ("close_location", "close_location", lambda x: x >= 0.75),
+            ("body_min", "body_atr", lambda x: x >= 0.18),
+            ("volume_min", "volume_ratio", lambda x: x >= 1.05),
+            ("opposing_wick_max", "upper_wick_ratio", lambda x: x <= 0.18),
+        ],
+        "BREAKOUT_SHORT": [
+            ("bearish_bias", "bearish_15m_1h_bias", lambda x: bool(x)),
+            ("prior_low_break", "close_vs_prior_low_atr", lambda x: x < -0.05),
+            ("rsi_26_48", "rsi_5m", lambda x: 26 <= x <= 48),
+            ("close_location", "close_location", lambda x: x <= 0.25),
+            ("body_min", "body_atr", lambda x: x >= 0.18),
+            ("volume_min", "volume_ratio", lambda x: x >= 1.05),
+            ("opposing_wick_max", "lower_wick_ratio", lambda x: x <= 0.18),
+        ],
+        "SUPPORT_RECLAIM_LONG": [
+            ("bullish_bias", "bullish_15m_1h_bias", lambda x: bool(x)),
+            ("close_above_ema9", "close_vs_ema9_atr", lambda x: x > 0),
+            ("rsi_35_62", "rsi_5m", lambda x: 35 <= x <= 62),
+            ("volume_min", "volume_ratio", lambda x: x >= 0.82),
+            ("close_location", "close_location", lambda x: x >= 0.66),
+            ("lower_wick", "lower_wick_ratio", lambda x: x >= 0.28),
+        ],
+        "RANGE_REJECTION_LONG": [
+            ("range_adx", "adx_15m", lambda x: x <= 18),
+            ("rsi_max", "rsi_5m", lambda x: x <= 30),
+            ("volume_min", "volume_ratio", lambda x: x >= 0.80),
+            ("close_location", "close_location", lambda x: x >= 0.72),
+            ("lower_wick", "lower_wick_ratio", lambda x: x >= 0.35),
+        ],
+        "RANGE_REJECTION_SHORT": [
+            ("range_adx", "adx_15m", lambda x: x <= 18),
+            ("rsi_min", "rsi_5m", lambda x: x >= 70),
+            ("volume_min", "volume_ratio", lambda x: x >= 0.80),
+            ("close_location", "close_location", lambda x: x <= 0.28),
+            ("upper_wick", "upper_wick_ratio", lambda x: x >= 0.35),
+        ],
+    }
+    failures, observed, unavailable = Counter(), Counter(), Counter()
+    for setup in failed_setups:
+        for label, metric, predicate in specs.get(setup, []):
+            if metric not in metrics or metrics[metric] is None:
+                unavailable[f"{setup}:{label}"] += 1
+                continue
+            observed[f"{setup}:{label}"] += 1
+            if not predicate(metrics[metric]):
+                failures[f"{setup}:{label}"] += 1
+    return failures, observed, unavailable
+
+
 def scan_symbol(market, symbol, raw):
     strategy = FuturesScalpingStrategyV3() if market == "futures" else SpotScalpingStrategyV3()
     five, fifteen, hourly, four = bt.build_indicators(raw, market)
@@ -40,6 +119,9 @@ def scan_symbol(market, symbol, raw):
     reject_reasons = Counter()
     prefilter_reasons = Counter()
     failed_setups = Counter()
+    gate_failures = Counter()
+    gate_observations = Counter()
+    gate_unavailable = Counter()
     setup_metric_samples = defaultdict(Counter)
     plan_rejects = Counter()
     gate_samples = defaultdict(list)
@@ -88,6 +170,11 @@ def scan_symbol(market, symbol, raw):
             for setup in diagnostics.get("failed_setups", []):
                 failed_setups[setup] += 1
             metrics = diagnostics.get("metrics") or {}
+            failed, observed, unavailable = measurable_gate_failures(
+                market, metrics, diagnostics.get("failed_setups", []))
+            gate_failures.update(failed)
+            gate_observations.update(observed)
+            gate_unavailable.update(unavailable)
             for key, value in metrics.items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     gate_samples[key].append(float(value))
@@ -123,6 +210,9 @@ def scan_symbol(market, symbol, raw):
         "prefilter_reasons": dict(prefilter_reasons),
         "analyzer_reject_reasons": dict(reject_reasons),
         "failed_setup_counts": dict(failed_setups),
+        "measurable_gate_failures": dict(gate_failures),
+        "measurable_gate_observations": dict(gate_observations),
+        "unmeasured_gate_observations": dict(gate_unavailable),
         "plan_reject_categories": dict(plan_rejects),
         "rejected_signal_metric_distribution": metric_summary,
         "executed_trade_outcomes_by_setup_direction": outcomes,
