@@ -8,7 +8,7 @@ class DemoEntryAlignmentTests(unittest.TestCase):
         self.plan = {
             "entry": 100.0,
             "stop_loss": 98.0,
-            "take_profit": 104.0,
+            "take_profit": 105.0,
             "atr": 1.0,
         }
 
