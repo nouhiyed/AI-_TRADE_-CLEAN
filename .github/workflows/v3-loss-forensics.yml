@@ -1,6 +1,12 @@
 name: V3 Loss Forensics (read-only)
 
 on:
+  push:
+    branches: [research/v3-loss-forensics]
+    paths:
+      - scripts/loss_forensics_v3.py
+      - tests/test_loss_forensics_v3.py
+      - .github/workflows/v3-loss-forensics.yml
   workflow_dispatch:
     inputs:
       symbols:
