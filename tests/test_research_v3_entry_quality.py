@@ -39,6 +39,6 @@ def test_directional_features_are_normalized_for_short():
     row = module.capture_features(Strategy(), {"5m":five,"15m":fifteen,"1h":hourly}, plan, "BTCUSDT")
     assert row["rsi_directional"] == 65
     assert row["close_location_directional"] == 0.75
-    assert row["ema9_extension_atr"] == -0.5
+    assert row["ema9_extension_atr"] == 0.5
     assert row["ema21_50_gap_15m_atr"] == 0.5
     assert row["ema21_50_gap_1h_atr"] == 0.375
