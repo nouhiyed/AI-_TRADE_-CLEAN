@@ -1,0 +1,135 @@
+name: V3 Relaxation Sweep (design / validation / sealed holdout)
+
+on:
+  workflow_dispatch:
+    inputs:
+      random_seeds:
+        description: Number of random-entry control runs
+        required: true
+        default: '5'
+      workers:
+        description: Parallel symbol workers per job
+        required: true
+        default: '4'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v3-relaxation-sweep
+  cancel-in-progress: true
+
+env:
+  SYMBOLS: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      end_date: ${{ steps.end.outputs.end_date }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: "Install dependencies (pandas below 3; the ta package predates pandas 3)"
+        run: python -m pip install --upgrade pip "pandas>=2.2,<3" numpy requests ta
+      - name: Fix the end date so every job uses the same history
+        id: end
+        run: echo "end_date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Download 2 years of Futures 5m candles once
+        env:
+          END: ${{ steps.end.outputs.end_date }}
+        run: |
+          PYTHONPATH=.:scripts python - <<'PY'
+          import os
+          import pandas as pd
+          import backtest_v3_2y as bt
+          start = int(pd.Timestamp(bt.START_UTC).timestamp() * 1000)
+          end = int(pd.Timestamp(os.environ["END"], tz="UTC").timestamp() * 1000)
+          for symbol in os.environ["SYMBOLS"].split(","):
+              frame = bt.fetch_5m("futures", symbol, start, end, False)
+              print(symbol, len(frame), flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candle-cache
+          path: data/backtest_cache/
+          retention-days: 7
+          if-no-files-found: error
+
+  sweep:
+    needs: fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        param:
+          - PULLBACK_VOLUME
+          - BREAKOUT_VOLUME
+          - PULLBACK_CLOSE_LOCATION
+          - BREAKOUT_CLOSE_LOCATION
+          - PULLBACK_BODY_ATR
+          - BREAKOUT_BODY_ATR
+          - BREAKOUT_MAX_OPPOSING_WICK
+          - RANDOM
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip "pandas>=2.2,<3" numpy requests ta
+      - uses: actions/download-artifact@v4
+        with:
+          name: candle-cache
+          path: data/backtest_cache/
+      - name: Run sweep
+        env:
+          PARAM: ${{ matrix.param }}
+          END: ${{ needs.fetch.outputs.end_date }}
+          WORKERS: ${{ github.event.inputs.workers || '4' }}
+          SEEDS: ${{ github.event.inputs.random_seeds || '5' }}
+        run: |
+          if [ "$PARAM" = "RANDOM" ]; then
+            EXTRA="--params none --random-baseline $SEEDS"
+          else
+            EXTRA="--params $PARAM"
+          fi
+          PYTHONPATH=. python scripts/sweep_v3.py --market futures --symbols "$SYMBOLS" \
+            --end "$END" --workers "$WORKERS" --label "$PARAM" $EXTRA --out "sweep-out/$PARAM"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ matrix.param }}
+          path: sweep-out/
+          retention-days: 30
+
+  aggregate:
+    needs: sweep
+    if: always() && needs.sweep.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip "pandas>=2.2,<3" numpy requests ta
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sweep-*
+          path: all-results/
+          merge-multiple: true
+      - name: Combine all parameter sweeps into one multiple-testing-corrected report
+        run: |
+          PYTHONPATH=. python scripts/sweep_v3.py --aggregate all-results/*/ --out combined | tee combined-report.txt
+          mkdir -p combined && cp combined-report.txt combined/
+          cat combined/report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI-Trader-V3-Sweep-Combined
+          path: |
+            combined/
+            all-results/
+          retention-days: 30

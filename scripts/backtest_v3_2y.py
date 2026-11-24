@@ -39,6 +39,12 @@ FEE = {"spot": 0.0010, "futures": 0.0005}
 SLIPPAGE = {"spot": 0.0005, "futures": 0.0005}
 
 
+def to_ms(series) -> np.ndarray:
+    """Epoch milliseconds, independent of the pandas datetime resolution (ns/us/ms)."""
+    return (pd.to_datetime(series, utc=True).dt.as_unit("ns")
+            .astype("int64").to_numpy() // 1_000_000)
+
+
 def fetch_5m(market: str, symbol: str, start_ms: int, end_ms: int,
              refresh: bool = False) -> pd.DataFrame:
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -46,8 +52,8 @@ def fetch_5m(market: str, symbol: str, start_ms: int, end_ms: int,
     if path.exists() and not refresh:
         frame = pd.read_csv(path)
         frame["open_time"] = pd.to_datetime(frame["open_time"], utc=True)
-        return frame[(frame["open_time"].astype("int64") // 1_000_000 >= start_ms)
-                     & (frame["open_time"].astype("int64") // 1_000_000 < end_ms)].reset_index(drop=True)
+        opens_ms = to_ms(frame["open_time"])
+        return frame[(opens_ms >= start_ms) & (opens_ms < end_ms)].reset_index(drop=True)
 
     endpoint = "/api/v3/klines" if market == "spot" else "/fapi/v1/klines"
     session = requests.Session()
@@ -89,8 +95,8 @@ def fetch_5m(market: str, symbol: str, start_ms: int, end_ms: int,
     frame["open_time"] = pd.to_datetime(frame["open_time"], unit="ms", utc=True)
     frame["close_time"] = pd.to_datetime(frame["close_time"], unit="ms", utc=True)
     frame = frame.dropna().drop_duplicates("open_time").sort_values("open_time")
-    frame = frame[(frame["open_time"].astype("int64") // 1_000_000 >= start_ms)
-                  & (frame["close_time"].astype("int64") // 1_000_000 < end_ms)]
+    frame = frame[(to_ms(frame["open_time"]) >= start_ms)
+                  & (to_ms(frame["close_time"]) < end_ms)]
     frame.to_csv(path, index=False, compression="gzip")
     return frame.reset_index(drop=True)
 
@@ -126,7 +132,7 @@ def set_frame_attrs(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 
 
 def htf_end_indices(frame: pd.DataFrame, minutes: int) -> np.ndarray:
-    opens = pd.to_datetime(frame["open_time"], utc=True).astype("int64").to_numpy() // 1_000_000
+    opens = to_ms(frame["open_time"])
     closes = opens + minutes * 60_000
     return closes
 
@@ -171,7 +177,7 @@ def replay_symbol(market: str, symbol: str, raw: pd.DataFrame) -> tuple[list, di
     strategy = FuturesScalpingStrategyV3() if market == "futures" else SpotScalpingStrategyV3()
     five, fifteen, hourly, four = build_indicators(raw, market)
     five = five.reset_index(drop=True)
-    times = pd.to_datetime(five["open_time"], utc=True).astype("int64").to_numpy() // 1_000_000
+    times = to_ms(five["open_time"])
     closes = times + INTERVAL_MS
     fifteen_close = htf_end_indices(fifteen, 15)
     hourly_close = htf_end_indices(hourly, 60)
