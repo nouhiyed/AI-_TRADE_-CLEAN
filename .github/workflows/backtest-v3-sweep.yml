@@ -1,6 +1,10 @@
 name: V3 Relaxation Sweep (design / validation / sealed holdout)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/backtest-v3-sweep.yml'
   workflow_dispatch:
     inputs:
       random_seeds:
