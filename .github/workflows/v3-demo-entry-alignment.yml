@@ -38,7 +38,7 @@ jobs:
         run: PYTHONPATH=. python -m pytest tests/test_research_v3_demo_entry_alignment.py -q
       - name: Download Binance Vision Futures 5m history
         env:
-          SYMBOLS: \${{ github.event.inputs.symbols || 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT' }}
+          SYMBOLS: ${{ github.event.inputs.symbols || 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT' }}
         run: |
           python - <<'PY'
           import io, os, zipfile, time
@@ -112,7 +112,7 @@ jobs:
       - name: Replay exact DEMO entry drift allowance
         run: |
           PYTHONPATH=. python scripts/research_v3_demo_entry_alignment.py \
-            --symbols "\${{ github.event.inputs.symbols || 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT' }}" \
+            --symbols "${{ github.event.inputs.symbols || 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT' }}" \
             --out data/v3_demo_alignment
       - name: Upload DEMO-aligned research report
         uses: actions/upload-artifact@v4
