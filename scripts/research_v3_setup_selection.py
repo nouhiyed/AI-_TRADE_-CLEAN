@@ -44,7 +44,6 @@ def candidates(strategy, data):
     for ok,direction,setup,regime,target_r in tests:
         if not ok: continue
         plan=C.plan_with_structure("futures",direction,five,data,setup,regime,target_r,c,data.get("profile","standard"))
-        if plan.get("success") is not True: continue
         sign=1 if direction=="LONG" else -1
         atr15=v(fifteen,"ATR"); atr1h=v(hourly,"ATR")
         gap15=((v(fifteen,"EMA_21")-v(fifteen,"EMA_50"))*sign/atr15
@@ -65,6 +64,8 @@ def choose(strategy,data,policy):
     items=candidates(strategy,data)
     if not items: return {"success":False,"reason":"No qualifying V3 Futures setup"}
     if policy=="FIRST_MATCH": return items[0]["plan"]
+    items=[x for x in items if x["plan"].get("success") is True]
+    if not items: return {"success":False,"reason":"No successful candidate plan"}
     if policy=="MAX_CLEARANCE": key=lambda x:(x["clearance"],x["momentum"])
     elif policy=="MOMENTUM": key=lambda x:(x["momentum"],x["clearance"])
     elif policy=="HTF_ALIGNMENT": key=lambda x:(x["htf"],x["momentum"])
