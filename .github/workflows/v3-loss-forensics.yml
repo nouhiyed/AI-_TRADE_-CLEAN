@@ -74,6 +74,8 @@ jobs:
           with zipfile.ZipFile(io.BytesIO(response.content)) as z:
             trade_name=next(n for n in z.namelist() if n.endswith("trades_demo_aligned.csv"))
             trades=pd.read_csv(z.open(trade_name),parse_dates=["entry_time","exit_time"])
+          Path("data").mkdir(exist_ok=True)
+          trades.to_csv("data/trades_demo_aligned.csv",index=False)
           trades["entry_time"]=pd.to_datetime(trades.entry_time,utc=True)
           trades["exit_time"]=pd.to_datetime(trades.exit_time,utc=True)
           for sym in [x.strip().upper() for x in os.environ["SYMBOLS"].split(",") if x.strip()]:
