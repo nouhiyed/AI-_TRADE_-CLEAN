@@ -80,11 +80,13 @@ jobs:
             print(sym,len(d),flush=True)
           PY
       - name: Run trade-level forensic analysis
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
           import zipfile,io,requests
           url="https://api.github.com/repos/nouhiyed/AI-_TRADE_-CLEAN/actions/artifacts/14927189129/zip"
-          r=requests.get(url,headers={"Accept":"application/vnd.github+json"},timeout=60)
+          r=requests.get(url,headers={"Accept":"application/vnd.github+json","Authorization":"Bearer "+__import__("os").environ["GH_TOKEN"]},timeout=60)
           r.raise_for_status()
           with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             name=next(n for n in z.namelist() if n.endswith("trades_demo_aligned.csv"))
