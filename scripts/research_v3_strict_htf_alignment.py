@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Isolated V3 research: strict 15m+1h EMA alignment; exit engine is untouched."""
 from __future__ import annotations
-import argparse, json
+import argparse, json, sys
 from collections import Counter
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd
 import backtest_v3_2y as bt
 
