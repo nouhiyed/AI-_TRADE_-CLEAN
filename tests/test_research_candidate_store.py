@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from core.research_candidate_store import ResearchCandidateStore
+from core.research_outcomes import Outcome
 
 
 class Frame:
@@ -54,6 +55,20 @@ class ResearchCandidateStoreTests(unittest.TestCase):
             result = store.record("futures", "ETHUSDT", "standard", frames, accepted)
             self.assertEqual(result["decision"], "ACCEPTED")
             self.assertEqual(store.summary()["accepted"], 1)
+
+    def test_outcome_label_is_persisted_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResearchCandidateStore(Path(tmp) / "research.db")
+            frames = {"5m": Frame({"open_time": 789, "close": 100.0})}
+            signal = {"direction": "LONG", "trade_plan": {
+                "success": True, "setup": "PULLBACK_LONG",
+                "entry": 100, "stop_loss": 98, "take_profit": 104}}
+            saved = store.record("futures", "BTCUSDT", "explore", frames, signal)
+            label = Outcome("TAKE_PROFIT", 3, 104, 1.8, 2.0, -0.2, "TAKE_PROFIT")
+            self.assertTrue(store.record_outcome(saved["candidate_id"], label))
+            self.assertFalse(store.record_outcome(saved["candidate_id"], label))
+            rows = store.outcome_summary("futures")
+            self.assertEqual(rows[0]["count"], 1)
 
 
 if __name__ == "__main__":
