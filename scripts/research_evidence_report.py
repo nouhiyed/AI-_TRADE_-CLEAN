@@ -43,6 +43,7 @@ def main():
     except ValueError as error:
         portfolio = {"unavailable": str(error)}
     report["portfolio"] = portfolio
+    report["cost_stress"] = store.stress_summary(args.market)
     report["scope"] = {
         "market": args.market, "setup": args.setup,
         "labelled_rows": len(rows), "database": args.db,
