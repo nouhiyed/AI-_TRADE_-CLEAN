@@ -1031,6 +1031,25 @@ class APIHandler(BaseHTTPRequestHandler):
                 snapshot["strategy_timeframe"] = "5m"
                 snapshot["entry_timing"] = "immediate_after_analysis_with_atr_drift_guard"
                 return self.send_json(snapshot)
+            if path == "/research/edge-summary":
+                market = params.get("market", [None])[0]
+                return self.send_json({
+                    "research_only": True,
+                    "trading_decisions_affected": False,
+                    "execution_authorized": False,
+                    "methodology": {
+                        "entry": "candidate closed 5m candle close",
+                        "stop": "1.5 ATR",
+                        "target": "2.25 ATR",
+                        "horizon": "48 subsequent closed 5m candles",
+                        "same_bar_stop_target": "STOP_FIRST",
+                        "default_fee_rate": 0.001,
+                        "default_slippage_rate": 0.0005,
+                        "note": "Research proxy labels only; not executable trade plans."
+                    },
+                    "counts": coordinator.edge_research_store.counts(),
+                    "results": coordinator.edge_research_store.summary(market),
+                })
             if path == "/research/summary":
                 market = params.get("market", [None])[0]
                 return self.send_json({
