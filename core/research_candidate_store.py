@@ -8,7 +8,10 @@ import math
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+from core.research_outcomes import evaluate_forward_path
 
 
 def _clean(value):
@@ -178,6 +181,84 @@ class ResearchCandidateStore:
             rows = db.execute(query, params).fetchall()
         return [{"status": r[0], "count": r[1], "avg_result_r": r[2],
                  "avg_mfe_r": r[3], "avg_mae_r": r[4]} for r in rows]
+
+    @staticmethod
+    def _parse_candle_time(value):
+        text = str(value)
+        try:
+            number = float(text)
+            # Binance epoch milliseconds or seconds.
+            if number > 10_000_000_000:
+                number /= 1000.0
+            return datetime.fromtimestamp(number, tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    def label_pending_from_bars(self, market, symbol, bars, horizon=48,
+                                fee_rate=0.001, slippage_rate=0.0005):
+        """Label valid accepted plans from strictly later, confirmed closed 5m bars.
+
+        Rejected candidates and plans without valid levels remain unlabelled;
+        no synthetic entry/stop/target is fabricated for them.
+        """
+        market, symbol = str(market).lower(), str(symbol).upper()
+        rows = []
+        for bar in bars or []:
+            if isinstance(bar, dict):
+                row = bar
+            else:
+                try:
+                    row = bar.to_dict()
+                except Exception:
+                    continue
+            if row.get("is_closed", True) is False:
+                continue
+            rows.append(row)
+        rows.sort(key=lambda row: self._parse_candle_time(
+            row.get("open_time", row.get("open_time_ms", row.get("timestamp", row.get("time"))))
+        ) or datetime.min.replace(tzinfo=timezone.utc))
+
+        with self._lock, self._connect() as db:
+            pending = db.execute("""
+                SELECT c.id,c.candle_open_time,c.direction,c.entry,c.stop_loss,c.take_profit
+                FROM candidates c LEFT JOIN outcomes o ON o.candidate_id=c.id
+                WHERE c.market=? AND c.symbol=? AND c.decision='ACCEPTED'
+                  AND o.candidate_id IS NULL
+                  AND c.entry IS NOT NULL AND c.stop_loss IS NOT NULL
+                  AND c.take_profit IS NOT NULL
+                ORDER BY c.captured_at_ms ASC
+            """, (market, symbol)).fetchall()
+
+        labelled = 0
+        for candidate_id, candle_time, direction, entry, stop, target in pending:
+            candidate_dt = self._parse_candle_time(candle_time)
+            if candidate_dt is None:
+                continue
+            future = []
+            for row in rows:
+                stamp = self._parse_candle_time(
+                    row.get("open_time", row.get("open_time_ms", row.get("timestamp", row.get("time"))))
+                )
+                if stamp is not None and stamp > candidate_dt:
+                    future.append({"high": row["high"], "low": row["low"]})
+            if not future:
+                continue
+            outcome = evaluate_forward_path(
+                direction, entry, stop, target, future[:int(horizon)],
+                max_bars=int(horizon), fee_rate=fee_rate,
+                slippage_rate=slippage_rate,
+            )
+            # A horizon timeout is only final when the complete horizon exists.
+            if outcome.status == "TIMEOUT" and len(future) < int(horizon):
+                continue
+            if self.record_outcome(candidate_id, outcome):
+                labelled += 1
+        return labelled
 
     def summary(self, market=None):
         query = "SELECT decision, COUNT(*) FROM candidates"
