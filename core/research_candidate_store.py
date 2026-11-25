@@ -11,7 +11,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.research_outcomes import evaluate_forward_path\nfrom core.research_features import extract_research_features, classify_market_regime
+from core.research_outcomes import evaluate_forward_path
+from core.research_features import extract_research_features, classify_market_regime
 
 
 def _clean(value):
@@ -120,7 +121,11 @@ class ResearchCandidateStore:
             "signal_reason": signal.get("reason"),
             "source": signal.get("signal_source"),
         }
-        features = {tf: _latest_row(frame) for tf, frame in frames.items()}\n        derived = extract_research_features(frames)\n        features["research"] = derived\n        payload["research_regime"] = classify_market_regime(derived)\n        decision = "ACCEPTED" if plan.get("success") is True else "REJECTED"
+        features = {tf: _latest_row(frame) for tf, frame in frames.items()}
+        derived = extract_research_features(frames)
+        features["research"] = derived
+        payload["research_regime"] = classify_market_regime(derived)
+        decision = "ACCEPTED" if plan.get("success") is True else "REJECTED"
         values = (
             market, symbol, "5m", str(candle_time), str(profile or "standard"),
             decision, str(signal.get("direction") or ""),
