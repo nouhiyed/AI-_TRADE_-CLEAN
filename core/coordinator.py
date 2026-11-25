@@ -22,6 +22,7 @@ from core.demo.engine import DemoEngine
 from core.journal import TradeJournal
 from core.learning import LearningEngine, setup_key as make_setup_key
 from core.notifier import Notifier
+from core.research_candidate_store import ResearchCandidateStore
 from core.chart_image import render_trade_chart
 from core.spot_demo import SpotDemoMixin
 from core.trailing_stop import (
@@ -78,6 +79,7 @@ class TradingCoordinator(SpotDemoMixin):
         self.last_signals = {}
         self._demo_lock = threading.RLock()
         self.funnel_recorder = None
+        self.research_candidates = ResearchCandidateStore(Path("data/research_candidates.db"))
         self._demo_position_locks = {}
         self._demo_position_locks_guard = threading.Lock()
         self.mode = "DEMO"
@@ -1549,6 +1551,14 @@ class TradingCoordinator(SpotDemoMixin):
                         **plan, "success": False,
                         "reason": "Market/news context veto: " + str(assessment["veto"]),
                     }
+            # Research capture is strictly observational. A storage failure must
+            # never alter or block the live analysis/execution decision.
+            try:
+                self.research_candidates.record(
+                    domain, symbol, profile, prepared, signal
+                )
+            except Exception as capture_error:
+                print("[RESEARCH] candidate capture failed: %s" % capture_error)
             self.last_signals[domain] = signal
             return {"symbol": symbol, "source": "binance_websocket_cache",
                     "signals": {domain: signal}, "data_errors": {}}
