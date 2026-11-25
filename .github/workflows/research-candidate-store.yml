@@ -1,0 +1,25 @@
+name: Research Candidate Store Tests
+
+on:
+  push:
+    branches:
+      - research/edge-engine-foundation
+    paths:
+      - "core/research_candidate_store.py"
+      - "core/coordinator.py"
+      - "tests/test_research_candidate_store.py"
+      - ".github/workflows/research-candidate-store.yml"
+  workflow_dispatch:
+
+jobs:
+  candidate-store:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile research capture
+        run: python -m py_compile core/research_candidate_store.py core/coordinator.py
+      - name: Run isolated candidate store tests
+        run: python -m unittest tests.test_research_candidate_store -v
