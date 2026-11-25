@@ -6,7 +6,9 @@ on:
       - research/edge-engine-foundation
     paths:
       - "core/edge_research_store.py"
+      - "core/edge_backtest.py"
       - "tests/test_edge_research_store.py"
+      - "tests/test_edge_backtest.py"
       - "core/coordinator.py"
       - "api/main.py"
       - ".github/workflows/edge-research-ledger.yml"
@@ -22,3 +24,5 @@ jobs:
           python-version: "3.12"
       - run: python -m py_compile core/edge_research_store.py
       - run: python -m unittest discover -s tests -p 'test_edge_research_store.py' -v
+      - run: python -m py_compile core/edge_backtest.py
+      - run: python -m unittest discover -s tests -p 'test_edge_backtest.py' -v
