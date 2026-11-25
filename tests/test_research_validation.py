@@ -1,7 +1,7 @@
 import unittest
 from core.research_validation import (
     chronological_split, fit_evidence_model, score_evidence,
-    evaluate_walk_forward,
+    evaluate_walk_forward, evaluate_portfolio_walk_forward,
 )
 
 
@@ -37,6 +37,25 @@ class ResearchValidationTests(unittest.TestCase):
         self.assertEqual(report["oos_count"], 30)
         self.assertEqual(report["baseline"]["count"], 30)
         self.assertEqual(report["selected"]["count"], 7)
+
+
+    def test_portfolio_selector_caps_positions_per_candle(self):
+        rows = []
+        for stamp in range(50):
+            for n in range(2):
+                rows.append({
+                    "timestamp": stamp,
+                    "symbol": "COIN%s" % n,
+                    "setup": "SETUP%s" % n,
+                    "features": {"momentum": float((stamp + n) % 10)},
+                    "result_r": 0.5 if n == 0 else -0.25,
+                })
+        report = evaluate_portfolio_walk_forward(
+            rows, min_bin_samples=5, max_positions_per_candle=1,
+        )
+        self.assertEqual(report["oos_candidate_count"], 30)
+        self.assertEqual(report["selected"]["count"], 15)
+        self.assertEqual(report["max_positions_per_candle"], 1)
 
 
 if __name__ == "__main__":
