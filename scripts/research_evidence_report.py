@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 
 from core.research_candidate_store import ResearchCandidateStore
-from core.research_validation import (evaluate_walk_forward,\n                                      evaluate_portfolio_walk_forward)
+from core.research_validation import (
+    evaluate_walk_forward,
+    evaluate_portfolio_walk_forward,
+)
 
 
 def main():
@@ -14,7 +17,8 @@ def main():
     parser.add_argument("--setup")
     parser.add_argument("--train-fraction", type=float, default=0.7)
     parser.add_argument("--min-bin-samples", type=int, default=8)
-    parser.add_argument("--selection-fraction", type=float, default=0.25)\n    parser.add_argument("--max-positions-per-candle", type=int, default=3)
+    parser.add_argument("--selection-fraction", type=float, default=0.25)
+    parser.add_argument("--max-positions-per-candle", type=int, default=3)
     parser.add_argument("--output")
     args = parser.parse_args()
 
@@ -30,9 +34,19 @@ def main():
         min_bin_samples=args.min_bin_samples,
         selection_fraction=args.selection_fraction,
     )
-    try:\n        portfolio = evaluate_portfolio_walk_forward(\n            rows, train_fraction=args.train_fraction,\n            min_bin_samples=args.min_bin_samples,\n            max_positions_per_candle=args.max_positions_per_candle,\n        )\n    except ValueError as error:\n        portfolio = {"unavailable": str(error)}\n    report["portfolio"] = portfolio\n    report["scope"] = {"market": args.market, "setup": args.setup,
-                       "labelled_rows": len(rows), "database": args.db}
-    # Keep model bin details for reproducibility, but never call this a live signal.
+    try:
+        portfolio = evaluate_portfolio_walk_forward(
+            rows, train_fraction=args.train_fraction,
+            min_bin_samples=args.min_bin_samples,
+            max_positions_per_candle=args.max_positions_per_candle,
+        )
+    except ValueError as error:
+        portfolio = {"unavailable": str(error)}
+    report["portfolio"] = portfolio
+    report["scope"] = {
+        "market": args.market, "setup": args.setup,
+        "labelled_rows": len(rows), "database": args.db,
+    }
     rendered = json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
     if args.output:
         Path(args.output).write_text(rendered + "\\n", encoding="utf-8")
