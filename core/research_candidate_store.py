@@ -220,7 +220,7 @@ class ResearchCandidateStore:
                     row = bar.to_dict()
                 except Exception:
                     continue
-            if row.get("is_closed", True) is False:
+            if not bool(row.get("is_closed", True)):
                 continue
             rows.append(row)
         rows.sort(key=lambda row: self._parse_candle_time(
