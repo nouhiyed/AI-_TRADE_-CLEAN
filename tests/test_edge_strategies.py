@@ -25,7 +25,8 @@ class EdgeStrategyTests(unittest.TestCase):
         engine=EdgeStrategyEngine()
         self.assertFalse(engine.analyze("futures", {})["success"])
         rows=candles()
-        rows[-1]["is_closed"]=False
+        for row in rows:
+            row["is_closed"]=False
         result=engine.analyze("futures", {"5m":Frame(rows)})
         self.assertFalse(result["success"])
 
