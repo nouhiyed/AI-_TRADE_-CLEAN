@@ -97,8 +97,12 @@ def run_chronological_backtest(rows, market="futures", fee_rate=0.001,
     """
     clean = _valid_rows(rows)
     if len(clean) < 100:
+        empty = _stats([])
         return {"status": "INSUFFICIENT_DATA", "bars": len(clean),
-                "minimum_bars": 100, "results": {}}
+                "minimum_bars": 100, "overall": empty,
+                "by_strategy": {name: _stats([]) for name in STRATEGIES},
+                "oos_bars": 0, "trades": [],
+                "warning": "Not enough historical bars to evaluate."}
     split = max(25, min(len(clean) - horizon - 1,
                         int(len(clean) * float(warmup_fraction))))
     engine = EdgeStrategyEngine()
