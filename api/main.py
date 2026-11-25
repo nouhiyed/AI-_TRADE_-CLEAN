@@ -1038,6 +1038,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "trading_decisions_affected": False,
                     "candidates": coordinator.research_candidates.summary(market),
                     "forward_outcomes": coordinator.research_candidates.outcome_summary(market),
+                    "stress_scenarios": coordinator.research_candidates.stress_summary(market),
                     "labelled_rows": len(coordinator.research_candidates.labelled_dataset(market)),
                 })
             if path == "/status":
