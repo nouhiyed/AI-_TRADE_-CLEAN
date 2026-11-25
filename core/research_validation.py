@@ -95,6 +95,58 @@ def score_evidence(model, features):
     return {"score_r": sum(contributions.values()),
             "prior_r": model["prior"], "contributions": contributions}
 
+def evaluate_portfolio_walk_forward(rows, train_fraction=0.7,
+                                    min_bin_samples=8, smoothing=8.0,
+                                    max_positions_per_candle=3,
+                                    max_per_setup_per_candle=1):
+    """Cross-sectional OOS selection, capped per candle and setup.
+
+    All candidates at a timestamp are ranked together; the model is fitted only
+    on earlier training rows. This is a research simulation, not execution logic.
+    """
+    if max_positions_per_candle < 1 or max_per_setup_per_candle < 1:
+        raise ValueError("portfolio caps must be positive")
+    train, test = chronological_split(rows, train_fraction)
+    model = fit_evidence_model(train, min_bin_samples, smoothing)
+    groups = defaultdict(list)
+    for row in test:
+        result = _number(row.get("result_r"))
+        stamp = row.get("timestamp")
+        if result is None or stamp is None:
+            continue
+        scored = score_evidence(model, row.get("features"))["score_r"]
+        groups[stamp].append((scored, result, str(row.get("symbol", "")),
+                              str(row.get("setup", ""))))
+    selected, baseline = [], []
+    for stamp in sorted(groups):
+        group = sorted(groups[stamp], key=lambda item: item[0], reverse=True)
+        baseline.extend(item[1] for item in group)
+        seen_symbols, setup_counts = set(), defaultdict(int)
+        for _, result, symbol, setup in group:
+            if symbol in seen_symbols:
+                continue
+            if setup_counts[setup] >= max_per_setup_per_candle:
+                continue
+            selected.append(result)
+            seen_symbols.add(symbol)
+            setup_counts[setup] += 1
+            if len(seen_symbols) >= max_positions_per_candle:
+                break
+    if not selected:
+        raise ValueError("portfolio selector produced no OOS selections")
+    def stats(values):
+        wins = sum(value > 0 for value in values)
+        gross_win = sum(value for value in values if value > 0)
+        gross_loss = -sum(value for value in values if value < 0)
+        return {"count": len(values), "mean_r": sum(values) / len(values),
+                "win_rate": wins / len(values),
+                "profit_factor": gross_win / gross_loss if gross_loss else None}
+    return {"train_count": len(train), "oos_candidate_count": len(baseline),
+            "selected": stats(selected), "baseline": stats(baseline),
+            "max_positions_per_candle": max_positions_per_candle,
+            "max_per_setup_per_candle": max_per_setup_per_candle,
+            "model_feature_count": len(model["features"])}
+
 
 def evaluate_walk_forward(rows, train_fraction=0.7, min_bin_samples=8,
                           smoothing=8.0, selection_fraction=0.25):
