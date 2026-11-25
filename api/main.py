@@ -1119,6 +1119,7 @@ class APIHandler(BaseHTTPRequestHandler):
                         "reason": "Symbol is outside the current daily top-30 Spot/Futures universes",
                     }, 403)
                 signals = {}
+                edge_candidates = {}
                 errors = {}
                 for domain in ("futures", "spot"):
                     if symbol not in selected_market_symbols(domain):
@@ -1131,10 +1132,12 @@ class APIHandler(BaseHTTPRequestHandler):
                         symbol, domain, frames, profile="standard"
                     )
                     signals[domain] = (result.get("signals") or {}).get(domain, {})
+                    edge_candidates[domain] = result.get("edge_candidates") or {}
                     errors.update(result.get("data_errors") or {})
                 return self.send_json({
                     "symbol": symbol, "source": "binance_websocket_cache",
-                    "signals": signals, "data_errors": errors,
+                    "signals": signals, "edge_candidates": edge_candidates,
+                    "data_errors": errors,
                     "success": bool(signals) and not errors,
                 })
 
