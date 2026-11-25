@@ -1557,6 +1557,17 @@ class TradingCoordinator(SpotDemoMixin):
                 self.research_candidates.record(
                     domain, symbol, profile, prepared, signal
                 )
+                # Label older accepted candidates only from strictly later,
+                # confirmed-closed 5m candles already present in the cache.
+                five_minute = prepared.get("5m")
+                if five_minute is not None and hasattr(five_minute, "to_dict"):
+                    later_bars = five_minute.to_dict("records")
+                    labelled = self.research_candidates.label_pending_from_bars(
+                        domain, symbol, later_bars
+                    )
+                    if labelled:
+                        print("[RESEARCH] forward-labelled %s %s candidates: %s" %
+                              (domain, symbol, labelled))
             except Exception as capture_error:
                 print("[RESEARCH] candidate capture failed: %s" % capture_error)
             self.last_signals[domain] = signal
