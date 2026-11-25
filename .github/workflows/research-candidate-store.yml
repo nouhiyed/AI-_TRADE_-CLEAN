@@ -10,6 +10,7 @@ on:
       - "core/research_validation.py"
       - "scripts/research_evidence_report.py"
       - "core/coordinator.py"
+      - "api/main.py"
       - "tests/test_research_candidate_store.py"
       - "tests/test_research_outcomes.py"
       - "tests/test_research_validation.py"
@@ -25,7 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile research capture
-        run: python -m py_compile core/research_candidate_store.py core/research_outcomes.py core/research_validation.py core/coordinator.py scripts/research_evidence_report.py
+        run: python -m py_compile core/research_candidate_store.py core/research_outcomes.py core/research_validation.py core/coordinator.py api/main.py scripts/research_evidence_report.py
       - name: Run isolated candidate store tests
         run: python -m unittest discover -s tests -p 'test_research_candidate_store.py' -v
       - name: Run forward outcome tests
