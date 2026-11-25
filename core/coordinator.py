@@ -1534,6 +1534,11 @@ class TradingCoordinator(SpotDemoMixin):
                 self.edge_research_store.record(
                     domain, symbol, prepared, edge_candidates.get("candidates", [])
                 )
+                # Newly available closed candles label older candidates only;
+                # incomplete 48-bar horizons remain pending.
+                self.edge_research_store.label(
+                    domain, symbol, prepared.get("5m"), horizon=48
+                )
             except Exception:
                 # Research persistence must never interrupt live analysis.
                 pass
