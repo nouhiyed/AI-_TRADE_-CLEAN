@@ -116,5 +116,27 @@ class ResearchCandidateStoreTests(unittest.TestCase):
             self.assertEqual(store.outcome_summary("spot"), [])
 
 
+    def test_labelled_dataset_exports_only_numeric_forward_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResearchCandidateStore(Path(tmp) / "research.db")
+            saved = store.record(
+                "futures", "BTCUSDT", "standard",
+                {"5m": Frame({"open_time": "2026-01-01T00:00:00+00:00",
+                              "close": 100.0, "is_closed": True,
+                              "symbol": "BTCUSDT"})},
+                {"direction": "LONG", "trade_plan": {
+                    "success": True, "setup": "PULLBACK_LONG", "entry": 100,
+                    "stop_loss": 98, "take_profit": 104}},
+            )
+            from core.research_outcomes import Outcome
+            store.record_outcome(saved["candidate_id"],
+                Outcome("TAKE_PROFIT", 2, 104, 1.8, 2.0, -0.1, "TAKE_PROFIT"))
+            dataset = store.labelled_dataset("futures")
+            self.assertEqual(len(dataset), 1)
+            self.assertEqual(dataset[0]["setup"], "PULLBACK_LONG")
+            self.assertEqual(dataset[0]["features"]["5m__close"], 100.0)
+            self.assertNotIn("5m__symbol", dataset[0]["features"])
+
+
 if __name__ == "__main__":
     unittest.main()
