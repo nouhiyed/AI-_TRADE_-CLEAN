@@ -22,6 +22,7 @@ class Outcome:
 def evaluate_forward_path(direction, entry, stop, target, bars: Iterable[dict],
                           max_bars=48, fee_rate=0.001, slippage_rate=0.0005):
     direction = str(direction).upper()
+    direction = {"BUY": "LONG", "SELL": "SHORT"}.get(direction, direction)
     if direction not in ("LONG", "SHORT"):
         raise ValueError("direction must be LONG or SHORT")
     entry, stop, target = float(entry), float(stop), float(target)
@@ -54,8 +55,11 @@ def evaluate_forward_path(direction, entry, stop, target, bars: Iterable[dict],
             raw_exit = stop if stop_hit else target
             exit_slippage = raw_exit * slippage_rate
             exit_price = raw_exit - exit_slippage if direction == "LONG" else raw_exit + exit_slippage
-            gross = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
-            fees = (entry + exit_price) * fee_rate
+            effective_entry = (entry + entry * slippage_rate if direction == "LONG"
+                               else entry - entry * slippage_rate)
+            gross = ((exit_price - effective_entry) if direction == "LONG"
+                     else (effective_entry - exit_price))
+            fees = (effective_entry + exit_price) * fee_rate
             net_r = (gross - fees) / risk
             return Outcome(reason, index + 1, exit_price, net_r, mfe, mae, reason)
 
