@@ -77,6 +77,20 @@ class ResearchCandidateStore:
             db.execute("CREATE INDEX IF NOT EXISTS idx_candidates_decision "
                        "ON candidates(market, decision, setup)")
             db.execute("""
+                CREATE TABLE IF NOT EXISTS stress_outcomes (
+                    candidate_id INTEGER NOT NULL,
+                    scenario TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_r REAL,
+                    bars INTEGER NOT NULL,
+                    fee_rate REAL NOT NULL,
+                    slippage_rate REAL NOT NULL,
+                    recorded_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY(candidate_id, scenario),
+                    FOREIGN KEY(candidate_id) REFERENCES candidates(id)
+                )
+            """)
+            db.execute("""
                 CREATE TABLE IF NOT EXISTS outcomes (
                     candidate_id INTEGER PRIMARY KEY,
                     status TEXT NOT NULL,
