@@ -96,7 +96,9 @@ class ResearchCandidateStore:
         plan = plan if isinstance(plan, dict) else {}
         diagnostics = signal.get("diagnostics")
         payload = {
-            "diagnostics": diagnostics,
+            "diagnostics": diagnostics or plan.get("diagnostics"),
+            "plan_reason": plan.get("reason"),
+            "setup": plan.get("setup"),
             "market_context": signal.get("market_context"),
             "signal_reason": signal.get("reason"),
             "source": signal.get("signal_source"),
