@@ -172,6 +172,36 @@ class ResearchCandidateStore:
             """, values)
             return cursor.rowcount == 1
 
+    def record_stress_outcome(self, candidate_id, scenario, outcome,
+                              fee_rate, slippage_rate):
+        with self._lock, self._connect() as db:
+            cursor = db.execute("""
+                INSERT OR IGNORE INTO stress_outcomes
+                (candidate_id,scenario,status,result_r,bars,fee_rate,
+                 slippage_rate,recorded_at_ms)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (int(candidate_id), str(scenario), str(outcome.status),
+                  _clean(outcome.result_r), int(outcome.bars),
+                  float(fee_rate), float(slippage_rate), int(time.time() * 1000)))
+            return cursor.rowcount == 1
+
+    def stress_summary(self, market=None):
+        query = """
+            SELECT s.scenario,s.status,COUNT(*),AVG(s.result_r),AVG(s.fee_rate),
+                   AVG(s.slippage_rate)
+            FROM stress_outcomes s JOIN candidates c ON c.id=s.candidate_id
+        """
+        params = ()
+        if market:
+            query += " WHERE c.market=?"
+            params = (str(market).lower(),)
+        query += " GROUP BY s.scenario,s.status ORDER BY s.scenario,s.status"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [{"scenario": r[0], "status": r[1], "count": r[2],
+                 "avg_result_r": r[3], "fee_rate": r[4],
+                 "slippage_rate": r[5]} for r in rows]
+
     def outcome_summary(self, market=None):
         query = """SELECT o.status, COUNT(*), AVG(o.result_r), AVG(o.mfe_r),
                           AVG(o.mae_r)
@@ -262,6 +292,20 @@ class ResearchCandidateStore:
                 continue
             if self.record_outcome(candidate_id, outcome):
                 labelled += 1
+            scenarios = (
+                ("fee_10bps_slip_5bps", 0.0010, 0.0005),
+                ("fee_15bps_slip_10bps", 0.0015, 0.0010),
+                ("fee_20bps_slip_20bps", 0.0020, 0.0020),
+            )
+            for name, fee, slip in scenarios:
+                stressed = evaluate_forward_path(
+                    direction, entry, stop, target, future[:int(horizon)],
+                    max_bars=int(horizon), fee_rate=fee,
+                    slippage_rate=slip,
+                )
+                self.record_stress_outcome(
+                    candidate_id, name, stressed, fee, slip
+                )
         return labelled
 
     def labelled_dataset(self, market=None, setup=None):
