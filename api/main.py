@@ -1031,6 +1031,15 @@ class APIHandler(BaseHTTPRequestHandler):
                 snapshot["strategy_timeframe"] = "5m"
                 snapshot["entry_timing"] = "immediate_after_analysis_with_atr_drift_guard"
                 return self.send_json(snapshot)
+            if path == "/research/summary":
+                market = params.get("market", [None])[0]
+                return self.send_json({
+                    "research_only": True,
+                    "trading_decisions_affected": False,
+                    "candidates": coordinator.research_candidates.summary(market),
+                    "forward_outcomes": coordinator.research_candidates.outcome_summary(market),
+                    "labelled_rows": len(coordinator.research_candidates.labelled_dataset(market)),
+                })
             if path == "/status":
                 with scan_status_lock:
                     scan_snapshot = json.loads(json.dumps(scan_status))
