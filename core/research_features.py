@@ -29,7 +29,7 @@ def extract_timeframe_features(frame, prefix):
     except Exception:
         return {}
     rows = [row for row in rows if isinstance(row, dict)
-            and row.get("is_closed", True) is not False]
+            and bool(row.get("is_closed", True))]
     clean = []
     for row in rows:
         values = {key: _finite(row.get(key)) for key in
