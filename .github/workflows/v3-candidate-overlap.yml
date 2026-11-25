@@ -1,0 +1,69 @@
+name: V3 Candidate Overlap Diagnostic (read-only)
+on:
+  push:
+    branches: [research/v3-loss-forensics]
+    paths:
+      - scripts/research_v3_candidate_overlap.py
+      - .github/workflows/v3-candidate-overlap.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v3-candidate-overlap
+  cancel-in-progress: false
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip "pandas>=2.2,<3" numpy requests ta pytest
+      - name: Compile scripts
+        run: PYTHONPATH=. python -m py_compile scripts/research_v3_candidate_overlap.py scripts/research_v3_setup_selection.py scripts/backtest_v3_2y.py
+      - name: Download official Binance Vision Futures 5m history
+        env:
+          SYMBOLS: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT
+        run: |
+          python - <<'PY'
+          import io, os, zipfile, time
+          from datetime import timedelta
+          from pathlib import Path
+          import pandas as pd, requests
+          start=pd.Timestamp("2024-11-16T00:00:00Z"); end=pd.Timestamp.now(tz="UTC").floor("D")
+          cache=Path("data/backtest_cache"); cache.mkdir(parents=True,exist_ok=True)
+          cols=["open_time","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base","taker_buy_quote","ignore"]
+          session=requests.Session(); session.headers["User-Agent"]="AI-Trader-V3-Overlap-Diagnostic/1.0"
+          def get(symbol,period,cadence):
+            url=f"https://data.binance.vision/data/futures/um/{cadence}/klines/{symbol}/5m/{symbol}-5m-{period}.zip"
+            for attempt in range(5):
+              response=session.get(url,timeout=90)
+              if response.status_code==404: raise RuntimeError("Missing archive "+url)
+              if response.status_code in (418,429) or response.status_code>=500: time.sleep(min(30,2**(attempt+1))); continue
+              response.raise_for_status()
+              with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                frame=pd.read_csv(z.open(next(n for n in z.namelist() if n.lower().endswith(".csv"))),header=None)
+              if str(frame.iloc[0,0]).lower() in ("open_time","open time"): frame=frame.iloc[1:].copy()
+              frame=frame.iloc[:,:12]; frame.columns=cols[:frame.shape[1]]
+              for col in ("open_time","close_time","open","high","low","close","volume"): frame[col]=pd.to_numeric(frame[col],errors="coerce")
+              return frame.dropna(subset=["open_time","close_time","open","high","low","close","volume"])[["open_time","open","high","low","close","volume","close_time"]]
+            raise RuntimeError("Retries exhausted "+url)
+          months=pd.period_range(start.to_period("M"),end.to_period("M")-1,freq="M")
+          for symbol in os.environ["SYMBOLS"].split(","):
+            parts=[get(symbol,m,"monthly") for m in months]; day=end.to_period("M").start_time.date()
+            while day<end.date(): parts.append(get(symbol,day,"daily")); day+=timedelta(days=1)
+            frame=pd.concat(parts,ignore_index=True).drop_duplicates("open_time").sort_values("open_time")
+            frame=frame[(frame.open_time>=start.timestamp()*1000)&(frame.open_time<end.timestamp()*1000)]
+            frame["open_time"]=pd.to_datetime(frame.open_time,unit="ms",utc=True); frame["close_time"]=pd.to_datetime(frame.close_time,unit="ms",utc=True)
+            frame.to_csv(cache/f"futures_{symbol}_5m.csv.gz",index=False,compression="gzip"); print(symbol,len(frame),flush=True)
+          PY
+      - name: Diagnose candidate overlap
+        run: PYTHONPATH=. python scripts/research_v3_candidate_overlap.py --out data/v3_candidate_overlap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI-Trader-V3-Candidate-Overlap
+          path: data/v3_candidate_overlap/
+          retention-days: 30
