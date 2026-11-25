@@ -31,5 +31,14 @@ class ResearchOutcomeTests(unittest.TestCase):
         self.assertEqual(classify_market_regime({"adx_15m": 12}), "RANGE")
 
 
+    def test_buy_alias_and_entry_slippage_are_accounted_for(self):
+        out = evaluate_forward_path(
+            "BUY", 100, 98, 104, [{"high": 105, "low": 99}],
+            fee_rate=0, slippage_rate=0.001,
+        )
+        self.assertEqual(out.status, "TAKE_PROFIT")
+        self.assertLess(out.result_r, 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()
