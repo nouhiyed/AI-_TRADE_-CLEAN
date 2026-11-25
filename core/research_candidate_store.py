@@ -72,6 +72,20 @@ class ResearchCandidateStore:
                        "ON candidates(market, captured_at_ms)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_candidates_decision "
                        "ON candidates(market, decision, setup)")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS outcomes (
+                    candidate_id INTEGER PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    bars INTEGER NOT NULL,
+                    exit_price REAL,
+                    result_r REAL,
+                    mfe_r REAL NOT NULL,
+                    mae_r REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    labelled_at_ms INTEGER NOT NULL,
+                    FOREIGN KEY(candidate_id) REFERENCES candidates(id)
+                )
+            """)
 
     def _connect(self):
         db = sqlite3.connect(str(self.path), timeout=10)
@@ -125,9 +139,45 @@ class ResearchCandidateStore:
                     take_profit,features_json,signal_json,captured_at_ms
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, values)
+            candidate = db.execute("""
+                SELECT id FROM candidates
+                WHERE market=? AND symbol=? AND timeframe=? AND candle_open_time=? AND profile=?
+            """, (market, symbol, "5m", str(candle_time), str(profile or "standard"))).fetchone()
             return {"inserted": cursor.rowcount == 1,
+                    "candidate_id": candidate[0] if candidate else None,
                     "decision": decision, "symbol": symbol,
                     "candle_open_time": str(candle_time)}
+
+    def record_outcome(self, candidate_id, outcome):
+        """Attach one immutable forward label to an existing candidate."""
+        required = ("status", "bars", "mfe_r", "mae_r", "reason")
+        if any(not hasattr(outcome, key) for key in required):
+            raise ValueError("outcome object is incomplete")
+        values = (str(outcome.status), int(outcome.bars),
+                  _clean(outcome.exit_price), _clean(outcome.result_r),
+                  float(outcome.mfe_r), float(outcome.mae_r),
+                  str(outcome.reason), int(time.time() * 1000), int(candidate_id))
+        with self._lock, self._connect() as db:
+            cursor = db.execute("""
+                INSERT OR IGNORE INTO outcomes
+                (status,bars,exit_price,result_r,mfe_r,mae_r,reason,labelled_at_ms,candidate_id)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, values)
+            return cursor.rowcount == 1
+
+    def outcome_summary(self, market=None):
+        query = """SELECT o.status, COUNT(*), AVG(o.result_r), AVG(o.mfe_r),
+                          AVG(o.mae_r)
+                   FROM outcomes o JOIN candidates c ON c.id=o.candidate_id"""
+        params = ()
+        if market:
+            query += " WHERE c.market=?"
+            params = (str(market).lower(),)
+        query += " GROUP BY o.status ORDER BY o.status"
+        with self._connect() as db:
+            rows = db.execute(query, params).fetchall()
+        return [{"status": r[0], "count": r[1], "avg_result_r": r[2],
+                 "avg_mfe_r": r[3], "avg_mae_r": r[4]} for r in rows]
 
     def summary(self, market=None):
         query = "SELECT decision, COUNT(*) FROM candidates"
