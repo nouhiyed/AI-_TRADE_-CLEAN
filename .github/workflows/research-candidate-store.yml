@@ -6,8 +6,10 @@ on:
       - research/edge-engine-foundation
     paths:
       - "core/research_candidate_store.py"
+      - "core/research_outcomes.py"
       - "core/coordinator.py"
       - "tests/test_research_candidate_store.py"
+      - "tests/test_research_outcomes.py"
       - ".github/workflows/research-candidate-store.yml"
   workflow_dispatch:
 
@@ -20,6 +22,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile research capture
-        run: python -m py_compile core/research_candidate_store.py core/coordinator.py
+        run: python -m py_compile core/research_candidate_store.py core/research_outcomes.py core/coordinator.py
       - name: Run isolated candidate store tests
-        run: python -m unittest discover -s tests -p 'test_research_candidate_store.py' -v
+        run: python -m unittest discover -s tests -p 'test_research_*.py' -v
