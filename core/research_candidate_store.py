@@ -260,6 +260,55 @@ class ResearchCandidateStore:
                 labelled += 1
         return labelled
 
+    def labelled_dataset(self, market=None, setup=None):
+        """Return only completed, accepted and forward-labelled candidates.
+
+        Numeric features are flattened with timeframe prefixes to form a
+        reproducible modelling table; labels are never inferred for rejects.
+        """
+        query = """
+            SELECT c.market,c.symbol,c.candle_open_time,c.setup,c.direction,
+                   c.features_json,o.result_r,o.status,o.bars
+            FROM candidates c JOIN outcomes o ON o.candidate_id=c.id
+            WHERE c.decision='ACCEPTED' AND o.result_r IS NOT NULL
+        """
+        clauses, params = [], []
+        if market:
+            clauses.append("c.market=?")
+            params.append(str(market).lower())
+        if setup:
+            clauses.append("c.setup=?")
+            params.append(str(setup))
+        if clauses:
+            query += " AND " + " AND ".join(clauses)
+        query += " ORDER BY c.candle_open_time ASC,c.symbol ASC"
+        with self._connect() as db:
+            rows = db.execute(query, tuple(params)).fetchall()
+        dataset = []
+        for mkt, symbol, candle_time, setup_name, direction, raw, result_r, status, bars in rows:
+            stamp = self._parse_candle_time(candle_time)
+            if stamp is None:
+                continue
+            features = {}
+            try:
+                frames = json.loads(raw or "{}")
+            except (TypeError, ValueError):
+                frames = {}
+            for timeframe, values in frames.items():
+                if not isinstance(values, dict):
+                    continue
+                for key, value in values.items():
+                    number = _clean(value)
+                    if isinstance(number, (int, float)) and not isinstance(number, bool):
+                        features[str(timeframe) + "__" + str(key)] = float(number)
+            dataset.append({
+                "timestamp": stamp.timestamp(),
+                "market": mkt, "symbol": symbol, "setup": setup_name,
+                "direction": direction, "features": features,
+                "result_r": float(result_r), "outcome": status, "bars": int(bars),
+            })
+        return dataset
+
     def summary(self, market=None):
         query = "SELECT decision, COUNT(*) FROM candidates"
         params = ()
