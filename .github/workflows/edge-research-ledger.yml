@@ -1,0 +1,22 @@
+name: Edge Research Ledger Tests
+
+on:
+  push:
+    branches:
+      - research/edge-engine-foundation
+    paths:
+      - "core/edge_research_store.py"
+      - "tests/test_edge_research_store.py"
+      - ".github/workflows/edge-research-ledger.yml"
+  workflow_dispatch:
+
+jobs:
+  edge-ledger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile core/edge_research_store.py
+      - run: python -m unittest discover -s tests -p 'test_edge_research_store.py' -v
