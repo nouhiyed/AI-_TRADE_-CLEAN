@@ -98,6 +98,12 @@ class ResearchCandidateStoreTests(unittest.TestCase):
                 "futures", "BTCUSDT", later), 1)
             self.assertEqual(store.outcome_summary("futures")[0]["status"],
                              "TAKE_PROFIT")
+            stress = store.stress_summary("futures")
+            self.assertEqual(len(stress), 3)
+            self.assertEqual({row["scenario"] for row in stress}, {
+                "fee_10bps_slip_5bps", "fee_15bps_slip_10bps",
+                "fee_20bps_slip_20bps",
+            })
 
     def test_incomplete_horizon_is_not_mislabelled_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
