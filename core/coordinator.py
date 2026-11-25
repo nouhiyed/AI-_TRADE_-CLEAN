@@ -24,6 +24,7 @@ from core.learning import LearningEngine, setup_key as make_setup_key
 from core.notifier import Notifier
 from core.research_candidate_store import ResearchCandidateStore
 from core.edge_strategies import EdgeStrategyEngine
+from core.edge_research_store import EdgeResearchStore
 from core.chart_image import render_trade_chart
 from core.spot_demo import SpotDemoMixin
 from core.trailing_stop import (
@@ -83,6 +84,7 @@ class TradingCoordinator(SpotDemoMixin):
         self.research_candidates = ResearchCandidateStore(Path("data/research_candidates.db"))
         # Independent candidate detectors run beside V3 for observation only.
         self.edge_strategy_engine = EdgeStrategyEngine()
+        self.edge_research_store = EdgeResearchStore(Path("data/edge_research.db"))
         self.edge_candidate_snapshots = {}
         self._demo_position_locks = {}
         self._demo_position_locks_guard = threading.Lock()
@@ -1527,6 +1529,14 @@ class TradingCoordinator(SpotDemoMixin):
         # Its output is exposed for inspection but never feeds V3 or execution.
         edge_candidates = self.edge_strategy_engine.analyze(domain, prepared)
         self.edge_candidate_snapshots[(domain, symbol)] = edge_candidates
+        if edge_candidates.get("success"):
+            try:
+                self.edge_research_store.record(
+                    domain, symbol, prepared, edge_candidates.get("candidates", [])
+                )
+            except Exception:
+                # Research persistence must never interrupt live analysis.
+                pass
         live_data = {
             "symbol": symbol,
             "source": "binance_websocket_cache",
