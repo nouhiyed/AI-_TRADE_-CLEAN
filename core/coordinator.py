@@ -23,6 +23,7 @@ from core.journal import TradeJournal
 from core.learning import LearningEngine, setup_key as make_setup_key
 from core.notifier import Notifier
 from core.research_candidate_store import ResearchCandidateStore
+from core.edge_strategies import EdgeStrategyEngine
 from core.chart_image import render_trade_chart
 from core.spot_demo import SpotDemoMixin
 from core.trailing_stop import (
@@ -80,6 +81,9 @@ class TradingCoordinator(SpotDemoMixin):
         self._demo_lock = threading.RLock()
         self.funnel_recorder = None
         self.research_candidates = ResearchCandidateStore(Path("data/research_candidates.db"))
+        # Independent candidate detectors run beside V3 for observation only.
+        self.edge_strategy_engine = EdgeStrategyEngine()
+        self.edge_candidate_snapshots = {}
         self._demo_position_locks = {}
         self._demo_position_locks_guard = threading.Lock()
         self.mode = "DEMO"
@@ -1519,6 +1523,10 @@ class TradingCoordinator(SpotDemoMixin):
                         four_hour, symbol, domain, "4h")
                 except Exception:
                     pass
+        # Independent strategy research runs on the same confirmed-closed cache.
+        # Its output is exposed for inspection but never feeds V3 or execution.
+        edge_candidates = self.edge_strategy_engine.analyze(domain, prepared)
+        self.edge_candidate_snapshots[(domain, symbol)] = edge_candidates
         live_data = {
             "symbol": symbol,
             "source": "binance_websocket_cache",
@@ -1572,7 +1580,8 @@ class TradingCoordinator(SpotDemoMixin):
                 print("[RESEARCH] candidate capture failed: %s" % capture_error)
             self.last_signals[domain] = signal
             return {"symbol": symbol, "source": "binance_websocket_cache",
-                    "signals": {domain: signal}, "data_errors": {}}
+                    "signals": {domain: signal}, "edge_candidates": edge_candidates,
+                    "data_errors": {}}
         except Exception as error:
             return {"symbol": symbol, "source": "binance_websocket_cache",
                     "signals": {}, "data_errors": {domain: str(error)}}
