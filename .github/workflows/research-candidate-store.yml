@@ -24,4 +24,6 @@ jobs:
       - name: Compile research capture
         run: python -m py_compile core/research_candidate_store.py core/research_outcomes.py core/coordinator.py
       - name: Run isolated candidate store tests
-        run: python -m unittest discover -s tests -p 'test_research_*.py' -v
+        run: python -m unittest discover -s tests -p 'test_research_candidate_store.py' -v
+      - name: Run forward outcome tests
+        run: python -m unittest discover -s tests -p 'test_research_outcomes.py' -v
