@@ -71,5 +71,50 @@ class ResearchCandidateStoreTests(unittest.TestCase):
             self.assertEqual(rows[0]["count"], 1)
 
 
+    def test_forward_label_uses_only_later_closed_bars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResearchCandidateStore(Path(tmp) / "research.db")
+            candidate = store.record(
+                "futures", "BTCUSDT", "standard",
+                {"5m": Frame({"open_time": "2026-01-01T00:00:00+00:00"})},
+                {"direction": "LONG", "trade_plan": {
+                    "success": True, "setup": "TEST", "entry": 100,
+                    "stop_loss": 98, "take_profit": 104}},
+            )
+            # Same candle and an unclosed later candle must not label it.
+            same_and_open = [
+                {"open_time": "2026-01-01T00:00:00+00:00",
+                 "high": 110, "low": 90, "is_closed": True},
+                {"open_time": "2026-01-01T00:05:00+00:00",
+                 "high": 105, "low": 99, "is_closed": False},
+            ]
+            self.assertEqual(store.label_pending_from_bars(
+                "futures", "BTCUSDT", same_and_open), 0)
+            later = [
+                {"open_time": "2026-01-01T00:05:00+00:00",
+                 "high": 105, "low": 99, "is_closed": True},
+            ]
+            self.assertEqual(store.label_pending_from_bars(
+                "futures", "BTCUSDT", later), 1)
+            self.assertEqual(store.outcome_summary("futures")[0]["status"],
+                             "TAKE_PROFIT")
+
+    def test_incomplete_horizon_is_not_mislabelled_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ResearchCandidateStore(Path(tmp) / "research.db")
+            store.record(
+                "spot", "ETHUSDT", "standard",
+                {"5m": Frame({"open_time": "2026-01-01T00:00:00+00:00"})},
+                {"direction": "LONG", "trade_plan": {
+                    "success": True, "setup": "TEST", "entry": 100,
+                    "stop_loss": 98, "take_profit": 110}},
+            )
+            later = [{"open_time": "2026-01-01T00:05:00+00:00",
+                      "high": 101, "low": 99, "is_closed": True}]
+            self.assertEqual(store.label_pending_from_bars(
+                "spot", "ETHUSDT", later, horizon=48), 0)
+            self.assertEqual(store.outcome_summary("spot"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
