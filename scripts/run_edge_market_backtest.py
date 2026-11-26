@@ -27,7 +27,12 @@ def fetch(symbol, market, days=30):
                     if not row or row[0].lower().startswith("open"):
                         continue
                     if len(row) < 6: continue
-                    out.append({"open_time":int(row[0]),"open":float(row[1]),"high":float(row[2]),"low":float(row[3]),"close":float(row[4]),"volume":float(row[5])})
+                    stamp = int(row[0])
+                    # Binance Spot archive timestamps switched to microseconds;
+                    # USD-M futures archives remain in milliseconds.
+                    if stamp >= 100_000_000_000_000:
+                        stamp //= 1000
+                    out.append({"open_time":stamp,"open":float(row[1]),"high":float(row[2]),"low":float(row[3]),"close":float(row[4]),"volume":float(row[5])})
         except Exception as exc:
             failures.append({"date":ds,"error":str(exc)})
     # dedupe and sort
