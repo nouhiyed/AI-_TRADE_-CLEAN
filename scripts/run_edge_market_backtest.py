@@ -1,35 +1,49 @@
-"""Fetch public Binance klines and produce a reproducible research report."""
-import json, time, urllib.request
+"""Fetch official Binance Vision daily archives and run edge research."""
+import csv, io, json, urllib.request, zipfile
 from datetime import datetime, timedelta, timezone
 from core.edge_backtest import stress_test
 
-def fetch(symbol, market, days=7):
-    base = "https://fapi.binance.com/fapi/v1/klines" if market=="futures" else "https://api.binance.com/api/v3/klines"
-    start=int((datetime.now(timezone.utc)-timedelta(days=days)).timestamp()*1000)
-    rows=[]
-    while True:
-        url=f"{base}?symbol={symbol}&interval=5m&startTime={start}&limit=1000"
-        req=urllib.request.Request(url,headers={"User-Agent":"edge-research/1.0"})
-        with urllib.request.urlopen(req,timeout=30) as response: batch=json.load(response)
-        if not batch: break
-        rows.extend(batch)
-        start=int(batch[-1][0])+1
-        if len(batch)<1000 or len(rows)>=days*288: break
-        time.sleep(.15)
-    out=[]
-    for k in rows:
-        out.append({"open_time":k[0],"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])})
-    # exclude the still-forming candle
+COLUMNS = ["open_time","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base_volume","taker_buy_quote_volume","ignore"]
+
+def fetch(symbol, market, days=30):
+    kind = "spot" if market == "spot" else "futures/um"
+    today = datetime.now(timezone.utc).date()
+    out = []
+    failures = []
+    for offset in range(days, 0, -1):
+        day = today - timedelta(days=offset)
+        ds = day.strftime("%Y-%m-%d")
+        name = f"{symbol}-5m-{ds}.zip"
+        url = f"https://data.binance.vision/data/{kind}/daily/klines/{symbol}/5m/{name}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent":"edge-research/1.0"})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                payload = resp.read()
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                csvname = next(n for n in archive.namelist() if n.endswith(".csv"))
+                text = io.TextIOWrapper(archive.open(csvname), encoding="utf-8")
+                reader = csv.reader(text)
+                for row in reader:
+                    if not row or row[0].lower().startswith("open"):
+                        continue
+                    if len(row) < 6: continue
+                    out.append({"open_time":int(row[0]),"open":float(row[1]),"high":float(row[2]),"low":float(row[3]),"close":float(row[4]),"volume":float(row[5])})
+        except Exception as exc:
+            failures.append({"date":ds,"error":str(exc)})
+    # dedupe and sort
+    out = sorted({r["open_time"]:r for r in out}.values(),key=lambda r:r["open_time"])
     now=int(datetime.now(timezone.utc).timestamp()*1000)
-    return [x for x in out if x["open_time"]+300000<=now]
+    out=[r for r in out if r["open_time"]+300000<=now]
+    if len(out)<100: raise RuntimeError(f"Insufficient archive bars ({len(out)}); download errors: {failures[-3:]}")
+    return out
 
 def main():
-    report={"disclaimer":"Fixed ATR research simulation only. No execution; futures funding not included; no HTF filter; TIMEOUT exits marked-to-market net of costs.","data_days":7,"results":{}}
+    report={"source":"Binance Vision daily kline ZIP archives","data_days":30,"results":{}}
     for market in ("spot","futures"):
       for symbol in ("BTCUSDT","ETHUSDT"):
         try:
-          bars=fetch(symbol,market)
-          report["results"][market+"/"+symbol]={"bars":len(bars),"start":bars[0]["open_time"] if bars else None,"end":bars[-1]["open_time"] if bars else None,"stress":stress_test(bars,market=market)}
+          bars=fetch(symbol,market,30)
+          report["results"][market+"/"+symbol]={"bars":len(bars),"start":bars[0]["open_time"],"end":bars[-1]["open_time"],"stress":stress_test(bars,market=market)}
         except Exception as e:
           report["results"][market+"/"+symbol]={"error":str(e)}
     with open("edge-report.json","w") as f: json.dump(report,f,indent=2)
