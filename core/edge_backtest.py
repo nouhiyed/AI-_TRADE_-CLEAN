@@ -68,7 +68,8 @@ def _stats(trades):
     gross_win, gross_loss = sum(wins), abs(sum(losses))
     return {
         "signals": len(trades), "closed": len(closed),
-        "timeouts": sum(x["status"] == "TIMEOUT" for x in trades),\n        "resolved": len(closed),
+        "timeouts": sum(x["status"] == "TIMEOUT" for x in trades),
+        "resolved": len(closed),
         "wins": len(wins), "losses": len(losses),
         "win_rate_pct": round(100 * len(wins) / len(closed), 2) if closed else None,
         "net_r": round(sum(values), 4) if values else None,
