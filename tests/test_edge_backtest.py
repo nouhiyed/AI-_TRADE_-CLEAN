@@ -22,6 +22,13 @@ def synthetic_bars(n=520):
 
 
 class EdgeBacktestTests(unittest.TestCase):
+    def test_microsecond_spot_timestamps_normalize_to_milliseconds(self):
+        rows = synthetic_bars(120)
+        rows = [{**row, "open_time": row["open_time"] * 1000} for row in rows]
+        result = run_chronological_backtest(rows, market="spot")
+        self.assertEqual(result["bars"], 120)
+        self.assertLess(result["trades"][-1]["entry_time"], 10_000_000_000_000)
+
     def test_insufficient_history_is_explicit(self):
         result = run_chronological_backtest(synthetic_bars(80))
         self.assertEqual(result["status"], "INSUFFICIENT_DATA")
