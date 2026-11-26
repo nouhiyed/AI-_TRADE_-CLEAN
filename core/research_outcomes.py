@@ -33,6 +33,7 @@ def evaluate_forward_path(direction, entry, stop, target, bars: Iterable[dict],
     if max_bars < 1:
         raise ValueError("max_bars must be positive")
 
+    bars = list(bars)[:max_bars]
     mfe = 0.0
     mae = 0.0
     for index, bar in enumerate(bars):
@@ -63,8 +64,20 @@ def evaluate_forward_path(direction, entry, stop, target, bars: Iterable[dict],
             net_r = (gross - fees) / risk
             return Outcome(reason, index + 1, exit_price, net_r, mfe, mae, reason)
 
-    return Outcome("TIMEOUT", min(max_bars, index + 1 if 'index' in locals() else 0),
-                   None, None, mfe, mae, "HORIZON_NOT_REACHED")
+    bars_seen = len(bars)
+    if bars_seen == 0:
+        return Outcome("TIMEOUT", 0, None, None, mfe, mae, "NO_HORIZON_BARS")
+    raw_exit = float(bars[-1]["close"])
+    effective_entry = (entry + entry * slippage_rate if direction == "LONG"
+                       else entry - entry * slippage_rate)
+    exit_price = (raw_exit - raw_exit * slippage_rate if direction == "LONG"
+                  else raw_exit + raw_exit * slippage_rate)
+    gross = ((exit_price - effective_entry) if direction == "LONG"
+             else (effective_entry - exit_price))
+    fees = (effective_entry + exit_price) * fee_rate
+    net_r = (gross - fees) / risk
+    return Outcome("TIMEOUT", bars_seen, exit_price, net_r, mfe, mae,
+                   "HORIZON_MARK_TO_MARKET")
 
 
 def classify_market_regime(features):
