@@ -3,7 +3,7 @@ import json, time, urllib.request
 from datetime import datetime, timedelta, timezone
 from core.edge_backtest import stress_test
 
-def fetch(symbol, market, days=30):
+def fetch(symbol, market, days=7):
     base = "https://fapi.binance.com/fapi/v1/klines" if market=="futures" else "https://api.binance.com/api/v3/klines"
     start=int((datetime.now(timezone.utc)-timedelta(days=days)).timestamp()*1000)
     rows=[]
@@ -24,7 +24,7 @@ def fetch(symbol, market, days=30):
     return [x for x in out if x["open_time"]+300000<=now]
 
 def main():
-    report={"disclaimer":"Fixed ATR research simulation only. No execution; futures funding not included; no HTF filter; TIMEOUT exits marked-to-market net of costs.","data_days":30,"results":{}}
+    report={"disclaimer":"Fixed ATR research simulation only. No execution; futures funding not included; no HTF filter; TIMEOUT exits marked-to-market net of costs.","data_days":7,"results":{}}
     for market in ("spot","futures"):
       for symbol in ("BTCUSDT","ETHUSDT"):
         try:
