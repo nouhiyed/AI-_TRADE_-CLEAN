@@ -1,0 +1,26 @@
+name: Edge Historical Market Research
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/edge-engine-foundation]
+    paths:
+      - "scripts/run_edge_market_backtest.py"
+      - "core/edge_backtest.py"
+      - "core/research_outcomes.py"
+      - ".github/workflows/edge-historical-market-research.yml"
+jobs:
+  market-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download Binance public history and evaluate
+        run: python scripts/run_edge_market_backtest.py
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-market-backtest-report
+          path: edge-report.json
