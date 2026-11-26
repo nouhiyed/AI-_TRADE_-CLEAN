@@ -30,8 +30,9 @@ def _valid_rows(rows):
             row = {k: float(source[k]) for k in ("open", "high", "low", "close")}
             row["volume"] = float(source.get("volume", 0) or 0)
             stamp = int(float(source.get("open_time", source.get("timestamp"))))
-            if stamp > 10_000_000_000:
-                stamp //= 1
+            # Binance Spot kline timestamps are microseconds; normalize to ms.
+            if stamp >= 100_000_000_000_000:
+                stamp //= 1000
             if row["high"] < max(row["open"], row["close"], row["low"]):
                 continue
             if row["low"] > min(row["open"], row["close"], row["high"]):
