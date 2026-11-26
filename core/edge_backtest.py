@@ -61,14 +61,14 @@ def _atr(rows, period=14):
 
 
 def _stats(trades):
-    closed = [x for x in trades if x["status"] in ("STOP_LOSS", "TAKE_PROFIT")]
+    closed = [x for x in trades if x["status"] in ("STOP_LOSS", "TAKE_PROFIT", "TIMEOUT")]
     values = [x["result_r"] for x in closed if x["result_r"] is not None]
     wins = [x for x in values if x > 0]
     losses = [x for x in values if x < 0]
     gross_win, gross_loss = sum(wins), abs(sum(losses))
     return {
         "signals": len(trades), "closed": len(closed),
-        "timeouts": sum(x["status"] == "TIMEOUT" for x in trades),
+        "timeouts": sum(x["status"] == "TIMEOUT" for x in trades),\n        "resolved": len(closed),
         "wins": len(wins), "losses": len(losses),
         "win_rate_pct": round(100 * len(wins) / len(closed), 2) if closed else None,
         "net_r": round(sum(values), 4) if values else None,
