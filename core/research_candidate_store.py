@@ -293,7 +293,7 @@ class ResearchCandidateStore:
                     row.get("open_time", row.get("open_time_ms", row.get("timestamp", row.get("time"))))
                 )
                 if stamp is not None and stamp > candidate_dt:
-                future.append({"high": row["high"], "low": row["low"], "close": row["close"]})
+                    future.append({"high": row["high"], "low": row["low"], "close": row["close"]})
             if not future:
                 continue
             outcome = evaluate_forward_path(
