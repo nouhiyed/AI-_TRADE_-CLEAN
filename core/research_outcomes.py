@@ -34,6 +34,8 @@ def evaluate_forward_path(direction, entry, stop, target, bars: Iterable[dict],
         raise ValueError("max_bars must be positive")
 
     bars = list(bars)[:max_bars]
+    if len(bars) < max_bars:
+        return Outcome(\"INCOMPLETE\", len(bars), None, None, 0.0, 0.0, \"INSUFFICIENT_FORWARD_HORIZON\")
     mfe = 0.0
     mae = 0.0
     for index, bar in enumerate(bars):
