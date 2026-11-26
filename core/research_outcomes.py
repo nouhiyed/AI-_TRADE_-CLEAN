@@ -35,7 +35,6 @@ def evaluate_forward_path(direction, entry, stop, target, bars: Iterable[dict],
 
     bars = list(bars)[:max_bars]
     if len(bars) < max_bars:
-        return Outcome("INCOMPLETE", len(bars), None, None, 0.0, 0.0, "INSUFFICIENT_FORWARD_HORIZON")
     mfe = 0.0
     mae = 0.0
     for index, bar in enumerate(bars):
@@ -66,6 +65,9 @@ def evaluate_forward_path(direction, entry, stop, target, bars: Iterable[dict],
             net_r = (gross - fees) / risk
             return Outcome(reason, index + 1, exit_price, net_r, mfe, mae, reason)
 
+    if bars_seen < max_bars:
+        return Outcome("INCOMPLETE", bars_seen, None, None, mfe, mae,
+                       "INSUFFICIENT_FORWARD_HORIZON")
     bars_seen = len(bars)
     if bars_seen == 0:
         return Outcome("TIMEOUT", 0, None, None, mfe, mae, "NO_HORIZON_BARS")
