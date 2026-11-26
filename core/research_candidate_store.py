@@ -293,7 +293,7 @@ class ResearchCandidateStore:
                     row.get("open_time", row.get("open_time_ms", row.get("timestamp", row.get("time"))))
                 )
                 if stamp is not None and stamp > candidate_dt:
-                    future.append({"high": row["high"], "low": row["low"]})
+                future.append({"high": row["high"], "low": row["low"], "close": row["close"]})
             if not future:
                 continue
             outcome = evaluate_forward_path(
@@ -301,8 +301,8 @@ class ResearchCandidateStore:
                 max_bars=int(horizon), fee_rate=fee_rate,
                 slippage_rate=slippage_rate,
             )
-            # A horizon timeout is only final when the complete horizon exists.
-            if outcome.status == "TIMEOUT" and len(future) < int(horizon):
+            # An incomplete path is never persisted as a final outcome.
+            if outcome.status == "INCOMPLETE":
                 continue
             if self.record_outcome(candidate_id, outcome):
                 labelled += 1
@@ -317,6 +317,8 @@ class ResearchCandidateStore:
                     max_bars=int(horizon), fee_rate=fee,
                     slippage_rate=slip,
                 )
+                if stressed.status == "INCOMPLETE":
+                    continue
                 self.record_stress_outcome(
                     candidate_id, name, stressed, fee, slip
                 )
