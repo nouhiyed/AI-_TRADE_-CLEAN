@@ -1,7 +1,8 @@
 """Fetch official Binance Vision daily archives and run edge research."""
 import csv, io, json, urllib.request, zipfile
 from datetime import datetime, timedelta, timezone
-from core.edge_backtest import stress_test\nfrom core.edge_portfolio import non_overlapping_replay
+from core.edge_backtest import stress_test
+from core.edge_portfolio import non_overlapping_replay
 
 COLUMNS = ["open_time","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base_volume","taker_buy_quote_volume","ignore"]
 
