@@ -1,7 +1,7 @@
 """Fetch official Binance Vision daily archives and run edge research."""
 import csv, io, json, urllib.request, zipfile
 from datetime import datetime, timedelta, timezone
-from core.edge_backtest import stress_test
+from core.edge_backtest import stress_test\nfrom core.edge_portfolio import non_overlapping_replay
 
 COLUMNS = ["open_time","open","high","low","close","volume","close_time","quote_volume","trades","taker_buy_base_volume","taker_buy_quote_volume","ignore"]
 
@@ -48,7 +48,7 @@ def main():
       for symbol in ("BTCUSDT","ETHUSDT"):
         try:
           bars=fetch(symbol,market,30)
-          report["results"][market+"/"+symbol]={"bars":len(bars),"start":bars[0]["open_time"],"end":bars[-1]["open_time"],"stress":stress_test(bars,market=market)}
+          report["results"][market+"/"+symbol]={"bars":len(bars),"start":bars[0]["open_time"],"end":bars[-1]["open_time"],"stress":stress_test(bars,market=market),"non_overlap_replay":non_overlapping_replay(bars,market=market)}
         except Exception as e:
           report["results"][market+"/"+symbol]={"error":str(e)}
     with open("edge-report.json","w") as f: json.dump(report,f,indent=2)
