@@ -1,0 +1,31 @@
+name: Retained Trailing Exit Sweep
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - research/trailing-retained-exit-sweep
+    paths:
+      - 'scripts/trailing_exit_sweep.py'
+      - '.github/workflows/trailing-exit-sweep.yml'
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run retained trailing sweep
+        run: |
+          PYTHONPATH=scripts:. python scripts/trailing_exit_sweep.py \
+            --symbols "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT" \
+            --out data/trailing_exit_sweep
+      - uses: actions/upload-artifact@v4
+        with:
+          name: retained-trailing-exit-sweep
+          path: data/trailing_exit_sweep/
+          retention-days: 30
